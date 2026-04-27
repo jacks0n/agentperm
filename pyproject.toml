@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llm-agent-bridge"
+version = "0.1.0"
+description = "Permission policy mediator for Claude Code, Codex, OpenCode, and Gemini CLI."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+authors = [{ name = "Jackson Cooper", email = "jackson@jacksonc.com" }]
+keywords = ["claude-code", "codex", "opencode", "gemini-cli", "permissions", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "bashlex>=0.18,<0.19",
+    "pyjson5>=2.0,<3",
+    "tomlkit>=0.13,<0.14",
+]
+
+[project.urls]
+Homepage = "https://github.com/jacks0n/llm-agent-bridge"
+Repository = "https://github.com/jacks0n/llm-agent-bridge"
+Issues = "https://github.com/jacks0n/llm-agent-bridge/issues"
+
+[project.scripts]
+llm-agent-bridge = "llm_agent_bridge:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "basedpyright>=1.13",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_agent_bridge"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/", "tests/", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.basedpyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+# bashlex ships no stubs and tomlkit's stubs are partial. We narrow both at the boundary
+# (see _node_* helpers and the tomlkit isinstance() checks) — domain code never sees Unknown.
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
