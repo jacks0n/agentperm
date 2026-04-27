@@ -290,7 +290,12 @@ def _format_rule(rule: Rule, decision: Decision) -> str:
 
 
 def _stricter(left: Verdict, right: Verdict) -> Verdict:
-    return left if _STRICTNESS[left.decision] >= _STRICTNESS[right.decision] else right
+    if _STRICTNESS[left.decision] > _STRICTNESS[right.decision]:
+        return left
+    if _STRICTNESS[right.decision] > _STRICTNESS[left.decision]:
+        return right
+    # Tie on strictness: prefer the side with an informative rationale.
+    return left if left.rationale else right
 
 
 def aggregate(verdicts: list[Verdict]) -> Verdict:
@@ -1245,19 +1250,23 @@ def _cmd_check(agent: AgentName, event: str) -> int:
     try:
         raw_payload: object = json.load(sys.stdin)
     except json.JSONDecodeError:
+        _trace(agent, event, None, None, "json decode failed")
         json.dump({}, sys.stdout)
         return 0
     try:
         payload_value = narrow_json(raw_payload)
     except PolicyError:
+        _trace(agent, event, None, None, "payload narrow failed")
         json.dump({}, sys.stdout)
         return 0
     if not isinstance(payload_value, dict):
+        _trace(agent, event, None, None, "payload not object")
         json.dump({}, sys.stdout)
         return 0
     payload: JsonObject = payload_value
     request = adapter.parse_event(payload, event)
     if request is None:
+        _trace(agent, event, payload, None, "request unparseable")
         json.dump({}, sys.stdout)
         return 0
     cwd_value = payload.get("cwd")
@@ -1266,12 +1275,40 @@ def _cmd_check(agent: AgentName, event: str) -> int:
         policy = merged_policy(local_root=project_root(cwd))
     except PolicyError as error:
         # Fail closed: prompt rather than auto-allow when the policy file is broken.
+        _trace(agent, event, payload, None, f"policy load failed: {error}")
         adapter.write_verdict(Verdict(Decision.Ask, f"policy load failed: {error}"), event)
         return 0
     verdict = policy.decide(request)
     verdict = coerce_for_permission_mode(verdict, payload)
+    _trace(agent, event, payload, verdict, None)
     adapter.write_verdict(verdict, event)
     return 0
+
+
+def _trace(
+    agent: AgentName, event: str, payload: JsonObject | None, verdict: Verdict | None, note: str | None
+) -> None:
+    """Append one JSON line per invocation to ``$LLM_AGENT_BRIDGE_TRACE`` if set.
+
+    Off by default. Set the env var to a writable path to enable. Used to debug whether the
+    bridge is actually being called for a given command.
+    """
+    target = os.environ.get("LLM_AGENT_BRIDGE_TRACE")
+    if not target:
+        return
+    record: JsonObject = {
+        "agent": agent.value,
+        "event": event,
+        "payload": payload,
+        "note": note,
+    }
+    if verdict is not None:
+        record["verdict"] = {"decision": verdict.decision.value, "rationale": verdict.rationale}
+    try:
+        with open(target, "a") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except OSError:
+        pass
 
 
 def coerce_for_permission_mode(verdict: Verdict, payload: JsonObject) -> Verdict:
