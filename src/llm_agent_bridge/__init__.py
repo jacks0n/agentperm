@@ -1,15 +1,15 @@
 """Permission policy mediator for Claude Code, Codex, OpenCode, and Gemini CLI.
 
 The user maintains one policy file (``~/.agent-permissions.jsonc``); this module
-installs a hook into each agent that consults the policy at runtime.
+is called by agent hooks configured outside the bridge.
 
 Module layout:
     Domain        — Decision, Verdict, Rule, Request, Pipeline, Segment, Policy
-    Shell         — bashlex -> Pipeline
+    Shell         — Tree-sitter Bash -> Pipeline
     Rule I/O      — string/dict <-> Rule
     Policy I/O    — file <-> Policy
     Adapter       — AgentAdapter ABC + Claude/Codex/Opencode/Gemini implementations
-    CLI           — install, import, check, edit
+    CLI           — import, check, edit
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -29,14 +30,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import ClassVar
 
-import bashlex
-import bashlex.errors
 import pyjson5
 import tomlkit
-import tomlkit.items
+import tree_sitter_bash
+from tree_sitter import Language, Node, Parser
 
 POLICY_FILENAME = ".agent-permissions.jsonc"
-BRIDGE_HOOK_MARKER = "llm-agent-bridge"
 
 
 # -----------------------------------------------------------------------------
@@ -48,8 +47,6 @@ type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 type JsonObject = dict[str, JsonValue]
 type JsonArray = list[JsonValue]
-
-
 def narrow_json(value: object) -> JsonValue:
     """Convert untyped JSON output (json.load / pyjson5.decode) into a typed JsonValue.
 
@@ -87,10 +84,25 @@ class Decision(StrEnum):
 
 
 class AgentName(StrEnum):
+    Auto = "auto"
     Claude = "claude"
     Codex = "codex"
     Opencode = "opencode"
     Gemini = "gemini"
+
+
+class InstallMode(StrEnum):
+    """Where ``install`` writes hook entries.
+
+    ``Rulesync`` — merge into ``~/.rulesync/hooks.json``; user re-runs rulesync to
+    materialise per-tool configs. ``Direct`` — merge straight into per-tool configs
+    (Claude ``settings.json``, Codex ``hooks.json``+``config.toml``, Gemini ``settings.json``).
+    OpenCode plugin is always written directly regardless of mode (rulesync has no
+    schema for ``permission.ask`` plugins).
+    """
+
+    Rulesync = "rulesync"
+    Direct = "direct"
 
 
 _STRICTNESS = {Decision.Deny: 3, Decision.Ask: 2, Decision.Allow: 1, Decision.NoOpinion: 0}
@@ -336,11 +348,11 @@ def _evaluate_redirect(r: Redirect) -> Verdict:
 
 
 # -----------------------------------------------------------------------------
-# Shell parser (bashlex -> Pipeline)
+# Shell parser (Tree-sitter Bash -> Pipeline)
 #
-# bashlex is dynamically typed. The narrowing helpers below are the only place
-# that talks to bashlex's untyped attributes; everything outside this section
-# only sees the typed Pipeline/Segment/Redirect domain types.
+# Tree-sitter exposes generic Node objects with grammar-specific ``type`` strings.
+# The helpers below are the only place that talks to that boundary; everything
+# outside this section only sees the typed Pipeline/Segment/Redirect domain types.
 # -----------------------------------------------------------------------------
 
 
@@ -349,107 +361,108 @@ class _UnsupportedShellError(Exception):
 
 
 _SHELL_COMMANDS = frozenset({"bash", "sh", "zsh"})
+_BASH_LANGUAGE = Language(tree_sitter_bash.language())
+_BASH_PARSER = Parser()
+_BASH_PARSER.language = _BASH_LANGUAGE
+
+# Argument-position nodes whose literal source text is safe to treat as opaque
+# argument text. Variable values aren't expanded at parse time, so argv[0] rule
+# matching is unaffected. ``_node_contains_substitution`` still rejects anything
+# nesting a command/process substitution, so e.g. ``cat foo$(date)`` is blocked
+# even though the outer node here is a ``concatenation``.
+_OPAQUE_ARG_TYPES = frozenset({
+    "word", "number", "string", "raw_string",
+    "simple_expansion", "expansion", "concatenation",
+    "arithmetic_expansion", "ansi_c_string", "translated_string",
+})
+
+# Subset valid as children of a ``string`` node (i.e. inside double quotes).
+# ``concatenation`` doesn't appear here — strings are leaves in tree-sitter-bash.
+_STRING_CHILD_TYPES = frozenset({
+    "string_content", "simple_expansion", "expansion", "arithmetic_expansion",
+})
 
 
 def parse_pipeline(command: str) -> Pipeline:
     if not command.strip():
         return Pipeline(segments=(), parseable=True)
-    try:
-        trees = bashlex.parse(command)
-    except (bashlex.errors.ParsingError, NotImplementedError) as error:
-        return Pipeline((), parseable=False, unparseable_reason=f"bashlex: {error}")
+    source = command.encode()
+    tree = _BASH_PARSER.parse(source)
+    if tree.root_node.has_error:
+        return Pipeline((), parseable=False, unparseable_reason="tree-sitter: shell syntax error")
     segments: list[Segment] = []
     try:
-        for tree in trees:
-            segments.extend(_extract_segments(tree))
+        segments.extend(_extract_segments(tree.root_node, source))
     except _UnsupportedShellError as error:
         return Pipeline((), parseable=False, unparseable_reason=str(error))
     return Pipeline(tuple(segments), parseable=True)
 
 
-def _node_kind(node: object) -> str:
-    kind = getattr(node, "kind", None)
-    if not isinstance(kind, str):
-        raise _UnsupportedShellError("bashlex node missing 'kind'")
-    return kind
-
-
-def _node_parts(node: object) -> list[object]:
-    parts = getattr(node, "parts", None)
-    if isinstance(parts, list):
-        return list(parts)
-    return []
-
-
-def _node_compound_list(node: object) -> list[object]:
-    items = getattr(node, "list", None)
-    if isinstance(items, list):
-        return list(items)
-    return []
-
-
-def _node_word(node: object) -> str:
-    word = getattr(node, "word", None)
-    if not isinstance(word, str):
-        raise _UnsupportedShellError("bashlex word node missing 'word'")
-    return word
-
-
-def _node_int_attr(node: object, attr: str) -> int | None:
-    value = getattr(node, attr, None)
-    if isinstance(value, bool):
-        return None
-    return value if isinstance(value, int) else None
-
-
-def _extract_segments(node: object) -> Iterator[Segment]:
-    kind = _node_kind(node)
-    if kind == "command":
-        segment = _build_segment(node)
+def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
+    if node.type == "command":
+        segment = _build_segment(node, source)
         unwrapped = _unwrap_shell_c(segment)
         if unwrapped is not None:
             yield from unwrapped
             return
         yield segment
         return
-    if kind in ("list", "pipeline"):
-        for child in _node_parts(node):
-            child_kind = _node_kind(child)
-            if child_kind in ("operator", "pipe", "reservedword"):
-                continue
-            yield from _extract_segments(child)
+    if node.type == "redirected_statement":
+        yield _build_redirected_segment(node, source)
         return
-    if kind == "compound":
-        for child in _node_compound_list(node):
-            yield from _extract_segments(child)
+    if node.type in ("program", "list", "pipeline", "do_group"):
+        for child in node.named_children:
+            yield from _extract_segments(child, source)
         return
-    raise _UnsupportedShellError(f"unsupported shell node {kind!r}")
+    if node.type == "for_statement":
+        for child in node.named_children:
+            if child.type == "do_group":
+                yield from _extract_segments(child, source)
+        return
+    raise _UnsupportedShellError(f"unsupported shell node {node.type!r}")
 
 
-def _build_segment(command_node: object) -> Segment:
+def _build_segment(command_node: Node, source: bytes) -> Segment:
     argv: list[str] = []
-    redirects: list[Redirect] = []
-    for part in _node_parts(command_node):
-        kind = _node_kind(part)
-        if kind == "word":
-            if _word_has_command_substitution(part):
-                raise _UnsupportedShellError("command/process substitution requires approval")
-            argv.append(_node_word(part))
-        elif kind == "redirect":
-            redirects.append(_build_redirect(part))
-        elif kind == "assignment":
-            # bashlex marks leading ``FOO=bar`` env-assignment words as kind="assignment";
+    for child in command_node.named_children:
+        if _node_contains_substitution(child):
+            raise _UnsupportedShellError("command/process substitution requires approval")
+        if child.type == "variable_assignment":
+            # Tree-sitter marks leading ``FOO=bar`` env-assignment words as variable assignments;
             # they are not part of the executed command's argv.
             continue
-    return Segment(tuple(argv), tuple(redirects))
+        if child.type == "command_name":
+            argv.append(_node_text(child, source))
+            continue
+        if child.type in _OPAQUE_ARG_TYPES:
+            argv.append(_argument_text(child, source))
+            continue
+        raise _UnsupportedShellError(f"unsupported command part {child.type!r}")
+    return Segment(tuple(argv), ())
+
+
+def _build_redirected_segment(node: Node, source: bytes) -> Segment:
+    segment: Segment | None = None
+    redirects: list[Redirect] = []
+    for child in node.named_children:
+        if child.type == "command":
+            segment = _build_segment(child, source)
+            continue
+        if child.type == "file_redirect":
+            redirects.append(_build_redirect(child, source))
+            continue
+        raise _UnsupportedShellError(f"unsupported redirected statement part {child.type!r}")
+    if segment is None:
+        raise _UnsupportedShellError("redirected statement missing command")
+    return Segment(segment.argv, tuple(redirects))
 
 
 def _unwrap_shell_c(segment: Segment) -> tuple[Segment, ...] | None:
     """``bash -c "ls -la"`` → segments of the inner command. None if not a shell-wrapper.
 
-    bashlex strips the surrounding quotes from the ``-c`` argument at the word level,
-    so the inner command is just ``segment.argv[2]``. We re-parse it via the same
-    pipeline so any compound/redirect structure inside is faithfully preserved.
+    Tree-sitter string arguments are normalized before this point, so the inner
+    command is just ``segment.argv[2]``. We re-parse it via the same pipeline so
+    any compound/redirect structure inside is faithfully preserved.
     """
     if len(segment.argv) < 3 or _basename(segment.argv[0]) not in _SHELL_COMMANDS:
         return None
@@ -461,26 +474,69 @@ def _unwrap_shell_c(segment: Segment) -> tuple[Segment, ...] | None:
     return inner.segments
 
 
-def _word_has_command_substitution(word_node: object) -> bool:
-    for part in _node_parts(word_node):
-        kind = getattr(part, "kind", None)
-        if isinstance(kind, str) and kind in ("commandsubstitution", "processsubstitution"):
+def _node_contains_substitution(node: Node) -> bool:
+    for child in node.children:
+        if child.type in ("command_substitution", "process_substitution"):
+            return True
+        if _node_contains_substitution(child):
             return True
     return False
 
 
-def _build_redirect(node: object) -> Redirect:
-    op = getattr(node, "type", None)
-    if not isinstance(op, str):
-        raise _UnsupportedShellError("bashlex redirect missing 'type'")
-    fd = _node_int_attr(node, "input")
-    output = getattr(node, "output", None)
-    if isinstance(output, int) and not isinstance(output, bool):
-        return Redirect(fd=fd, op=op, target=str(output), is_fd_dup=True)
-    word = getattr(output, "word", None) if output is not None else None
-    if isinstance(word, str):
-        return Redirect(fd=fd, op=op, target=word, is_fd_dup=False)
-    raise _UnsupportedShellError("bashlex redirect target unparseable")
+def _build_redirect(node: Node, source: bytes) -> Redirect:
+    fd: int | None = None
+    op: str | None = None
+    target: str | None = None
+    for child in node.children:
+        if child.type == "file_descriptor":
+            fd = int(_node_text(child, source))
+            continue
+        if child.type in (">", ">>", "<", ">&", "&>"):
+            op = child.type
+            continue
+        if child.is_named and child.type in ("word", "number"):
+            target = _node_text(child, source)
+            continue
+    if op is None or target is None:
+        raise _UnsupportedShellError("redirect target unparseable")
+    return Redirect(fd=fd, op=op, target=target, is_fd_dup=op == ">&")
+
+
+def _argument_text(node: Node, source: bytes) -> str:
+    if node.type == "string":
+        return _string_text(node, source)
+    if node.type == "raw_string":
+        # ``raw_string`` is a leaf in tree-sitter-bash (no named children); the
+        # body lives in the unnamed bytes between the surrounding single quotes.
+        text = _node_text(node, source)
+        if len(text) >= 2 and text.startswith("'") and text.endswith("'"):
+            return text[1:-1]
+        return text
+    if node.type == "ansi_c_string":
+        # ``$'...'``: strip the ``$'`` prefix and trailing ``'``. Escape sequences
+        # aren't interpreted — the literal content is sufficient for argv-prefix
+        # rule matching, and not interpreting is the conservative choice.
+        text = _node_text(node, source)
+        if len(text) >= 3 and text.startswith("$'") and text.endswith("'"):
+            return text[2:-1]
+        return text
+    if node.type in _OPAQUE_ARG_TYPES:
+        return _node_text(node, source)
+    raise _UnsupportedShellError(f"unsupported argument node {node.type!r}")
+
+
+def _string_text(node: Node, source: bytes) -> str:
+    parts: list[str] = []
+    for child in node.named_children:
+        if child.type in _STRING_CHILD_TYPES:
+            parts.append(_node_text(child, source))
+            continue
+        raise _UnsupportedShellError(f"unsupported string part {child.type!r}")
+    return "".join(parts)
+
+
+def _node_text(node: Node, source: bytes) -> str:
+    return source[node.start_byte : node.end_byte].decode()
 
 
 # -----------------------------------------------------------------------------
@@ -635,39 +691,9 @@ def write_default_policy(path: Path) -> None:
     default: JsonObject = {
         "version": 1,
         "permissions": {
-            "allow": [
-                "Bash(cat:*)",
-                "Bash(echo:*)",
-                "Bash(grep:*)",
-                "Bash(head:*)",
-                "Bash(ls:*)",
-                "Bash(pwd)",
-                "Bash(rg:*)",
-                "Bash(tail:*)",
-                "Bash(test -f:*)",
-                "Bash(wc:*)",
-                "Bash(which:*)",
-                "Bash(git status)",
-                "Bash(git status:*)",
-                "Bash(git diff:*)",
-                "Bash(git log:*)",
-                "Read",
-                "Glob",
-                "Grep",
-            ],
-            "ask": [
-                {
-                    "tool": "Bash",
-                    "command": ["sed", "gsed"],
-                    "when": {"hasOption": ["-i", "--in-place"]},
-                    "reason": "sed in-place editing changes files",
-                },
-            ],
-            "deny": [
-                "Bash(sudo:*)",
-                "Bash(su:*)",
-                "Bash(rm -rf /*)",
-            ],
+            "allow": [],
+            "ask": [],
+            "deny": [],
         },
     }
     _atomic_write(path, json.dumps(default, indent=2) + "\n")
@@ -681,10 +707,6 @@ def write_default_policy(path: Path) -> None:
 class AgentAdapter(ABC):
     name: ClassVar[AgentName]
 
-    @abstractmethod
-    def install(self) -> Path | None:
-        """Write whatever config the agent needs to invoke the bridge. Return the path written, or None if no change."""
-
     def import_native_rules(self) -> Iterator[tuple[Decision, Rule]]:
         return iter(())
 
@@ -694,6 +716,37 @@ class AgentAdapter(ABC):
     def write_verdict(self, verdict: Verdict, event_name: str) -> None:
         json.dump({}, sys.stdout)
 
+    def install(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
+        """Wire the bridge into this agent's hook config.
+
+        Returns the list of paths the install touched (or would touch under
+        ``dry_run``). An empty list means "already up to date".
+        """
+        return []
+
+
+def _pretooluse_output(decision: Decision, rationale: str) -> JsonObject:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision.value,
+            "permissionDecisionReason": rationale,
+        }
+    }
+
+
+def _permission_request_output(decision: Decision, rationale: str) -> JsonObject:
+    if decision is Decision.Allow:
+        return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}
+    if decision is Decision.Deny:
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "deny", "message": rationale},
+            }
+        }
+    return {}
+
 
 # ---------- Claude ----------
 
@@ -701,18 +754,6 @@ class AgentAdapter(ABC):
 class ClaudeAdapter(AgentAdapter):
     name = AgentName.Claude
     settings_path: ClassVar[Path] = Path.home() / ".claude/settings.json"
-
-    def install(self) -> Path | None:
-        settings = _read_json(self.settings_path)
-        hooks = _section(settings, "hooks")
-        pre_tool_use = _ensure_list(hooks, "PreToolUse")
-        new_groups = _strip_bridge_groups(pre_tool_use)
-        new_groups.append(_hook_group("*", agent="claude", event="PreToolUse"))
-        if new_groups == pre_tool_use:
-            return None
-        hooks["PreToolUse"] = new_groups
-        _atomic_write(self.settings_path, json.dumps(settings, indent=2) + "\n")
-        return self.settings_path
 
     def import_native_rules(self) -> Iterator[tuple[Decision, Rule]]:
         for path in (self.settings_path, self.settings_path.with_name("settings.local.json")):
@@ -749,14 +790,32 @@ class ClaudeAdapter(AgentAdapter):
         if verdict.decision is Decision.NoOpinion:
             json.dump({}, sys.stdout)
             return
-        output: JsonObject = {
-            "hookSpecificOutput": {
-                "hookEventName": event_name,
-                "permissionDecision": verdict.decision.value,
-                "permissionDecisionReason": verdict.rationale,
-            }
-        }
-        json.dump(output, sys.stdout)
+        if event_name == "PreToolUse":
+            json.dump(_pretooluse_output(verdict.decision, verdict.rationale), sys.stdout)
+            return
+        if event_name == "PermissionRequest":
+            json.dump(_permission_request_output(verdict.decision, verdict.rationale), sys.stdout)
+            return
+        json.dump({}, sys.stdout)
+
+    def install(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
+        # Claude doesn't fire ``PermissionRequest`` — strip any bridge entry that
+        # made it there from an older or third-party installer.
+        if mode is InstallMode.Rulesync:
+            return _merge_rulesync_hooks(
+                block="claudecode",
+                add=[("preToolUse", "PreToolUse", "*")],
+                strip=["permissionRequest"],
+                agent_name="claude",
+                dry_run=dry_run,
+            )
+        return _merge_nested_hooks(
+            self.settings_path,
+            add=[("PreToolUse", "*")],
+            strip=["PermissionRequest"],
+            agent_name="claude",
+            dry_run=dry_run,
+        )
 
 
 # ---------- Codex ----------
@@ -764,42 +823,8 @@ class ClaudeAdapter(AgentAdapter):
 
 class CodexAdapter(AgentAdapter):
     name = AgentName.Codex
-    hooks_path: ClassVar[Path] = Path.home() / ".codex/hooks.json"
     config_path: ClassVar[Path] = Path.home() / ".codex/config.toml"
-
-    def install(self) -> Path | None:
-        hooks_config = _read_json(self.hooks_path)
-        hooks = _section(hooks_config, "hooks")
-
-        pre_tool_use = _strip_bridge_groups(_ensure_list(hooks, "PreToolUse"))
-        pre_tool_use.append(_hook_group("Bash", agent="codex", event="PreToolUse"))
-        hooks["PreToolUse"] = pre_tool_use
-
-        permission_request = _strip_bridge_groups(_ensure_list(hooks, "PermissionRequest"))
-        permission_request.append(
-            _hook_group(
-                "Bash|apply_patch|mcp__.*",
-                agent="codex",
-                event="PermissionRequest",
-                status_message="Checking llm-agent-bridge policy",
-            )
-        )
-        hooks["PermissionRequest"] = permission_request
-
-        _atomic_write(self.hooks_path, json.dumps(hooks_config, indent=2) + "\n")
-        self._enable_codex_hooks()
-        return self.hooks_path
-
-    def _enable_codex_hooks(self) -> None:
-        doc = tomlkit.parse(self.config_path.read_text()) if self.config_path.exists() else tomlkit.document()
-        features = doc.get("features")
-        if not isinstance(features, tomlkit.items.Table):
-            features = tomlkit.table()
-            doc["features"] = features
-        if features.get("codex_hooks") is True:
-            return
-        features["codex_hooks"] = True
-        _atomic_write(self.config_path, tomlkit.dumps(doc))
+    hooks_path: ClassVar[Path] = Path.home() / ".codex/hooks.json"
 
     def import_native_rules(self) -> Iterator[tuple[Decision, Rule]]:
         rules_dir = self.config_path.parent / "rules"
@@ -830,45 +855,72 @@ class CodexAdapter(AgentAdapter):
         return ClaudeAdapter().parse_event(payload, event_name)
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> None:
+        # Codex's two events split responsibilities: PreToolUse is the fast-path
+        # veto (Deny only), PermissionRequest is where we may pre-approve. Allow
+        # / Ask on PreToolUse fall through to Codex's normal flow so the user
+        # still sees a prompt for anything not explicitly denied.
         if event_name == "PreToolUse":
             if verdict.decision is Decision.Deny:
-                json.dump(
-                    {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": verdict.rationale,
-                        }
-                    },
-                    sys.stdout,
-                )
+                json.dump(_pretooluse_output(Decision.Deny, verdict.rationale), sys.stdout)
                 return
             json.dump({}, sys.stdout)
             return
         if event_name == "PermissionRequest":
             if verdict.decision is Decision.Allow:
-                json.dump(
-                    {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PermissionRequest",
-                            "decision": {"behavior": "allow"},
-                        }
-                    },
-                    sys.stdout,
-                )
+                json.dump(_permission_request_output(Decision.Allow, verdict.rationale), sys.stdout)
                 return
             if verdict.decision is Decision.Deny:
-                json.dump(
-                    {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PermissionRequest",
-                            "decision": {"behavior": "deny", "message": verdict.rationale},
-                        }
-                    },
-                    sys.stdout,
-                )
+                json.dump(_permission_request_output(Decision.Deny, verdict.rationale), sys.stdout)
                 return
         json.dump({}, sys.stdout)
+
+    def install(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
+        if mode is InstallMode.Rulesync:
+            # rulesync owns enabling [features].codex_hooks; we only emit hook entries.
+            return _merge_rulesync_hooks(
+                block="codexcli",
+                add=[
+                    ("preToolUse", "PreToolUse", ".*"),
+                    ("permissionRequest", "PermissionRequest", ".*"),
+                ],
+                strip=[],
+                agent_name="codex",
+                dry_run=dry_run,
+            )
+        touched = _merge_nested_hooks(
+            self.hooks_path,
+            add=[("PreToolUse", "Bash"), ("PermissionRequest", "Bash|apply_patch|mcp__.*")],
+            strip=[],
+            agent_name="codex",
+            dry_run=dry_run,
+        )
+        touched.extend(_enable_codex_hooks_feature(self.config_path, dry_run=dry_run))
+        return touched
+
+
+def _enable_codex_hooks_feature(path: Path, *, dry_run: bool) -> list[Path]:
+    """Ensure ``[features] codex_hooks = true`` in ``~/.codex/config.toml``.
+
+    Codex gates hook execution behind this feature flag; the hook entries in
+    ``hooks.json`` are inert until it is set.
+    """
+    if path.exists():
+        try:
+            doc = tomlkit.parse(path.read_text())
+        except Exception as error:
+            raise PolicyError(f"{path}: {error}") from error
+    else:
+        doc = tomlkit.document()
+    features = doc.get("features")
+    if not isinstance(features, dict):
+        features = tomlkit.table()
+        doc["features"] = features
+    if features.get("codex_hooks") is True:
+        return []
+    features["codex_hooks"] = True
+    if not dry_run:
+        _atomic_write(path, tomlkit.dumps(doc))
+    return [path]
 
 
 def _parse_codex_prefix_rules(text: str) -> Iterator[tuple[list[str], str]]:
@@ -888,7 +940,7 @@ def _parse_codex_prefix_rules(text: str) -> Iterator[tuple[list[str], str]]:
 
 _OPENCODE_PLUGIN_TEMPLATE = """import {{ spawnSync }} from "node:child_process";
 
-const bridge = "{bridge}";
+const bridge = {bridge};
 
 function bridgeDecision(payload) {{
   const proc = spawnSync(
@@ -919,15 +971,8 @@ export const AgentBridgePlugin = async (input) => ({{
 
 class OpencodeAdapter(AgentAdapter):
     name = AgentName.Opencode
-    plugin_path: ClassVar[Path] = Path.home() / ".config/opencode/plugins/agent-bridge.js"
     config_path: ClassVar[Path] = Path.home() / ".config/opencode/opencode.json"
-
-    def install(self) -> Path | None:
-        contents = _OPENCODE_PLUGIN_TEMPLATE.format(bridge=BRIDGE_HOOK_MARKER)
-        if self.plugin_path.exists() and self.plugin_path.read_text() == contents:
-            return None
-        _atomic_write(self.plugin_path, contents)
-        return self.plugin_path
+    plugin_path: ClassVar[Path] = Path.home() / ".config/opencode/plugins/agent-bridge.js"
 
     def import_native_rules(self) -> Iterator[tuple[Decision, Rule]]:
         for path in (self.config_path, self.config_path.with_suffix(".jsonc")):
@@ -978,6 +1023,23 @@ class OpencodeAdapter(AgentAdapter):
             return
         json.dump({"status": verdict.decision.value, "reason": verdict.rationale}, sys.stdout)
 
+    def install(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
+        """Always writes the OpenCode plugin shim regardless of ``mode``.
+
+        rulesync has no ``permission.ask`` plugin emitter — there is no schema for
+        it — so the plugin is always installed directly. The plugin embeds the
+        absolute path to ``llm-agent-bridge`` resolved at install time, JSON-quoted
+        so paths containing backslashes or quotes survive interpolation into a JS
+        string literal.
+        """
+        bridge_literal = json.dumps(_resolve_bridge_command())
+        contents = _OPENCODE_PLUGIN_TEMPLATE.format(bridge=bridge_literal)
+        if self.plugin_path.exists() and self.plugin_path.read_text() == contents:
+            return []
+        if not dry_run:
+            _atomic_write(self.plugin_path, contents)
+        return [self.plugin_path]
+
 
 def _opencode_rule(tool: str, pattern: str) -> Rule | None:
     if tool == "bash":
@@ -1008,75 +1070,78 @@ def _opencode_decision(action: str) -> Decision | None:
 
 class GeminiAdapter(AgentAdapter):
     name = AgentName.Gemini
-    policy_path: ClassVar[Path] = Path.home() / ".gemini/policies/agent-bridge.toml"
+    settings_path: ClassVar[Path] = Path.home() / ".gemini/settings.json"
 
-    def install(self) -> Path | None:
-        policy = merged_policy(local_root=None)
-        doc = tomlkit.document()
-        doc.add(tomlkit.comment("Generated by llm-agent-bridge. Edit ~/.agent-permissions.jsonc instead."))
-        for regex, reason in _gemini_ask_rules(policy):
-            self._append_rule(doc, regex=regex, reason=reason, decision="ask_user", priority=950)
-        prefixes = sorted(_gemini_allow_prefixes(policy))
-        if prefixes:
-            self._append_rule(doc, prefix=prefixes, decision="allow", priority=700)
-        rendered = tomlkit.dumps(doc)
-        if self.policy_path.exists() and self.policy_path.read_text() == rendered:
+    def parse_event(self, payload: JsonObject, event_name: str) -> Request | None:
+        tool_name = payload.get("tool_name")
+        if not isinstance(tool_name, str):
             return None
-        _atomic_write(self.policy_path, rendered)
-        return self.policy_path
+        tool_input = payload.get("tool_input")
+        if tool_name == "run_shell_command":
+            command = tool_input.get("command") if isinstance(tool_input, dict) else None
+            return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
+        return ToolRequest(_gemini_tool_name(tool_name))
 
-    @staticmethod
-    def _append_rule(
-        doc: tomlkit.TOMLDocument,
-        *,
-        regex: str | None = None,
-        prefix: list[str] | None = None,
-        reason: str = "",
-        decision: str,
-        priority: int,
-    ) -> None:
-        rule = tomlkit.table()
-        rule["toolName"] = "run_shell_command"
-        if regex is not None:
-            rule["commandRegex"] = regex
-        if prefix is not None:
-            rule["commandPrefix"] = prefix
-            rule["allow_redirection"] = True
-        rule["decision"] = decision
-        rule["priority"] = priority
-        if reason:
-            rule["deny_message"] = reason
-        existing = doc.get("rule")
-        if isinstance(existing, tomlkit.items.AoT):
-            existing.append(rule)
+    def write_verdict(self, verdict: Verdict, event_name: str) -> None:
+        if verdict.decision is Decision.NoOpinion:
+            json.dump({}, sys.stdout)
             return
-        rules = tomlkit.aot()
-        rules.append(rule)
-        doc["rule"] = rules
+        if verdict.decision is Decision.Ask:
+            json.dump({"decision": "deny", "reason": f"approval required: {verdict.rationale}"}, sys.stdout)
+            return
+        json.dump({"decision": verdict.decision.value, "reason": verdict.rationale}, sys.stdout)
 
-
-def _gemini_allow_prefixes(policy: Policy) -> set[str]:
-    return {" ".join(rule.prefix) for rule in policy.allow if isinstance(rule, BashCommand)}
-
-
-def _gemini_ask_rules(policy: Policy) -> Iterator[tuple[str, str]]:
-    yield (r".*(?:^|\s)(?:>|>>|1>|1>>|&>)\s*[^\s]+", "stdout redirection writes to a file and requires approval")
-    for rule in policy.ask:
-        if not isinstance(rule, BashOption):
-            continue
-        command_regex = "|".join(re.escape(c) for c in sorted(rule.commands))
-        option_regexes: list[str] = []
-        for option in sorted(rule.options):
-            if option.startswith("--"):
-                option_regexes.append(re.escape(option) + r"(?:=|\s|$)")
-            elif option.startswith("-"):
-                option_regexes.append(r"-[A-Za-z]*" + re.escape(option[1:]) + r"(?:[A-Za-z.]*|\s|$)")
-        if option_regexes:
-            options_alt = "|".join(option_regexes)
-            yield (
-                rf"(?:{command_regex})\s+.*(?:{options_alt})",
-                rule.rationale or "command requires approval",
+    def install(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
+        # rulesync's ``geminicli.preToolUse`` block is materialised as Gemini's
+        # ``BeforeTool`` hook by rulesync itself; the bridge command embedded in
+        # the entry uses ``--event BeforeTool`` since that's what Gemini fires
+        # at runtime. Direct mode writes the same nested-group shape into
+        # ``hooks.BeforeTool`` of ``settings.json`` with the same event arg.
+        if mode is InstallMode.Rulesync:
+            return _merge_rulesync_hooks(
+                block="geminicli",
+                add=[("preToolUse", "BeforeTool", ".*")],
+                strip=[],
+                agent_name="gemini",
+                dry_run=dry_run,
             )
+        return _merge_nested_hooks(
+            self.settings_path,
+            add=[("BeforeTool", ".*")],
+            strip=[],
+            agent_name="gemini",
+            dry_run=dry_run,
+        )
+
+
+def _gemini_tool_name(name: str) -> str:
+    return {
+        "glob": "Glob",
+        "grep_search": "Grep",
+        "read_file": "Read",
+        "read_many_files": "Read",
+        "list_directory": "LS",
+        "web_fetch": "WebFetch",
+        "google_web_search": "WebSearch",
+        "replace": "Edit",
+        "write_file": "Write",
+    }.get(name, name)
+
+
+_GEMINI_TOOL_NAMES = frozenset(
+    {
+        "run_shell_command",
+        "glob",
+        "grep_search",
+        "read_file",
+        "read_many_files",
+        "list_directory",
+        "web_fetch",
+        "google_web_search",
+        "replace",
+        "write_file",
+    }
+)
 
 
 ADAPTERS: dict[AgentName, AgentAdapter] = {
@@ -1088,22 +1153,103 @@ ADAPTERS: dict[AgentName, AgentAdapter] = {
 
 
 # -----------------------------------------------------------------------------
-# Hook config helpers
+# Hook config helpers (used by install)
 # -----------------------------------------------------------------------------
 
 
+BRIDGE_HOOK_MARKER = "llm-agent-bridge"
+
+# Per-agent hook timeouts. Claude/Codex use seconds; Gemini uses milliseconds.
+_HOOK_TIMEOUTS: dict[str, int] = {
+    "claude": 30,
+    "codex": 30,
+    "gemini": 30000,
+}
+
+
+def _resolve_bridge_command() -> str:
+    """Return the absolute path to ``llm-agent-bridge`` if findable.
+
+    GUI-launched OpenCode (Raycast/Spotlight) inherits a sparse ``PATH``; baking
+    the resolved absolute path eliminates a class of silent ``ENOENT`` bugs. Falls
+    back to the bare name if nothing is on ``PATH`` at install time, with a stderr
+    warning so the user knows runtime PATH lookup is in play.
+    """
+    resolved = shutil.which(BRIDGE_HOOK_MARKER)
+    if resolved:
+        return resolved
+    print(
+        f"warning: '{BRIDGE_HOOK_MARKER}' not on PATH at install time; "
+        f"hooks will rely on runtime PATH",
+        file=sys.stderr,
+    )
+    return BRIDGE_HOOK_MARKER
+
+
+def _bridge_command_string(agent: str, event: str) -> str:
+    """Build the shell-safe bridge invocation embedded in hook configs.
+
+    Quotes the resolved path so spaces or shell metacharacters in the install
+    location can't break the command line or smuggle arguments. Agent and event
+    are constrained internally so they need no quoting, but we shlex-quote them
+    anyway as a defensive habit.
+    """
+    return " ".join(
+        shlex.quote(part)
+        for part in (_resolve_bridge_command(), "check", "--agent", agent, "--event", event)
+    )
+
+
 def _hook_group(matcher: str, *, agent: str, event: str, status_message: str | None = None) -> JsonObject:
+    """Build a Claude/Codex/Gemini-style nested ``{matcher, hooks: [...]}`` group."""
     hook: JsonObject = {
         "type": "command",
-        "command": f"{BRIDGE_HOOK_MARKER} check --agent {agent} --event {event}",
-        "timeout": 30,
+        "command": _bridge_command_string(agent, event),
+        "timeout": _HOOK_TIMEOUTS[agent],
     }
     if status_message is not None:
         hook["statusMessage"] = status_message
     return {"matcher": matcher, "hooks": [hook]}
 
 
+def _rulesync_entry(agent: str, event: str, matcher: str) -> JsonObject:
+    """Build a flat rulesync-style hook entry."""
+    return {
+        "type": "command",
+        "command": _bridge_command_string(agent, event),
+        "matcher": matcher,
+        "timeout": _HOOK_TIMEOUTS[agent],
+    }
+
+
+def _is_bridge_hook(hook: JsonValue) -> bool:
+    """True iff this entry is one the bridge's installer wrote.
+
+    Matches strictly on shape: the command must split into a binary whose
+    basename is ``llm-agent-bridge`` followed by ``check``. This avoids
+    false-stripping unrelated wrappers whose paths happen to contain the
+    substring ``llm-agent-bridge``.
+    """
+    if not isinstance(hook, dict):
+        return False
+    command = hook.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return False
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if len(parts) < 2:
+        return False
+    return Path(parts[0]).name == BRIDGE_HOOK_MARKER and parts[1] == "check"
+
+
 def _strip_bridge_groups(groups: JsonArray) -> JsonArray:
+    """Remove bridge entries from nested ``{matcher, hooks: [...]}`` groups.
+
+    Drops groups whose hooks list is left empty; preserves all non-bridge entries
+    untouched. Idempotency guarantee: re-running ``install`` produces no churn.
+    """
     kept: JsonArray = []
     for group in groups:
         if not isinstance(group, dict):
@@ -1116,16 +1262,13 @@ def _strip_bridge_groups(groups: JsonArray) -> JsonArray:
         remaining: JsonArray = [hook for hook in hooks if not _is_bridge_hook(hook)]
         if not remaining:
             continue
-        rebuilt: JsonObject = {**group, "hooks": remaining}
-        kept.append(rebuilt)
+        kept.append({**group, "hooks": remaining})
     return kept
 
 
-def _is_bridge_hook(hook: JsonValue) -> bool:
-    if not isinstance(hook, dict):
-        return False
-    command = hook.get("command")
-    return isinstance(command, str) and BRIDGE_HOOK_MARKER in command
+def _strip_bridge_entries(entries: JsonArray) -> JsonArray:
+    """Remove bridge entries from a flat rulesync-style entry list."""
+    return [entry for entry in entries if not _is_bridge_hook(entry)]
 
 
 def _section(parent: JsonObject, key: str) -> JsonObject:
@@ -1144,6 +1287,98 @@ def _ensure_list(parent: JsonObject, key: str) -> JsonArray:
     new_list: JsonArray = []
     parent[key] = new_list
     return new_list
+
+
+def _rulesync_hooks_path() -> Path:
+    return Path.home() / ".rulesync/hooks.json"
+
+
+def _write_json_if_changed(path: Path, before: JsonObject, after: JsonObject, *, dry_run: bool) -> list[Path]:
+    """Atomic write iff ``after`` differs structurally from ``before``."""
+    if after == before:
+        return []
+    if not dry_run:
+        _atomic_write(path, json.dumps(after, indent=2) + "\n")
+    return [path]
+
+
+def _merge_rulesync_hooks(
+    *,
+    block: str,
+    add: list[tuple[str, str, str]],
+    strip: list[str],
+    agent_name: str,
+    dry_run: bool,
+) -> list[Path]:
+    """Merge bridge entries into ``~/.rulesync/hooks.json`` for one agent block.
+
+    ``add`` is a list of ``(rulesync_key, bridge_event, matcher)`` triples. The
+    ``rulesync_key`` (camelCase) is where rulesync materialises the hook into the
+    per-tool config; ``bridge_event`` is the per-tool event name the bridge will
+    receive at runtime (e.g. rulesync's ``preToolUse`` for Gemini maps to
+    ``BeforeTool``, so we embed ``--event BeforeTool``). ``strip`` removes stale
+    bridge entries (e.g. Claude doesn't fire ``permissionRequest``).
+    """
+    path = _rulesync_hooks_path()
+    before = _read_json(path)
+    after: JsonObject = json.loads(json.dumps(before))
+    after.setdefault("version", 1)
+    agent_section = _section(after, block)
+    hooks = _section(agent_section, "hooks")
+    for rulesync_key, bridge_event, matcher in add:
+        entries = _strip_bridge_entries(_ensure_list(hooks, rulesync_key))
+        entries.append(_rulesync_entry(agent_name, bridge_event, matcher))
+        hooks[rulesync_key] = entries
+    for event_name in strip:
+        if event_name in hooks:
+            current = hooks[event_name]
+            if isinstance(current, list):
+                stripped = _strip_bridge_entries(current)
+                if stripped:
+                    hooks[event_name] = stripped
+                else:
+                    del hooks[event_name]
+    return _write_json_if_changed(path, before, after, dry_run=dry_run)
+
+
+def _merge_nested_hooks(
+    path: Path,
+    *,
+    add: list[tuple[str, str]],
+    strip: list[str],
+    agent_name: str,
+    dry_run: bool,
+) -> list[Path]:
+    """Merge bridge groups into a Claude-style ``hooks.<Event>`` config file.
+
+    The schema is the nested ``[{matcher, hooks: [...]}]`` group form used by
+    Claude ``settings.json``, Codex ``hooks.json``, and Gemini ``settings.json``.
+    Each entry in ``add`` is ``(event_name, matcher)``; the embedded bridge
+    invocation uses ``event_name`` as the ``--event`` argument since direct-mode
+    keys are the per-tool event names.
+    """
+    before = _read_json(path)
+    after: JsonObject = json.loads(json.dumps(before))
+    hooks_section = _section(after, "hooks")
+    for event_name, matcher in add:
+        groups = _strip_bridge_groups(_ensure_list(hooks_section, event_name))
+        groups.append(_hook_group(matcher, agent=agent_name, event=event_name))
+        hooks_section[event_name] = groups
+    for event_name in strip:
+        if event_name in hooks_section:
+            current = hooks_section[event_name]
+            if isinstance(current, list):
+                stripped = _strip_bridge_groups(current)
+                if stripped:
+                    hooks_section[event_name] = stripped
+                else:
+                    del hooks_section[event_name]
+    return _write_json_if_changed(path, before, after, dry_run=dry_run)
+
+
+# -----------------------------------------------------------------------------
+# File helpers
+# -----------------------------------------------------------------------------
 
 
 def _read_json(path: Path) -> JsonObject:
@@ -1174,7 +1409,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="llm-agent-bridge")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("install", help="install hooks for every detected agent")
+    install = sub.add_parser("install", help="wire the bridge into agent hook configs")
+    install.add_argument(
+        "--mode",
+        choices=["auto", "rulesync", "direct"],
+        default="auto",
+        help="auto: detect rulesync; rulesync: write ~/.rulesync/hooks.json; direct: per-tool configs",
+    )
+    install.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print would-be writes without modifying files",
+    )
 
     sub.add_parser("import", help="pull native allow/ask/deny rules into ~/.agent-permissions.jsonc")
 
@@ -1187,7 +1433,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "install":
-        return _cmd_install()
+        return _cmd_install(mode=args.mode, dry_run=args.dry_run)
     if args.command == "import":
         return _cmd_import()
     if args.command == "check":
@@ -1198,22 +1444,38 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-def _cmd_install() -> int:
-    policy_path = Path.home() / POLICY_FILENAME
-    if not policy_path.exists():
-        write_default_policy(policy_path)
-        print(f"created {policy_path}")
+def _resolve_install_mode(mode: str) -> InstallMode:
+    if mode == "rulesync":
+        if not (Path.home() / ".rulesync").exists():
+            raise PolicyError("--mode rulesync requires ~/.rulesync/ to exist")
+        return InstallMode.Rulesync
+    if mode == "direct":
+        return InstallMode.Direct
+    return InstallMode.Rulesync if (Path.home() / ".rulesync").exists() else InstallMode.Direct
+
+
+def _cmd_install(*, mode: str, dry_run: bool) -> int:
+    try:
+        resolved_mode = _resolve_install_mode(mode)
+    except PolicyError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(f"mode: {resolved_mode.value}{' (dry-run)' if dry_run else ''}")
+    failed = False
     for adapter in ADAPTERS.values():
         try:
-            written = adapter.install()
+            touched = adapter.install(resolved_mode, dry_run=dry_run)
         except Exception as error:
-            print(f"{adapter.name}: failed ({error})", file=sys.stderr)
+            print(f"{adapter.name.value}: failed ({error})", file=sys.stderr)
+            failed = True
             continue
-        if written is not None:
-            print(f"{adapter.name}: wrote {written}")
-        else:
-            print(f"{adapter.name}: up to date")
-    return 0
+        if not touched:
+            print(f"{adapter.name.value}: up to date")
+            continue
+        verb = "would write" if dry_run else "wrote"
+        for path in touched:
+            print(f"{adapter.name.value}: {verb} {path}")
+    return 1 if failed else 0
 
 
 def _cmd_import() -> int:
@@ -1246,7 +1508,6 @@ def _cmd_import() -> int:
 
 
 def _cmd_check(agent: AgentName, event: str) -> int:
-    adapter = ADAPTERS[agent]
     try:
         raw_payload: object = json.load(sys.stdin)
     except json.JSONDecodeError:
@@ -1264,6 +1525,8 @@ def _cmd_check(agent: AgentName, event: str) -> int:
         json.dump({}, sys.stdout)
         return 0
     payload: JsonObject = payload_value
+    event = _effective_event(event, payload)
+    adapter = _select_adapter(agent, event, payload)
     request = adapter.parse_event(payload, event)
     if request is None:
         _trace(agent, event, payload, None, "request unparseable")
@@ -1283,6 +1546,30 @@ def _cmd_check(agent: AgentName, event: str) -> int:
     _trace(agent, event, payload, verdict, None)
     adapter.write_verdict(verdict, event)
     return 0
+
+
+def _effective_event(event: str, payload: JsonObject) -> str:
+    if event != "auto":
+        return event
+    payload_event = payload.get("hook_event_name")
+    return payload_event if isinstance(payload_event, str) else event
+
+
+def _select_adapter(agent: AgentName, event: str, payload: JsonObject) -> AgentAdapter:
+    if agent is not AgentName.Auto:
+        return ADAPTERS[agent]
+    if event in ("BeforeTool", "AfterTool"):
+        return ADAPTERS[AgentName.Gemini]
+    tool_name = payload.get("tool_name")
+    if isinstance(tool_name, str) and tool_name in _GEMINI_TOOL_NAMES:
+        return ADAPTERS[AgentName.Gemini]
+    if event == "PermissionRequest" and isinstance(payload.get("permission"), dict):
+        return ADAPTERS[AgentName.Codex]
+    if event == "PermissionRequest":
+        return ADAPTERS[AgentName.Claude]
+    if event in ("permission.ask", "permission.asked"):
+        return ADAPTERS[AgentName.Opencode]
+    return ADAPTERS[AgentName.Claude]
 
 
 def _trace(

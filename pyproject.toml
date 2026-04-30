@@ -21,7 +21,8 @@ keywords = [
     "agentic-tools",
     "ai-coding-assistant",
     "anthropic",
-    "bashlex",
+    "tree-sitter",
+    "tree-sitter-bash",
     "claude",
     "claude-code",
     "codex",
@@ -64,9 +65,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "bashlex>=0.18,<0.19",
     "pyjson5>=2.0,<3",
     "tomlkit>=0.13,<0.14",
+    "tree-sitter>=0.25,<0.26",
+    "tree-sitter-bash>=0.25,<0.26",
 ]
 
 [project.urls]
@@ -101,8 +103,8 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 include = ["src", "tests"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
-# bashlex ships no stubs and tomlkit's stubs are partial. We narrow both at the boundary
-# (see _node_* helpers and the tomlkit isinstance() checks) — domain code never sees Unknown.
+# tree-sitter-bash stubs are partial. We narrow at the parser boundary so domain
+# code never sees Unknown.
 reportMissingTypeStubs = false
 reportUnknownMemberType = false
 reportUnknownVariableType = false

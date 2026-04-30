@@ -160,6 +160,15 @@ def test_policy_allows_stderr_to_devnull():
     assert policy.decide(ShellRequest(pipeline)).decision is Decision.Allow
 
 
+def test_policy_allows_read_only_for_loop_body():
+    policy = Policy(allow=(BashCommand(("echo",)), BashCommand(("npm", "view")), BashCommand(("head",))))
+    pipeline = parse_pipeline(
+        'for v in 0.0.34 0.0.32; do echo "=== @playwright/mcp@$v ==="; '
+        'npm view "@playwright/mcp@$v" dependencies 2>&1 | head -8; done'
+    )
+    assert policy.decide(ShellRequest(pipeline)).decision is Decision.Allow
+
+
 def test_policy_asks_when_pipeline_unparseable():
     policy = Policy(allow=(BashCommand(("rm",)), BashCommand(("cat",))))
     pipeline = parse_pipeline("rm $(cat allowed)")  # command substitution

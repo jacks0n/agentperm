@@ -100,11 +100,11 @@ llm-agent-bridge install
 
 The output of `install` lists each adapter and whether it wrote a file or skipped.
 
-## "Tests fail with bashlex errors"
+## "Tests fail with Tree-sitter errors"
 
-bashlex bundles its own grammar tables and is sensitive to malformed shell input. If you're seeing parser exceptions in the trace, that's expected — `parse_pipeline` catches them and returns `Pipeline(parseable=False)`, which the policy treats as `Ask`. The verdict rationale will include the parse error.
+Tree-sitter Bash parses shell syntax into the `Pipeline` domain model. If you're seeing parser exceptions in the trace, that's expected — `parse_pipeline` catches them and returns `Pipeline(parseable=False)`, which the policy treats as `Ask`. The verdict rationale will include the parse error.
 
-If you're seeing a Python `ImportError` or version conflict for bashlex, check `pyproject.toml` for the pinned range (`bashlex>=0.18,<0.19`) and reinstall.
+If you're seeing a Python `ImportError` or version conflict for Tree-sitter, check `pyproject.toml` for the pinned `tree-sitter` and `tree-sitter-bash` ranges and reinstall.
 
 ## Reporting a bug
 

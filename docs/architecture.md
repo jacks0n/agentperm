@@ -90,7 +90,7 @@ Redirects are evaluated independently of argv:
 | `>file`, `>>file`, `&>file` | `Ask` ("writes to '<file>'") |
 | `<file` | `NoOpinion` |
 
-This is hard-coded — file writes always surface a prompt regardless of the surrounding rule. The earlier regex parser misread `2>&1` as a write to a file called `1`; the bashlex AST gets it right.
+This is hard-coded — file writes always surface a prompt regardless of the surrounding rule. The earlier regex parser misread `2>&1` as a write to a file called `1`; the Tree-sitter Bash AST gets it right.
 
 ### Bypass coercion (Claude-specific)
 
@@ -111,23 +111,24 @@ Codex / OpenCode / Gemini don't ship a bypass equivalent in the hook payload, so
 
 ## Shell parsing
 
-Shell parsing lives in one function: `parse_pipeline(command: str) -> Pipeline`. It hands the string to bashlex and walks the AST to extract `Segment(argv, redirects)` tuples. The parser handles:
+Shell parsing lives in one function: `parse_pipeline(command: str) -> Pipeline`. It hands the string to Tree-sitter's Bash grammar and walks the AST to extract `Segment(argv, redirects)` tuples. The parser handles:
 
 - **Pipes:** `a | b` → two segments
 - **Sequences:** `a; b`, `a && b`, `a || b` → multiple segments, each evaluated independently
+- **For loops:** `for v in ...; do a; b; done` → the body commands are evaluated independently
 - **Redirects:** `>`, `>>`, `<`, `2>`, `2>&1`, `&>` — captured as `Redirect(fd, op, target, is_fd_dup)`
-- **Environment prefixes:** `FOO=bar ls -la` — bashlex marks `FOO=bar` as `kind="assignment"` and `_build_segment` skips it
+- **Environment prefixes:** `FOO=bar ls -la` — Tree-sitter marks `FOO=bar` as a `variable_assignment` and `_build_segment` skips it
 - **`bash -c "..."`:** the inner command is recursively re-parsed via `parse_pipeline`, and its segments replace the wrapper
 - **Path-prefixed commands:** `/usr/bin/ls` matches a `Bash(ls:*)` rule via basename
 
 It refuses to parse:
 
 - **Command substitution:** `rm $(cat allowed)` — returns `parseable=False`, which the policy treats as `Ask`
-- **Anything bashlex rejects:** parse errors → `parseable=False` → `Ask`
+- **Anything Tree-sitter reports as a shell syntax error:** parse errors → `parseable=False` → `Ask`
 
 This is conservative on purpose. A static allow-list cannot reason about runtime command substitution; the right behavior is to surface a prompt rather than guess.
 
-## Why bashlex
+## Why Tree-sitter Bash
 
 The first version of this bridge used a regex-based shell parser. It had real bugs:
 
@@ -136,7 +137,7 @@ The first version of this bridge used a regex-based shell parser. It had real bu
 - `bash -c "ls -la"` was unrecognized
 - `FOO=bar ls` matched `FOO=bar` as the command name
 
-bashlex is a real bash AST. It costs ~2 ms per call and eliminates the entire class of regex parsing bugs. The bridge interfaces with it only inside `parse_pipeline` and a handful of `_node_*` narrowing helpers — domain code never sees raw bashlex types.
+Tree-sitter Bash is a maintained Bash grammar. It eliminates the regex parser's shell syntax bugs and supports shell constructs such as `for` loops. The bridge interfaces with it only inside `parse_pipeline` and the parser helpers — domain code never sees raw Tree-sitter `Node` values.
 
 ## Module layout
 
@@ -146,7 +147,7 @@ src/llm_agent_bridge/__init__.py
 ├── Domain (Decision, Verdict, Rule, Request, Policy)
 ├── Aggregation (_stricter, aggregate)
 ├── Redirect policy (_evaluate_redirect)
-├── Shell parser (parse_pipeline + bashlex narrowing helpers)
+├── Shell parser (parse_pipeline + Tree-sitter Bash boundary helpers)
 ├── Rule I/O (parse_rule, _parse_string_rule, _parse_dict_rule)
 ├── Policy I/O (load_policy_file, save_policy_file, merged_policy)
 ├── Agent adapters (Claude, Codex, OpenCode, Gemini)
@@ -158,4 +159,4 @@ The whole package is a single module on purpose — it's small enough that split
 
 ## Type safety
 
-The codebase runs under `basedpyright` strict mode. There is no `Any`. JSON values are typed as `JsonValue` (a recursive union of scalars, `Sequence`, and `Mapping`). bashlex and `tomlkit` ship partial / no type stubs; their boundaries are silenced in `pyproject.toml` and narrowed at the seam (`_node_*` helpers, `isinstance` checks). Domain code downstream of those seams sees only typed values.
+The codebase runs under `basedpyright` strict mode. There is no `Any`. JSON values are typed as `JsonValue` (a recursive union of scalars, `Sequence`, and `Mapping`). `tree-sitter-bash` and `tomlkit` ship partial type information; their boundaries are isolated in `pyproject.toml` and narrowed at the seam. Domain code downstream of those seams sees only typed values.

@@ -8,22 +8,39 @@ Four subcommands: `install`, `import`, `check`, `edit`. The first three are usua
 
 ## `install`
 
-Writes hooks/plugins for every detected agent.
+Wires the bridge into every supported agent's hook config.
 
 ```sh
-llm-agent-bridge install
+llm-agent-bridge install [--mode auto|rulesync|direct] [--dry-run]
 ```
 
-What it does:
+### Modes
 
-- **Claude Code:** appends a `PreToolUse` hook to `~/.claude/settings.json` that runs `llm-agent-bridge check --agent claude --event PreToolUse`. Existing bridge hooks are stripped first so re-runs are idempotent.
-- **Codex CLI:** appends `PreToolUse` and `PermissionRequest` hooks to `~/.codex/hooks.json`, and enables `[features].codex_hooks = true` in `~/.codex/config.toml`.
-- **OpenCode:** writes `~/.config/opencode/plugins/agent-bridge.js` — a plugin that shells out to the bridge from OpenCode's `permission.ask` callback.
-- **Gemini CLI:** writes `~/.gemini/policies/agent-bridge.toml` — Gemini's regex-based policy file, generated from the rules in your `.agent-permissions.jsonc`.
+`install` runs in one of two modes; `--mode auto` (the default) picks based on whether `~/.rulesync/` exists.
 
-If a config file doesn't exist or the agent isn't installed, the adapter is silently skipped. Re-running `install` is safe; existing bridge entries are replaced, not duplicated. Hooks from other tools (e.g. notification daemons) are preserved.
+**Rulesync mode** — when `~/.rulesync/` exists, hook entries are merged into `~/.rulesync/hooks.json` under each agent's block (`claudecode`, `codexcli`, `geminicli`). You re-run `rulesync` afterwards to regenerate per-tool configs from this source of truth. The OpenCode plugin shim is still installed directly (rulesync has no schema for `permission.ask` plugins), and the Codex `[features].codex_hooks` flag is rulesync's responsibility, not the bridge's.
 
-After install, every agent will consult `~/.agent-permissions.jsonc` for permission decisions. If the file doesn't exist yet, run `edit` to create it.
+**Direct mode** — bypasses rulesync entirely:
+
+- **Claude Code:** appends a `PreToolUse` hook to `~/.claude/settings.json` (matcher `*`). Strips any spurious bridge entry that ended up in `PermissionRequest` (Claude doesn't fire that event).
+- **Codex CLI:** appends `PreToolUse` (matcher `Bash`) and `PermissionRequest` (matcher `Bash|apply_patch|mcp__.*`) hooks to `~/.codex/hooks.json`, and enables `[features].codex_hooks = true` in `~/.codex/config.toml`.
+- **Gemini CLI:** appends a `BeforeTool` hook to `~/.gemini/settings.json` (matcher `.*`).
+- **OpenCode:** writes `~/.config/opencode/plugins/agent-bridge.js` — always, regardless of mode.
+
+### Flags
+
+- `--mode auto|rulesync|direct` — `auto` detects rulesync; `rulesync` requires `~/.rulesync/` and exits non-zero if missing; `direct` always writes per-tool configs.
+- `--dry-run` — print what would change without modifying any file.
+
+Each installed entry embeds an explicit `--event <Name>` argument matching the hook event under which the bridge will be invoked, so `check` does not have to infer the event from payload shape — required for Codex `PermissionRequest`, whose payload carries no `hook_event_name`. Hook timeouts are set per-agent in the unit each tool expects (Claude/Codex `30` seconds, Gemini `30000` milliseconds).
+
+### Idempotency
+
+Re-running `install` is safe: existing bridge entries are stripped before the new entry is appended, so the merged file is byte-stable across runs. Hooks from other tools (notification daemons, telemetry, etc.) are preserved untouched.
+
+The bridge resolves its own absolute path via `which` at install time and bakes it into the hook command, so GUI-launched agents (Raycast / Spotlight) with sparse `PATH` still find it.
+
+After install, every agent consults `~/.agent-permissions.jsonc` for permission decisions. If the file doesn't exist yet, run `edit` to create it.
 
 ## `import`
 
