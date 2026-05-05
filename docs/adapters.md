@@ -60,15 +60,22 @@ Codex requires `[features].codex_hooks = true` in `~/.codex/config.toml`. `insta
 
 This split mirrors Codex's design: `PreToolUse` is for vetoes, `PermissionRequest` is for approvals.
 
-**`PermissionRequest` payload:**
+**`PermissionRequest` payload (Codex CLI 0.128+):**
 ```json
 {
-  "permission": {
-    "type": "Bash" | "apply_patch" | "mcp__...",
-    "metadata": { "command": "..." }
-  }
+  "session_id": "...",
+  "turn_id": "...",
+  "transcript_path": "...",
+  "cwd": "/path/to/cwd",
+  "hook_event_name": "PermissionRequest",
+  "model": "...",
+  "permission_mode": "default",
+  "tool_name": "Bash" | "apply_patch" | "mcp__...",
+  "tool_input": { "command": "..." }
 }
 ```
+
+The shape mirrors Claude's `PreToolUse`. The legacy `{"permission": {"type": ..., "metadata": {"command": ...}}}` envelope from earlier Codex builds is still parsed for back-compat.
 
 **Allow envelope:**
 ```json

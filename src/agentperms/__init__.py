@@ -1052,17 +1052,20 @@ class CodexAdapter(AgentAdapter):
 
     def parse_event(self, payload: JsonObject, event_name: str) -> Request | None:
         if event_name == "PermissionRequest":
+            # Codex 0.128+ ships a Claude-shaped envelope at top level
+            # (``tool_name`` + ``tool_input``). Earlier builds wrapped the
+            # command in ``permission.metadata.command``; we still accept it
+            # for back-compat.
             permission = payload.get("permission")
-            if not isinstance(permission, dict):
+            if isinstance(permission, dict):
+                permission_type = permission.get("type")
+                metadata = permission.get("metadata")
+                if permission_type == "Bash":
+                    command = metadata.get("command") if isinstance(metadata, dict) else None
+                    return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
+                if isinstance(permission_type, str):
+                    return ToolRequest(permission_type)
                 return None
-            permission_type = permission.get("type")
-            metadata = permission.get("metadata")
-            if permission_type == "Bash":
-                command = metadata.get("command") if isinstance(metadata, dict) else None
-                return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
-            if isinstance(permission_type, str):
-                return ToolRequest(permission_type)
-            return None
         return ClaudeAdapter().parse_event(payload, event_name)
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> None:
@@ -1617,6 +1620,7 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _load_dotenv()
     parser = argparse.ArgumentParser(prog="agentperms")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1783,13 +1787,40 @@ def _select_adapter(agent: AgentName, event: str, payload: JsonObject) -> AgentA
     return ADAPTERS[AgentName.Claude]
 
 
+def _load_dotenv() -> None:
+    """Merge ``<repo>/.env`` into ``os.environ`` for development debugging.
+
+    Resolves ``.env`` three levels above this file (the repo root for editable
+    installs); silently does nothing if it is missing or unreadable. Existing
+    environment variables win so the process environment can still override.
+    """
+    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+    try:
+        text = env_path.read_text()
+    except OSError:
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def _trace(
     agent: AgentName, event: str, payload: JsonObject | None, verdict: Verdict | None, note: str | None
 ) -> None:
     """Append one JSON line per invocation to ``$AGENTPERMS_TRACE`` if set.
 
-    Off by default. Set the env var to a writable path to enable. Used to debug whether the
-    bridge is actually being called for a given command.
+    Off by default. Set the env var to a writable path to enable — either in the
+    process environment or in ``<repo>/.env`` (loaded by ``_load_dotenv`` from
+    ``main``). Used to debug whether the bridge is actually being called for a
+    given command.
     """
     target = os.environ.get("AGENTPERMS_TRACE")
     if not target:

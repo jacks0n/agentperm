@@ -157,6 +157,29 @@ def test_codex_parse_permission_request_bash():
     assert request.pipeline.segments[0].argv == ("git", "push")
 
 
+def test_codex_parse_permission_request_bash_modern_envelope():
+    # Codex CLI 0.128+ delivers PermissionRequest payloads in the same shape as
+    # Claude's PreToolUse — ``tool_name`` + ``tool_input.command`` at the top
+    # level — rather than the legacy ``permission.metadata.command`` wrapper.
+    adapter = CodexAdapter()
+    request = adapter.parse_event(
+        {
+            "session_id": "019dcdb6-2e0a-7982-afda-8717d6346018",
+            "turn_id": "019de0dd-f03f-7771-a3eb-a91d169c1793",
+            "transcript_path": "/tmp/rollout.jsonl",
+            "cwd": "/Users/dev/Code/webapp",
+            "hook_event_name": "PermissionRequest",
+            "model": "gpt-5.5",
+            "permission_mode": "default",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push"},
+        },
+        "PermissionRequest",
+    )
+    assert isinstance(request, ShellRequest)
+    assert request.pipeline.segments[0].argv == ("git", "push")
+
+
 def test_codex_parse_permission_request_other_tool():
     adapter = CodexAdapter()
     request = adapter.parse_event(
