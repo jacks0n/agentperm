@@ -110,6 +110,42 @@ def test_append_redirect_captured():
     assert redirect.op == ">>"
 
 
+def test_words_after_redirect_target_are_argv_not_redirect_targets():
+    """``wc -l a.py 2>/dev/null b.py`` is bash for ``wc -l a.py b.py 2>/dev/null``.
+
+    tree-sitter-bash glues the trailing ``b.py`` onto the file_redirect node as
+    a second ``word`` child; previously we picked the last word as the target
+    and emitted ``writes to 'b.py'``, which would have prompted on a benign
+    ``wc`` invocation.
+    """
+    pipeline = parse_pipeline("wc -l a.py 2>/dev/null b.py 2>/dev/null c.py 2>/dev/null")
+    assert pipeline.parseable
+    [segment] = pipeline.segments
+    assert segment.argv == ("wc", "-l", "a.py", "b.py", "c.py")
+    assert all(r.target == "/dev/null" and r.fd == 2 for r in segment.redirects)
+    assert len(segment.redirects) == 3
+
+
+def test_compound_with_trailing_redirect_yields_all_segments():
+    """``cmd1 && cmd2 2>/dev/null arg`` — tree-sitter wraps the whole sequence
+    under a single ``redirected_statement`` with a ``list`` child. We need to
+    yield all inner segments and bind the redirect (plus spillover argv) to
+    the last one, not bail with ``unsupported redirected statement part 'list'``.
+    """
+    pipeline = parse_pipeline(
+        "ls tests/ | head -30 && echo '---' && wc -l a.py 2>/dev/null b.py 2>/dev/null"
+    )
+    assert pipeline.parseable
+    argvs = [s.argv for s in pipeline.segments]
+    assert ("ls", "tests/") in argvs
+    assert ("head", "-30") in argvs
+    assert ("echo", "---") in argvs
+    assert ("wc", "-l", "a.py", "b.py") in argvs
+    [wc_segment] = [s for s in pipeline.segments if s.argv[0] == "wc"]
+    assert len(wc_segment.redirects) == 2
+    assert all(r.target == "/dev/null" for r in wc_segment.redirects)
+
+
 def test_basename_match_for_command_path():
     """`/usr/bin/ls -la` should still match a `Bash(ls:*)` rule."""
     from agentperms import BashCommand
@@ -191,3 +227,199 @@ def test_concatenation_with_command_substitution_still_blocks():
     """``cat foo$(date).log`` — substitution nested inside a concatenation must still trip."""
     pipeline = parse_pipeline("cat foo$(date).log")
     assert pipeline.parseable is False
+
+
+# ---- Control-flow constructs ---------------------------------------------
+
+
+def test_if_then_extracts_test_and_body():
+    pipeline = parse_pipeline("if [ -f x ]; then cat x; fi")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("[",), ("cat", "x")]
+
+
+def test_if_then_else_extracts_both_branches():
+    pipeline = parse_pipeline("if [ -f x ]; then cat x; else echo no; fi")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("[",), ("cat", "x"), ("echo", "no")]
+
+
+def test_if_then_elif_extracts_all_branches():
+    pipeline = parse_pipeline("if [ -f x ]; then cat x; elif [ -f y ]; then cat y; fi")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [
+        ("[",), ("cat", "x"),
+        ("[",), ("cat", "y"),
+    ]
+
+
+def test_while_extracts_condition_and_body():
+    pipeline = parse_pipeline('while read line; do echo "$line"; done')
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("read", "line"), ("echo", "$line")]
+
+
+def test_until_extracts_condition_and_body():
+    pipeline = parse_pipeline("until grep -q done log; do sleep 1; done")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("grep", "-q", "done", "log"), ("sleep", "1")]
+
+
+def test_case_extracts_each_case_body():
+    pipeline = parse_pipeline('case "$x" in a) echo a;; b|c) echo bc;; *) echo other;; esac')
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [
+        ("echo", "a"),
+        ("echo", "bc"),
+        ("echo", "other"),
+    ]
+
+
+def test_double_bracket_yields_test_sentinel():
+    pipeline = parse_pipeline("[[ -f x && -r x ]]")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("[",)]
+
+
+def test_arithmetic_yields_arith_sentinel():
+    pipeline = parse_pipeline("(( x + 1 > 0 ))")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("((",)]
+
+
+def test_arithmetic_with_substitution_unparseable():
+    """``(( $(rm -rf ~) || 1 ))`` — substitution inside arithmetic must still trip."""
+    pipeline = parse_pipeline("(( $(rm -rf ~) || 1 ))")
+    assert pipeline.parseable is False
+
+
+def test_subshell_recurses_into_body():
+    pipeline = parse_pipeline("(cd /tmp && ls)")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("cd", "/tmp"), ("ls",)]
+
+
+def test_brace_group_recurses_into_body():
+    pipeline = parse_pipeline("{ cd /tmp; ls; }")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("cd", "/tmp"), ("ls",)]
+
+
+def test_negated_command_yields_inner():
+    pipeline = parse_pipeline("! grep foo bar")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("grep", "foo", "bar")]
+
+
+def test_function_definition_yields_body_segments():
+    """The body is policy-evaluated at definition time — defining-then-calling
+    is the realistic threat model and ``foo() { rm -rf /; }; foo`` should not
+    silently bypass policy because the body is "just a definition"."""
+    pipeline = parse_pipeline("foo() { rm -rf /; }; foo")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("rm", "-rf", "/"), ("foo",)]
+
+
+def test_declaration_export_yields_export_segment():
+    """``export FOO=bar`` parses as ``declaration_command``, not ``command`` —
+    handler must yield argv with ``export`` as argv[0] so ``Bash(export:*)`` matches."""
+    pipeline = parse_pipeline("export FOO=bar")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("export", "FOO=bar")]
+
+
+def test_declaration_local_yields_local_segment():
+    pipeline = parse_pipeline("local x=1")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("local", "x=1")]
+
+
+def test_declaration_declare_yields_declare_segment():
+    pipeline = parse_pipeline("declare -A m")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("declare", "-A", "m")]
+
+
+def test_declaration_with_substitution_unparseable():
+    """``export FOO=$(curl evil)`` — substitution in a declaration must still trip."""
+    pipeline = parse_pipeline("export FOO=$(curl evil)")
+    assert pipeline.parseable is False
+
+
+def test_heredoc_command_passes_through():
+    pipeline = parse_pipeline("cat <<EOF\nhi\nEOF\n")
+    assert pipeline.parseable
+    [segment] = pipeline.segments
+    assert segment.argv == ("cat",)
+    assert segment.redirects == ()
+
+
+def test_heredoc_body_with_substitution_unparseable():
+    """Unquoted heredoc bodies expand ``$(…)`` before the wrapped command runs,
+    so dropping the heredoc must not let a substitution through silently."""
+    pipeline = parse_pipeline("read x <<EOF\n$(rm -rf /)\nEOF\n")
+    assert pipeline.parseable is False
+
+
+def test_test_command_with_substitution_unparseable():
+    """``[[ -f $(curl evil) ]]`` — substitution inside the predicate executes
+    before the test, so the synthetic ``[`` segment must not be emitted."""
+    for src in ("[[ -f $(rm -rf /) ]]", "[ -f $(rm -rf /) ]", "[[ $(curl evil) = ok ]]"):
+        pipeline = parse_pipeline(src)
+        assert pipeline.parseable is False, src
+
+
+def test_case_subject_with_substitution_unparseable():
+    """``case foo$(curl evil) in …`` evaluates the subject before pattern match —
+    the subject is a ``concatenation`` which the control-flow handler skips, so
+    the substitution must be detected at the skip site rather than swallowed."""
+    pipeline = parse_pipeline("case foo$(rm -rf /) in *) echo ok;; esac")
+    assert pipeline.parseable is False
+
+
+def test_case_quoted_subject_with_substitution_unparseable():
+    pipeline = parse_pipeline('case "$(curl evil)" in *) echo ok;; esac')
+    assert pipeline.parseable is False
+
+
+def test_for_iterable_with_substitution_unparseable():
+    """``for f in $(curl evil); do …; done`` — the iterable runs the substitution
+    before the loop body; the iterable list must not be silently dropped."""
+    for src in (
+        "for f in $(curl evil); do echo $f; done",
+        "select f in $(curl evil); do echo $f; done",
+        "for f in <(rm -rf /); do echo $f; done",
+    ):
+        pipeline = parse_pipeline(src)
+        assert pipeline.parseable is False, src
+
+
+def test_redirected_test_command():
+    """``[ -f x ] 2>/dev/null`` — test_command nested inside redirected_statement."""
+    pipeline = parse_pipeline("[ -f x ] 2>/dev/null")
+    assert pipeline.parseable
+    [segment] = pipeline.segments
+    assert segment.argv == ("[",)
+    [redirect] = segment.redirects
+    assert redirect.fd == 2
+    assert redirect.target == "/dev/null"
+
+
+def test_bash_c_with_if_round_trips_through_unwrap():
+    """``bash -c '…'`` re-parses the inner command; control flow inside must compose."""
+    pipeline = parse_pipeline("bash -c 'if [ -f x ]; then cat x; fi'")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("[",), ("cat", "x")]
+
+
+def test_nested_if_in_for():
+    pipeline = parse_pipeline("for f in *.py; do if [ -f $f ]; then cat $f; fi; done")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("[",), ("cat", "$f")]
+
+
+def test_select_loop_extracts_body():
+    """``select`` parses as the same node as ``for`` — body is the do_group."""
+    pipeline = parse_pipeline("select x in a b c; do echo $x; done")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("echo", "$x")]

@@ -115,8 +115,15 @@ Shell parsing lives in one function: `parse_pipeline(command: str) -> Pipeline`.
 
 - **Pipes:** `a | b` → two segments
 - **Sequences:** `a; b`, `a && b`, `a || b` → multiple segments, each evaluated independently
-- **For loops:** `for v in ...; do a; b; done` → the body commands are evaluated independently
-- **Redirects:** `>`, `>>`, `<`, `2>`, `2>&1`, `&>` — captured as `Redirect(fd, op, target, is_fd_dup)`
+- **Conditionals:** `if … then … elif … else … fi` → condition + each branch's commands
+- **Loops:** `for`, `select`, `while`, `until` → body commands plus the `while`/`until` condition
+- **Case:** `case x in p) … ;; esac` → each case-item's body
+- **Brace groups & subshells:** `{ … ; }` and `( … )` → recurse into the body
+- **Negation:** `! cmd` → recurses into the wrapped command
+- **Function definitions:** `foo() { … }` → body recursed at definition time so policy applies even before `foo` is invoked
+- **Test / arithmetic:** `[ … ]`, `[[ … ]]`, `(( … ))` → collapsed to synthetic inert segments (`("[",)` / `("((",)`); see "Inert command names" below
+- **Declarations:** `export FOO=bar`, `local`, `declare`, `readonly`, `typeset` → yielded as a normal segment with the keyword as argv[0] so `Bash(export:*)` rules match
+- **Redirects:** `>`, `>>`, `<`, `2>`, `2>&1`, `&>` — captured as `Redirect(fd, op, target, is_fd_dup)`. `<<EOF` heredocs are dropped (input-only, no file write)
 - **Environment prefixes:** `FOO=bar ls -la` — Tree-sitter marks `FOO=bar` as a `variable_assignment` and `_build_segment` skips it
 - **`bash -c "..."`:** the inner command is recursively re-parsed via `parse_pipeline`, and its segments replace the wrapper
 - **Path-prefixed commands:** `/usr/bin/ls` matches a `Bash(ls:*)` rule via basename

