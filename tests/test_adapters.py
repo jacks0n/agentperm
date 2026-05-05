@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 import tomlkit
 
-import llm_agent_bridge
-from llm_agent_bridge import (
+import agentperms
+from agentperms import (
     AgentName,
     BashCommand,
     BashOption,
@@ -297,14 +297,14 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(CodexAdapter, "hooks_path", tmp_path / ".codex/hooks.json")
     monkeypatch.setattr(CodexAdapter, "config_path", tmp_path / ".codex/config.toml")
     monkeypatch.setattr(GeminiAdapter, "settings_path", tmp_path / ".gemini/settings.json")
-    monkeypatch.setattr(OpencodeAdapter, "plugin_path", tmp_path / ".config/opencode/plugins/agent-bridge.js")
+    monkeypatch.setattr(OpencodeAdapter, "plugin_path", tmp_path / ".config/opencode/plugins/agentperms.js")
     monkeypatch.setattr(
-        llm_agent_bridge,
+        agentperms,
         "_rulesync_hooks_path",
         lambda: tmp_path / ".rulesync/hooks.json",
     )
     def _stub_which(_name: str, *_args: object, **_kwargs: object) -> str:
-        return "/abs/llm-agent-bridge"
+        return "/abs/agentperms"
     monkeypatch.setattr(shutil, "which", _stub_which)
     return tmp_path
 
@@ -320,7 +320,7 @@ def test_claude_install_direct_writes_pretooluse(fake_home: Path):
     assert len(groups) == 1
     assert groups[0]["matcher"] == "*"
     hook = groups[0]["hooks"][0]
-    assert "llm-agent-bridge" in hook["command"]
+    assert "agentperms" in hook["command"]
     assert "--agent claude" in hook["command"]
     # Explicit event so the bridge doesn't have to guess from payload shape
     assert "--event PreToolUse" in hook["command"]
@@ -342,7 +342,7 @@ def test_claude_install_direct_preserves_other_hooks(fake_home: Path):
 def test_claude_install_direct_replaces_stale_bridge_entry(fake_home: Path):
     settings = fake_home / ".claude/settings.json"
     settings.parent.mkdir(parents=True)
-    stale_cmd = "/old/path/llm-agent-bridge check --agent claude --event PreToolUse"
+    stale_cmd = "/old/path/agentperms check --agent claude --event PreToolUse"
     stale = {"matcher": "*", "hooks": [{"type": "command", "command": stale_cmd}]}
     settings.write_text(json.dumps({"hooks": {"PreToolUse": [stale]}}))
     ClaudeAdapter().install(InstallMode.Direct)
@@ -351,7 +351,7 @@ def test_claude_install_direct_replaces_stale_bridge_entry(fake_home: Path):
     assert len(groups) == 1
     assert (
         groups[0]["hooks"][0]["command"]
-        == "/abs/llm-agent-bridge check --agent claude --event PreToolUse"
+        == "/abs/agentperms check --agent claude --event PreToolUse"
     )
 
 
@@ -368,7 +368,7 @@ def test_claude_install_direct_strips_spurious_permissionrequest(fake_home: Path
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": "/bin/llm-agent-bridge check --agent claude --event PreToolUse",
+                                    "command": "/bin/agentperms check --agent claude --event PreToolUse",
                                 }
                             ],
                         },
@@ -407,7 +407,7 @@ def test_claude_install_rulesync_strips_spurious_permissionrequest(fake_home: Pa
                         "permissionRequest": [
                             {
                                 "type": "command",
-                                "command": "/bin/llm-agent-bridge check --agent claude --event PreToolUse",
+                                "command": "/bin/agentperms check --agent claude --event PreToolUse",
                                 "matcher": "*",
                             },
                             {"type": "command", "command": "/bin/beckon enqueue --permission"},
@@ -504,10 +504,10 @@ def test_gemini_install_rulesync_uses_geminicli_block(fake_home: Path):
 
 def test_opencode_install_writes_plugin_with_resolved_path(fake_home: Path):
     paths = OpencodeAdapter().install(InstallMode.Direct)
-    plugin_path = fake_home / ".config/opencode/plugins/agent-bridge.js"
+    plugin_path = fake_home / ".config/opencode/plugins/agentperms.js"
     assert paths == [plugin_path]
     text = plugin_path.read_text()
-    assert 'const bridge = "/abs/llm-agent-bridge";' in text
+    assert 'const bridge = "/abs/agentperms";' in text
     assert "AgentBridgePlugin" in text
 
 
@@ -520,7 +520,7 @@ def test_opencode_install_runs_in_rulesync_mode_too(fake_home: Path):
     # OpenCode plugin is always installed directly even when mode is Rulesync,
     # because rulesync has no schema for permission.ask plugins.
     paths = OpencodeAdapter().install(InstallMode.Rulesync)
-    assert paths == [fake_home / ".config/opencode/plugins/agent-bridge.js"]
+    assert paths == [fake_home / ".config/opencode/plugins/agentperms.js"]
 
 
 # ---- Install: dry-run + mode resolution ----------------------------------
@@ -535,7 +535,7 @@ def test_install_dry_run_writes_nothing(fake_home: Path):
     assert not (fake_home / ".codex/hooks.json").exists()
     assert not (fake_home / ".codex/config.toml").exists()
     assert not (fake_home / ".gemini/settings.json").exists()
-    assert not (fake_home / ".config/opencode/plugins/agent-bridge.js").exists()
+    assert not (fake_home / ".config/opencode/plugins/agentperms.js").exists()
 
 
 def test_resolve_install_mode_picks_rulesync_when_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -551,7 +551,7 @@ def test_resolve_install_mode_picks_direct_when_no_rulesync(tmp_path: Path, monk
 
 def test_resolve_install_mode_explicit_rulesync_requires_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    with pytest.raises(llm_agent_bridge.PolicyError):
+    with pytest.raises(agentperms.PolicyError):
         _resolve_install_mode("rulesync")
 
 
@@ -560,24 +560,24 @@ def test_resolve_install_mode_explicit_rulesync_requires_directory(tmp_path: Pat
 
 def test_is_bridge_hook_matches_bridge_command():
     assert _is_bridge_hook(
-        {"type": "command", "command": "/abs/llm-agent-bridge check --agent claude --event PreToolUse"}
+        {"type": "command", "command": "/abs/agentperms check --agent claude --event PreToolUse"}
     )
 
 
 def test_is_bridge_hook_rejects_unrelated_wrapper_with_substring():
     """Substring-match would falsely strip a sibling tool whose name contains
-    ``llm-agent-bridge`` (e.g. ``llm-agent-bridge-debug``). Strict basename +
+    ``agentperms`` (e.g. ``agentperms-debug``). Strict basename +
     second-arg ``check`` is required to identify our own entries.
     """
     assert not _is_bridge_hook(
-        {"type": "command", "command": "/usr/local/bin/llm-agent-bridge-debug trace"}
+        {"type": "command", "command": "/usr/local/bin/agentperms-debug trace"}
     )
 
 
 def test_is_bridge_hook_rejects_bridge_with_other_subcommand():
-    """A user's manual ``llm-agent-bridge edit`` should not be treated as installer-owned."""
+    """A user's manual ``agentperms edit`` should not be treated as installer-owned."""
     assert not _is_bridge_hook(
-        {"type": "command", "command": "/abs/llm-agent-bridge edit"}
+        {"type": "command", "command": "/abs/agentperms edit"}
     )
 
 
@@ -602,18 +602,18 @@ def test_install_quotes_paths_with_spaces(
     """
     monkeypatch.setattr(ClaudeAdapter, "settings_path", tmp_path / ".claude/settings.json")
     def _spaced_which(_name: str, *_args: object, **_kwargs: object) -> str:
-        return "/Users/jane doe/bin/llm-agent-bridge"
+        return "/Users/jane doe/bin/agentperms"
     monkeypatch.setattr(shutil, "which", _spaced_which)
     paths = ClaudeAdapter().install(InstallMode.Direct)
     data = json.loads(paths[0].read_text())
     command = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     # The space-bearing path must be quoted; otherwise the shell sees three argv.
-    assert "'/Users/jane doe/bin/llm-agent-bridge'" in command
+    assert "'/Users/jane doe/bin/agentperms'" in command
     # And the resulting command round-trips through shlex back to the original argv.
     import shlex as _shlex
 
     parts = _shlex.split(command)
-    assert parts[0] == "/Users/jane doe/bin/llm-agent-bridge"
+    assert parts[0] == "/Users/jane doe/bin/agentperms"
     assert parts[1] == "check"
 
 
@@ -624,12 +624,12 @@ def test_opencode_plugin_json_escapes_special_path(
     correctly handles backslashes and quotes. A path with a backslash must
     survive interpolation as a valid JS literal.
     """
-    monkeypatch.setattr(OpencodeAdapter, "plugin_path", tmp_path / "agent-bridge.js")
+    monkeypatch.setattr(OpencodeAdapter, "plugin_path", tmp_path / "agentperms.js")
     def _windows_which(_name: str, *_args: object, **_kwargs: object) -> str:
-        return "C:\\Program Files\\llm-agent-bridge"
+        return "C:\\Program Files\\agentperms"
     monkeypatch.setattr(shutil, "which", _windows_which)
     paths = OpencodeAdapter().install(InstallMode.Direct)
     text = paths[0].read_text()
     # ``json.dumps`` wraps in double quotes and escapes backslashes; the literal
     # must appear as a valid JS string.
-    assert 'const bridge = "C:\\\\Program Files\\\\llm-agent-bridge";' in text
+    assert 'const bridge = "C:\\\\Program Files\\\\agentperms";' in text

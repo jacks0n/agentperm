@@ -9,17 +9,17 @@ Step through these checks in order. Most "still prompting" reports are one of th
 Enable the trace and reproduce:
 
 ```sh
-export LLM_AGENT_BRIDGE_TRACE=/tmp/bridge-trace.log
+export AGENTPERMS_TRACE=/tmp/bridge-trace.log
 : > /tmp/bridge-trace.log
 # Now reproduce the prompt in your agent.
 cat /tmp/bridge-trace.log
 ```
 
-For the env var to reach the bridge from inside the agent's hook, you need to either (a) set it in your shell **before** launching the agent, or (b) edit the hook command in `~/.claude/settings.json` (or equivalent) to prefix the bridge call with `LLM_AGENT_BRIDGE_TRACE=/path/to/log`.
+For the env var to reach the bridge from inside the agent's hook, you need to either (a) set it in your shell **before** launching the agent, or (b) edit the hook command in `~/.claude/settings.json` (or equivalent) to prefix the bridge call with `AGENTPERMS_TRACE=/path/to/log`.
 
 If the log is empty after a prompt, **the bridge wasn't called.** That means:
 - The prompt came from the agent's own pre-hook checks (e.g. Claude's "cd outside the working directory" guard), which run before permission hooks and aren't suppressed by bypass mode
-- The agent didn't know to call the bridge — re-run `llm-agent-bridge install`
+- The agent didn't know to call the bridge — re-run `agentperms install`
 - The hook was overridden by a different config scope (see "Stale entries" below)
 
 If the log shows the call, look at the verdict and rationale. The bridge's reasoning is right there.
@@ -36,7 +36,7 @@ grep -l "agent-bridge" \
   $(find ~/Code -path '*/.rulesync/hooks*' 2>/dev/null)
 ```
 
-Edit the offending files manually and remove the stale entries. Re-running `llm-agent-bridge install` only writes to the global scope (`~/.claude/settings.json`).
+Edit the offending files manually and remove the stale entries. Re-running `agentperms install` only writes to the global scope (`~/.claude/settings.json`).
 
 ### 3. "cd outside working directory" guard
 
@@ -63,7 +63,7 @@ The trace will show the verdict rationale: `"compound includes unrecognized segm
 A parse error in `~/.agent-permissions.jsonc` causes the bridge to emit `Ask` with rationale `"policy load failed: ..."`. The agent surfaces this as a prompt with the parse error message — fix the file and re-run.
 
 ```sh
-llm-agent-bridge edit
+agentperms edit
 ```
 
 ## "It allowed something it shouldn't have"
@@ -90,12 +90,12 @@ Project-local rules union with global. To narrow at project level, add `deny` ru
 
 ## "Install didn't seem to do anything"
 
-`llm-agent-bridge install` is idempotent. If the bridge was already installed at the same path, it returns without writing. To force a rewrite:
+`agentperms install` is idempotent. If the bridge was already installed at the same path, it returns without writing. To force a rewrite:
 
 ```sh
 # Edit ~/.claude/settings.json and remove the bridge PreToolUse entry.
 # Then re-run install.
-llm-agent-bridge install
+agentperms install
 ```
 
 The output of `install` lists each adapter and whether it wrote a file or skipped.
@@ -113,6 +113,6 @@ Include:
 1. The agent and version (`claude --version`, etc.)
 2. The exact command that prompted (or didn't)
 3. Your `.agent-permissions.jsonc` (redact anything sensitive)
-4. A trace log line for the offending invocation (set `LLM_AGENT_BRIDGE_TRACE` and reproduce)
+4. A trace log line for the offending invocation (set `AGENTPERMS_TRACE` and reproduce)
 
-Issue tracker: <https://github.com/jacks0n/llm-agent-bridge/issues>
+Issue tracker: <https://github.com/jacks0n/agentperms/issues>

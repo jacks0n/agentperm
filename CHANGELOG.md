@@ -20,7 +20,7 @@ All notable changes to this project are documented in this file. Format follows 
 ### Fixed
 
 - Shell parser now recursively unwraps `bash -c '…'` (single-quoted) and `bash -c $'…'` (ANSI-C) wrappers. tree-sitter-bash exposes these as `raw_string` / `ansi_c_string` leaves with no named children, so the previous walk produced an empty argv and the inner command bypassed policy entirely. Double-quoted `bash -c "…"` was already handled.
-- Bridge ownership check is now a strict basename match against the resolved binary plus a leading `check` subcommand, parsed via `shlex.split`. Substring matching could falsely strip neighbour tools whose paths happened to contain `llm-agent-bridge`.
+- Bridge ownership check is now a strict basename match against the resolved binary plus a leading `check` subcommand, parsed via `shlex.split`. Substring matching could falsely strip neighbour tools whose paths happened to contain `agentperms`.
 - Embedded bridge invocation is now `shlex.quote`d so paths containing spaces or shell metacharacters (e.g. `~/Library/Application Support/...`) no longer break the hook command line.
 - OpenCode plugin embeds the bridge path through `json.dumps`, so paths containing backslashes or quotes survive interpolation as a valid JS string literal.
 
@@ -37,7 +37,7 @@ Initial public release.
 - Aggregation: strictest wins; `Allow + NoOpinion` segments escalate to `Ask` to prevent silent allow-on-unknown in compounds.
 - Built-in redirect policy: file writes (`>`, `>>`, `&>`) → `Ask`; fd duplication (`2>&1`) and `2>/dev/null` → `NoOpinion`.
 - Claude Code bypass-mode coercion: `Ask → Allow` under `permission_mode: "bypassPermissions"`; `Deny` still bites.
-- `LLM_AGENT_BRIDGE_TRACE` env var for diagnostic logging.
+- `AGENTPERMS_TRACE` env var for diagnostic logging.
 - CLI: `install`, `import`, `check`, `edit`.
 - 57 tests covering parser, policy, and adapter round-trips.
 
@@ -46,5 +46,5 @@ Initial public release.
 - Gemini import is not implemented (regex DSL is hard to round-trip safely).
 - POSIX `--` argument terminator is not tracked by `BashOption.matches` — flags after `--` may match. Conservative direction is `Ask`, which is correct for a permission policy.
 
-[Unreleased]: https://github.com/jacks0n/llm-agent-bridge/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/jacks0n/llm-agent-bridge/releases/tag/v0.1.0
+[Unreleased]: https://github.com/jacks0n/agentperms/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jacks0n/agentperms/releases/tag/v0.1.0

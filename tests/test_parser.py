@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from llm_agent_bridge import parse_pipeline
+from agentperms import parse_pipeline
 
 
 def test_empty_command_is_parseable():
@@ -112,7 +112,7 @@ def test_append_redirect_captured():
 
 def test_basename_match_for_command_path():
     """`/usr/bin/ls -la` should still match a `Bash(ls:*)` rule."""
-    from llm_agent_bridge import BashCommand
+    from agentperms import BashCommand
 
     pipeline = parse_pipeline("/usr/bin/ls -la")
     [segment] = pipeline.segments

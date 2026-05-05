@@ -1,4 +1,4 @@
-# llm-agent-bridge
+# agentperms
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
@@ -14,20 +14,20 @@ It also gives you one source of truth instead of four, plus a richer rule gramma
 ## Install
 
 ```sh
-pipx install llm-agent-bridge
+pipx install agentperms
 # or
-uv tool install llm-agent-bridge
+uv tool install agentperms
 ```
 
 Then:
 
 ```sh
-llm-agent-bridge import    # pulls existing native rules into ~/.agent-permissions.jsonc
-llm-agent-bridge install   # wires the bridge into Claude Code, Codex, OpenCode, and Gemini hooks
-llm-agent-bridge edit      # opens the policy in $EDITOR (creates a default if missing)
+agentperms import    # pulls existing native rules into ~/.agent-permissions.jsonc
+agentperms install   # wires the bridge into Claude Code, Codex, OpenCode, and Gemini hooks
+agentperms edit      # opens the policy in $EDITOR (creates a default if missing)
 ```
 
-`install` auto-detects whether you use [Rulesync](https://github.com/dyoshikawa/rulesync) — if `~/.rulesync/` exists, it merges hook entries into `~/.rulesync/hooks.json` and you re-run `rulesync` to materialise per-tool configs. Otherwise it writes per-tool configs (`~/.claude/settings.json`, `~/.codex/hooks.json`+`config.toml`, `~/.gemini/settings.json`) directly. The OpenCode plugin shim is always installed at `~/.config/opencode/plugins/agent-bridge.js` because rulesync has no schema for `permission.ask` plugins. Pass `--mode rulesync|direct` to override detection or `--dry-run` to preview.
+`install` auto-detects whether you use [Rulesync](https://github.com/dyoshikawa/rulesync) — if `~/.rulesync/` exists, it merges hook entries into `~/.rulesync/hooks.json` and you re-run `rulesync` to materialise per-tool configs. Otherwise it writes per-tool configs (`~/.claude/settings.json`, `~/.codex/hooks.json`+`config.toml`, `~/.gemini/settings.json`) directly. The OpenCode plugin shim is always installed at `~/.config/opencode/plugins/agentperms.js` because rulesync has no schema for `permission.ask` plugins. Pass `--mode rulesync|direct` to override detection or `--dry-run` to preview.
 
 Per-project overrides live in `<project>/.agent-permissions.jsonc` — both files merge at decision time, deny wins.
 

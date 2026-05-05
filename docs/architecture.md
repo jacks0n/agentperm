@@ -8,7 +8,7 @@ The bridge replaces "four configs" with "one policy file plus four small adapter
 
 ## Domain model
 
-The whole system is built on three sum types and a small set of value objects, all defined in `src/llm_agent_bridge/__init__.py`.
+The whole system is built on three sum types and a small set of value objects, all defined in `src/agentperms/__init__.py`.
 
 ### Decision
 
@@ -142,7 +142,7 @@ Tree-sitter Bash is a maintained Bash grammar. It eliminates the regex parser's 
 ## Module layout
 
 ```
-src/llm_agent_bridge/__init__.py
+src/agentperms/__init__.py
 ├── JSON value model (system-boundary types)
 ├── Domain (Decision, Verdict, Rule, Request, Policy)
 ├── Aggregation (_stricter, aggregate)

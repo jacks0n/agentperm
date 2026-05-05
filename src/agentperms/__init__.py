@@ -972,7 +972,7 @@ export const AgentBridgePlugin = async (input) => ({{
 class OpencodeAdapter(AgentAdapter):
     name = AgentName.Opencode
     config_path: ClassVar[Path] = Path.home() / ".config/opencode/opencode.json"
-    plugin_path: ClassVar[Path] = Path.home() / ".config/opencode/plugins/agent-bridge.js"
+    plugin_path: ClassVar[Path] = Path.home() / ".config/opencode/plugins/agentperms.js"
 
     def import_native_rules(self) -> Iterator[tuple[Decision, Rule]]:
         for path in (self.config_path, self.config_path.with_suffix(".jsonc")):
@@ -1028,7 +1028,7 @@ class OpencodeAdapter(AgentAdapter):
 
         rulesync has no ``permission.ask`` plugin emitter — there is no schema for
         it — so the plugin is always installed directly. The plugin embeds the
-        absolute path to ``llm-agent-bridge`` resolved at install time, JSON-quoted
+        absolute path to ``agentperms`` resolved at install time, JSON-quoted
         so paths containing backslashes or quotes survive interpolation into a JS
         string literal.
         """
@@ -1157,7 +1157,7 @@ ADAPTERS: dict[AgentName, AgentAdapter] = {
 # -----------------------------------------------------------------------------
 
 
-BRIDGE_HOOK_MARKER = "llm-agent-bridge"
+BRIDGE_HOOK_MARKER = "agentperms"
 
 # Per-agent hook timeouts. Claude/Codex use seconds; Gemini uses milliseconds.
 _HOOK_TIMEOUTS: dict[str, int] = {
@@ -1168,7 +1168,7 @@ _HOOK_TIMEOUTS: dict[str, int] = {
 
 
 def _resolve_bridge_command() -> str:
-    """Return the absolute path to ``llm-agent-bridge`` if findable.
+    """Return the absolute path to ``agentperms`` if findable.
 
     GUI-launched OpenCode (Raycast/Spotlight) inherits a sparse ``PATH``; baking
     the resolved absolute path eliminates a class of silent ``ENOENT`` bugs. Falls
@@ -1226,9 +1226,9 @@ def _is_bridge_hook(hook: JsonValue) -> bool:
     """True iff this entry is one the bridge's installer wrote.
 
     Matches strictly on shape: the command must split into a binary whose
-    basename is ``llm-agent-bridge`` followed by ``check``. This avoids
+    basename is ``agentperms`` followed by ``check``. This avoids
     false-stripping unrelated wrappers whose paths happen to contain the
-    substring ``llm-agent-bridge``.
+    substring ``agentperms``.
     """
     if not isinstance(hook, dict):
         return False
@@ -1406,7 +1406,7 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="llm-agent-bridge")
+    parser = argparse.ArgumentParser(prog="agentperms")
     sub = parser.add_subparsers(dest="command", required=True)
 
     install = sub.add_parser("install", help="wire the bridge into agent hook configs")
@@ -1575,12 +1575,12 @@ def _select_adapter(agent: AgentName, event: str, payload: JsonObject) -> AgentA
 def _trace(
     agent: AgentName, event: str, payload: JsonObject | None, verdict: Verdict | None, note: str | None
 ) -> None:
-    """Append one JSON line per invocation to ``$LLM_AGENT_BRIDGE_TRACE`` if set.
+    """Append one JSON line per invocation to ``$AGENTPERMS_TRACE`` if set.
 
     Off by default. Set the env var to a writable path to enable. Used to debug whether the
     bridge is actually being called for a given command.
     """
-    target = os.environ.get("LLM_AGENT_BRIDGE_TRACE")
+    target = os.environ.get("AGENTPERMS_TRACE")
     if not target:
         return
     record: JsonObject = {

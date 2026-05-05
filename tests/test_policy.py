@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from llm_agent_bridge import (
+from agentperms import (
     BashCommand,
     BashOption,
     Decision,

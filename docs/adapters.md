@@ -1,6 +1,6 @@
 # Adapter notes
 
-Each agent has its own hook protocol, payload shape, and verdict envelope. The adapters in `src/llm_agent_bridge/__init__.py` translate between them and the bridge's uniform `Request` / `Verdict` types.
+Each agent has its own hook protocol, payload shape, and verdict envelope. The adapters in `src/agentperms/__init__.py` translate between them and the bridge's uniform `Request` / `Verdict` types.
 
 ## Claude Code
 
@@ -86,7 +86,7 @@ Codex's allow-list lives in `.rules` files using a `prefix_rule(pattern=[...], d
 
 ## OpenCode
 
-**Plugin:** `~/.config/opencode/plugins/agent-bridge.js`. OpenCode runs JavaScript plugins; the bridge ships a tiny shim that shells out to the Python binary. The plugin is always installed directly regardless of mode — rulesync has no schema for `permission.ask` plugins. The shim's `const bridge = "..."` is filled in with the absolute path to `llm-agent-bridge` resolved at install time, so GUI launches with sparse `PATH` still find it.
+**Plugin:** `~/.config/opencode/plugins/agentperms.js`. OpenCode runs JavaScript plugins; the bridge ships a tiny shim that shells out to the Python binary. The plugin is always installed directly regardless of mode — rulesync has no schema for `permission.ask` plugins. The shim's `const bridge = "..."` is filled in with the absolute path to `agentperms` resolved at install time, so GUI launches with sparse `PATH` still find it.
 
 **Plugin event:** `permission.ask`.
 

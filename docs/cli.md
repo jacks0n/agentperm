@@ -1,7 +1,7 @@
 # CLI reference
 
 ```sh
-llm-agent-bridge <command> [args]
+agentperms <command> [args]
 ```
 
 Four subcommands: `install`, `import`, `check`, `edit`. The first three are usually run once at setup time; `check` is what the agent itself runs at decision time.
@@ -11,7 +11,7 @@ Four subcommands: `install`, `import`, `check`, `edit`. The first three are usua
 Wires the bridge into every supported agent's hook config.
 
 ```sh
-llm-agent-bridge install [--mode auto|rulesync|direct] [--dry-run]
+agentperms install [--mode auto|rulesync|direct] [--dry-run]
 ```
 
 ### Modes
@@ -25,7 +25,7 @@ llm-agent-bridge install [--mode auto|rulesync|direct] [--dry-run]
 - **Claude Code:** appends a `PreToolUse` hook to `~/.claude/settings.json` (matcher `*`). Strips any spurious bridge entry that ended up in `PermissionRequest` (Claude doesn't fire that event).
 - **Codex CLI:** appends `PreToolUse` (matcher `Bash`) and `PermissionRequest` (matcher `Bash|apply_patch|mcp__.*`) hooks to `~/.codex/hooks.json`, and enables `[features].codex_hooks = true` in `~/.codex/config.toml`.
 - **Gemini CLI:** appends a `BeforeTool` hook to `~/.gemini/settings.json` (matcher `.*`).
-- **OpenCode:** writes `~/.config/opencode/plugins/agent-bridge.js` — always, regardless of mode.
+- **OpenCode:** writes `~/.config/opencode/plugins/agentperms.js` — always, regardless of mode.
 
 ### Flags
 
@@ -47,7 +47,7 @@ After install, every agent consults `~/.agent-permissions.jsonc` for permission 
 Pulls each agent's existing native rules into `~/.agent-permissions.jsonc`.
 
 ```sh
-llm-agent-bridge import
+agentperms import
 ```
 
 This reads:
@@ -63,7 +63,7 @@ Rules are merged into the policy file (existing rules kept, new rules appended).
 Runtime decision endpoint. Reads the agent's hook payload from stdin, writes a verdict envelope to stdout. **You don't run this manually** — `install` wires it up.
 
 ```sh
-llm-agent-bridge check --agent <claude|codex|opencode|gemini> --event <event-name>
+agentperms check --agent <claude|codex|opencode|gemini> --event <event-name>
 ```
 
 Arguments:
@@ -86,10 +86,10 @@ Failure modes (all fail open with empty `{}` so the agent's native flow takes ov
 
 ### Tracing
 
-Set `LLM_AGENT_BRIDGE_TRACE` to a writable path to log every invocation:
+Set `AGENTPERMS_TRACE` to a writable path to log every invocation:
 
 ```sh
-export LLM_AGENT_BRIDGE_TRACE=/tmp/bridge-trace.log
+export AGENTPERMS_TRACE=/tmp/bridge-trace.log
 ```
 
 Each invocation appends one JSON line: `{ agent, event, payload, verdict, note }`. Useful when debugging "why did this prompt me?" — see [Troubleshooting](troubleshooting.md).
@@ -99,7 +99,7 @@ Each invocation appends one JSON line: `{ agent, event, payload, verdict, note }
 Opens `~/.agent-permissions.jsonc` in `$EDITOR` (or `$VISUAL`, falling back to `vi`). Creates the file with a sensible default policy if it doesn't exist.
 
 ```sh
-llm-agent-bridge edit
+agentperms edit
 ```
 
 The default policy ships with read-only commands (cat, ls, grep, etc.) and read-only git commands on the allow list, `sed -i` on the ask list, and `sudo` / `rm -rf /` on the deny list. Edit to taste.

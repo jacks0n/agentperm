@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "llm-agent-bridge"
+name = "agentperms"
 version = "0.1.0"
 description = "Permission policy mediator for Claude Code, Codex, OpenCode, and Gemini CLI."
 readme = "README.md"
@@ -72,12 +72,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jacks0n/llm-agent-bridge"
-Repository = "https://github.com/jacks0n/llm-agent-bridge"
-Issues = "https://github.com/jacks0n/llm-agent-bridge/issues"
+Homepage = "https://github.com/jacks0n/agentperms"
+Repository = "https://github.com/jacks0n/agentperms"
+Issues = "https://github.com/jacks0n/agentperms/issues"
 
 [project.scripts]
-llm-agent-bridge = "llm_agent_bridge:main"
+agentperms = "agentperms:main"
 
 [project.optional-dependencies]
 dev = [
@@ -87,7 +87,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/llm_agent_bridge"]
+packages = ["src/agentperms"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/", "tests/", "README.md", "LICENSE", "pyproject.toml"]
