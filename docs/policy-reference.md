@@ -32,7 +32,7 @@ A rule is either a **string** (compact form, matches Claude Code's existing synt
 
 #### `"Bash(<command>:*)"` — bash command prefix
 
-Matches a shell segment whose argv starts with `<command>`.
+Matches a shell segment whose argv matches the whitespace-separated token pattern.
 
 ```jsonc
 "Bash(ls:*)"          // ls -la, /usr/bin/ls, ls foo bar
@@ -40,7 +40,36 @@ Matches a shell segment whose argv starts with `<command>`.
 "Bash(git status)"    // exact match — only `git status` with no args
 ```
 
-The trailing `:*` is convention; with or without it, the rule matches the prefix. The rule matches by **basename** on the first arg, so `/usr/bin/ls` and `ls` both match `Bash(ls:*)`.
+The trailing `:*` controls whether argv may extend past the pattern: with `:*`, extra args are allowed; without it, argv must match exactly. The rule matches by **basename** on the first arg, so `/usr/bin/ls` and `ls` both match `Bash(ls:*)`.
+
+##### Glob tokens — `*` and `**`
+
+Tokens in the pattern can be globs:
+
+- `*` matches **exactly one** argv token.
+- `**` matches **zero or more** argv tokens.
+
+```jsonc
+"Bash(pnpm --dir * build:*)"  // pnpm --dir <anything> build [more args]
+"Bash(pnpm ** build:*)"       // pnpm with any intermediate flags, then build
+"Bash(git * --short:*)"       // git <subcommand> --short ...
+```
+
+How matching works in practice:
+
+| Rule                                    | Matches                                                                | Doesn't match                                          |
+| --------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------ |
+| `Bash(pnpm --dir * build:*)`            | `pnpm --dir foo build`, `pnpm --dir foo build --watch`                 | `pnpm build` (no `--dir`), `pnpm --dir foo bar build`  |
+| `Bash(pnpm ** build:*)`                 | `pnpm build`, `pnpm --dir foo build`, `pnpm -r --silent build`         | `pnpm install`                                         |
+| `Bash(pnpm --filter * test:*)`          | `pnpm --filter @scope/pkg test`                                        | `pnpm test`, `pnpm --filter @scope/pkg --filter b test`|
+| `Bash(docker compose ** up:*)`          | `docker compose up`, `docker compose -f x.yml up -d`                   | `docker run …`                                         |
+| `Bash(cargo ** --release:*)`            | `cargo build --release`, `cargo test --workspace --release`            | `cargo check`                                          |
+
+Position counts. `*` is one token, not "any string" — `pnpm --dir foo build` is 4 argv tokens (matches a 4-token rule), but `pnpm --dir=foo build` is 3 argv tokens and won't match `Bash(pnpm --dir * build:*)`. Add a separate rule for the `=` form if your agent uses it (`Bash(pnpm --dir=* build:*)` won't help — `--dir=*` is one literal token, not a prefix glob).
+
+`**` is greedy but backtracks, so `Bash(pnpm ** build:*)` correctly matches `pnpm --dir foo build --watch` even though `--watch` could also be consumed by `**` — the matcher tries every split until one works.
+
+The basename rule applies only when the first token is a **literal** — a `*` or `**` covering position 0 doesn't carry the literal needed for basename comparison. There is no escape syntax for a literal `*` argv token (rare, since shells expand `*` before exec); if you need to match one, use the dict form or contact the maintainer.
 
 #### `"<ToolName>"` — named tool
 
@@ -79,6 +108,45 @@ For anything more expressive than a prefix, use the dict form.
 - `reason`: surfaced as the rationale when the rule fires.
 
 ⚠️  `--` terminator handling: the matcher does not yet track the POSIX `--` boundary. `sed -e s/x/y/ -- -i` will still match `BashOption(-i)` even though `-i` after `--` is a positional filename. The conservative direction (Ask on `-i`) is correct for a permission policy.
+
+## Built-in unconditional allows
+
+Two categories of shell input bypass policy entirely because they have no OS-level side effect on their own:
+
+**Control flow and grouping** — the parser traverses these and evaluates the *commands they contain*. The control-flow construct itself is never something to allow or deny:
+
+- `if … then … elif … else … fi`
+- `while … do … done`, `until … do … done`
+- `for x in …; do … done`, `select x in …; do … done`
+- `case x in p) … ;; esac`
+- `{ …; }` brace groups
+- `( … )` subshells
+- `! cmd` negation
+- `foo() { … }` function definitions (body evaluated at definition time)
+
+**Inert command names** — these are always allowed regardless of arguments, because they cannot create, modify, or read files; cannot fork processes; cannot mutate state visible outside the parsing shell:
+
+| Name | Why inert |
+|---|---|
+| `true`, `false`, `:` | Status setters / no-op |
+| `read` | Binds shell variable from stdin (process-local) |
+| `echo`, `printf` | Write to fds; redirects evaluated separately |
+| `[`, `[[` | Synthetic from `test_command` AST node |
+| `((` | Synthetic from arithmetic `compound_statement` |
+
+User `Bash(<name>:*)` rules targeting any of these names are **silently ignored at decision time**. `load_policy_file` emits a `PolicyWarning` so the shadowing isn't invisible:
+
+```
+PolicyWarning: rule Bash(echo:*) targets inert shell name 'echo' and will be ignored
+```
+
+What is *not* bypassed:
+
+- **Redirects** are evaluated independently. `echo foo > out.txt` still surfaces an Ask via the redirect rule (write-to-file), because `>` is a side effect even though `echo` isn't.
+- **Pipe aggregation** still applies. `echo foo | weird_cmd` still escalates to Ask under "Allow + NoOpinion → Ask" if `weird_cmd` is unrecognised.
+- **Anything with real side effects** stays under user rules: `cd`, `export`, `kill`, `eval`, `exec`, `source`, etc. are all parsed as regular commands and require an explicit `Bash(<name>:*)` rule.
+
+See [Architecture: Inert command names](architecture.md#inert-command-names) for the rationale.
 
 ## Examples
 
@@ -131,6 +199,47 @@ For anything more expressive than a prefix, use the dict form.
 ```
 
 `ask` is checked before `allow`, so `sed -i` hits the ask rule and `sed -n 1,10p foo` hits the allow rule.
+
+### Workspace build commands (using globs)
+
+Whitelist build/test commands across a monorepo without enumerating every package or flag combination:
+
+```jsonc
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      // pnpm workspace operations — agent picks the package via --dir or --filter
+      "Bash(pnpm --dir * build:*)",
+      "Bash(pnpm --dir * test:*)",
+      "Bash(pnpm --dir * lint:*)",
+      "Bash(pnpm --filter * build:*)",
+      "Bash(pnpm --filter * test:*)",
+
+      // any pnpm invocation that ends in `build` or `test` (more permissive)
+      "Bash(pnpm ** build:*)",
+      "Bash(pnpm ** test:*)",
+
+      // cargo release builds across any workspace shape
+      "Bash(cargo ** --release:*)",
+
+      // docker compose subcommands with arbitrary flags
+      "Bash(docker compose ** up:*)",
+      "Bash(docker compose ** down:*)",
+      "Bash(docker compose ** logs:*)"
+    ],
+    "ask": [
+      // package-manager mutations escalate even though they'd otherwise match `pnpm **`
+      // (`ask` is checked before `allow`, so these win for `pnpm install`, `pnpm add x`, etc.)
+      "Bash(pnpm install:*)", "Bash(pnpm add:*)", "Bash(pnpm remove:*)", "Bash(pnpm update:*)",
+      "Bash(npm install:*)",  "Bash(npm i:*)",   "Bash(npm uninstall:*)",
+      "Bash(yarn add:*)",     "Bash(yarn remove:*)"
+    ]
+  }
+}
+```
+
+`hasOption` (the dict form's `when`) only matches arguments starting with `-`. To gate a *subcommand* like `install`, use a string rule with a literal token instead — as shown above.
 
 ### Hard deny
 

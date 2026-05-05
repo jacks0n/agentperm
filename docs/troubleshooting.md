@@ -58,7 +58,15 @@ When Claude Code is in `bypassPermissions` mode, the bridge coerces `Ask → All
 
 The trace will show the verdict rationale: `"compound includes unrecognized segment: no rule matched 'weird_thing'"`.
 
-### 6. The policy file is broken
+### 6. My `Bash(echo:*)` / `Bash(true:*)` / etc. rule isn't taking effect
+
+A small set of shell primitives (`true`, `false`, `:`, `read`, `echo`, `printf`, `[`, `[[`, `((`) are **unconditionally allowed** because they have no OS-level side effect on their own. User rules — `allow`, `ask`, or `deny` — targeting these names are silently ignored at decision time, and `load_policy_file` emits a `PolicyWarning` so the shadowing isn't invisible.
+
+If you wanted to gate `echo`, the gate is on the *side effect*, not the command. `echo foo > sensitive.txt` still surfaces an Ask via the redirect rule (write-to-file). `echo foo | weird_cmd` still escalates to Ask via pipe aggregation if `weird_cmd` is unrecognised. There's no way to prompt on a bare `echo foo` because there's nothing to prompt about.
+
+See [Policy reference: Built-in unconditional allows](policy-reference.md#built-in-unconditional-allows) for the full list and rationale.
+
+### 7. The policy file is broken
 
 A parse error in `~/.agent-permissions.jsonc` causes the bridge to emit `Ask` with rationale `"policy load failed: ..."`. The agent surfaces this as a prompt with the parse error message — fix the file and re-run.
 

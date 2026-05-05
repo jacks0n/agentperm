@@ -109,6 +109,22 @@ def coerce_for_permission_mode(verdict, payload):
 
 Codex / OpenCode / Gemini don't ship a bypass equivalent in the hook payload, so the coercion is a no-op there.
 
+### Inert command names
+
+A small set of shell builtins / synthetic AST tokens have no possible OS-level side effect — they cannot create, modify, or read files; cannot fork processes; cannot mutate state visible outside the parsing shell. `_match_bash` short-circuits to `Allow` for any segment whose argv[0] basename is in this set, *before* user rules are consulted:
+
+```
+true  false  :         status setters / no-op
+read                   binds shell variable from stdin (process-local)
+echo  printf           write to fds; redirects evaluated separately
+[  [[                  synthetic from test_command
+((                     synthetic from arithmetic compound_statement
+```
+
+This is unconditional: user `deny` / `ask` / `allow` rules targeting these names are silently ignored at decision time. `load_policy_file` emits a `PolicyWarning` when it sees one so the shadowing isn't invisible. Redirect verdicts still apply per-segment via `_decide_segment`, so `echo foo > out` correctly surfaces an Ask via the redirect rule, and pipe aggregation still escalates `echo foo | unknown` to Ask.
+
+The contract is "nothing the bridge does should turn an inert shell primitive into a permission prompt." Anything with real side effects — `cd`, `export`, `kill`, `eval`, etc. — stays under user rules.
+
 ## Shell parsing
 
 Shell parsing lives in one function: `parse_pipeline(command: str) -> Pipeline`. It hands the string to Tree-sitter's Bash grammar and walks the AST to extract `Segment(argv, redirects)` tuples. The parser handles:

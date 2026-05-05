@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import warnings
+from pathlib import Path
+
 from agentperms import (
     BashCommand,
     BashOption,
     Decision,
     NamedTool,
     Policy,
+    PolicyWarning,
     Segment,
     ShellRequest,
     ToolRequest,
     Verdict,
     aggregate,
     coerce_for_permission_mode,
+    load_policy_file,
     parse_pipeline,
 )
 
@@ -30,6 +35,60 @@ def test_bash_command_does_not_match_shorter_argv():
     rule = BashCommand(("git", "status"))
     seg = Segment(argv=("git",), redirects=())
     assert rule.matches(seg) is False
+
+
+def test_bash_command_glob_star_matches_one_token():
+    rule = BashCommand(("pnpm", "*", "build"))
+    seg = Segment(argv=("pnpm", "--dir", "build"), redirects=())
+    assert rule.matches(seg) is True
+
+
+def test_bash_command_glob_star_does_not_match_zero_tokens():
+    rule = BashCommand(("pnpm", "*", "build"))
+    seg = Segment(argv=("pnpm", "build"), redirects=())
+    assert rule.matches(seg) is False
+
+
+def test_bash_command_glob_star_does_not_match_two_tokens():
+    rule = BashCommand(("pnpm", "*", "build"))
+    seg = Segment(argv=("pnpm", "--dir", "x", "build"), redirects=())
+    assert rule.matches(seg) is False
+
+
+def test_bash_command_glob_doublestar_matches_zero_tokens():
+    rule = BashCommand(("pnpm", "**", "build"))
+    seg = Segment(argv=("pnpm", "build"), redirects=())
+    assert rule.matches(seg) is True
+
+
+def test_bash_command_glob_doublestar_matches_many_tokens():
+    rule = BashCommand(("pnpm", "**", "build"))
+    seg = Segment(argv=("pnpm", "--dir", "x", "--silent", "build"), redirects=())
+    assert rule.matches(seg) is True
+
+
+def test_bash_command_glob_doublestar_with_trailing_extras():
+    rule = BashCommand(("pnpm", "**", "build"), trailing_wildcard=True)
+    seg = Segment(argv=("pnpm", "--dir", "x", "build", "--watch"), redirects=())
+    assert rule.matches(seg) is True
+
+
+def test_bash_command_exact_form_rejects_extra_args():
+    rule = BashCommand(("git", "status"), trailing_wildcard=False)
+    seg = Segment(argv=("git", "status", "--short"), redirects=())
+    assert rule.matches(seg) is False
+
+
+def test_bash_command_exact_form_matches_full_argv():
+    rule = BashCommand(("git", "status"), trailing_wildcard=False)
+    seg = Segment(argv=("git", "status"), redirects=())
+    assert rule.matches(seg) is True
+
+
+def test_bash_command_glob_first_token_skips_basename_rule():
+    rule = BashCommand(("*", "status"))
+    seg = Segment(argv=("/usr/bin/git", "status"), redirects=())
+    assert rule.matches(seg) is True
 
 
 def test_bash_option_short_flag_matches_combined():
@@ -218,3 +277,129 @@ def test_merged_policies_union_rules_without_duplicates():
     merged = a.merged_with(b)
     prefixes = {r.prefix for r in merged.allow if isinstance(r, BashCommand)}
     assert prefixes == {("ls",), ("cat",), ("rg",)}
+
+
+# ---- Inert command names -------------------------------------------------
+
+
+def _decide(policy: Policy, command: str) -> Verdict:
+    return policy.decide(ShellRequest(parse_pipeline(command)))
+
+
+def test_inert_builtins_allowed_unconditionally():
+    policy = Policy()  # no user rules at all
+    for command in (
+        "echo foo",
+        "true",
+        "false",
+        ":",
+        "read line",
+        'printf "%s" hi',
+        "[ -f x ]",
+        "[[ -f x ]]",
+        "(( 1 + 1 ))",
+    ):
+        assert _decide(policy, command).decision is Decision.Allow, command
+
+
+def test_inert_allow_short_circuits_user_deny():
+    """``deny: ['Bash(echo:*)']`` does not block ``echo`` — by design (user-confirmed)."""
+    policy = Policy(deny=(BashCommand(("echo",)),))
+    assert _decide(policy, "echo foo").decision is Decision.Allow
+
+
+def test_echo_with_redirect_still_asks():
+    """Inert allow short-circuits the command match, but redirects are evaluated separately."""
+    policy = Policy()
+    verdict = _decide(policy, "echo foo > out.txt")
+    assert verdict.decision is Decision.Ask
+    assert "out.txt" in verdict.rationale
+
+
+def test_inert_pipe_to_unknown_escalates_to_ask():
+    """``echo foo | weird_cmd`` — echo is allowed, weird_cmd has no rule → Ask."""
+    policy = Policy()
+    verdict = _decide(policy, "echo foo | weird_cmd")
+    assert verdict.decision is Decision.Ask
+
+
+def test_if_with_allowed_body_is_allow():
+    policy = Policy(allow=(BashCommand(("cat",)),))
+    assert _decide(policy, "if [ -f x ]; then cat x; fi").decision is Decision.Allow
+
+
+def test_if_with_unknown_body_asks():
+    policy = Policy()
+    assert _decide(policy, "if [ -f x ]; then weird_cmd; fi").decision is Decision.Ask
+
+
+def test_if_with_denied_body_is_deny():
+    """Function/control-flow bodies are subject to deny rules."""
+    policy = Policy(deny=(BashCommand(("rm", "-rf")),))
+    assert _decide(policy, "if true; then rm -rf /; fi").decision is Decision.Deny
+
+
+def test_function_body_subjected_to_policy():
+    """Defining-then-calling is the realistic threat — the body must be evaluated."""
+    policy = Policy(deny=(BashCommand(("rm", "-rf")),))
+    assert _decide(policy, "foo() { rm -rf /; }; foo").decision is Decision.Deny
+
+
+def test_export_matches_user_allow():
+    """``Bash(export:*)`` allow rule must match an ``export FOO=bar`` declaration."""
+    policy = Policy(allow=(BashCommand(("export",)),))
+    assert _decide(policy, "export FOO=bar").decision is Decision.Allow
+
+
+def test_export_with_substitution_asks():
+    """``export FOO=$(curl evil)`` must remain unparseable → Ask, regardless of allow rules."""
+    policy = Policy(allow=(BashCommand(("export",)),))
+    assert _decide(policy, "export FOO=$(curl evil)").decision is Decision.Ask
+
+
+def test_load_policy_warns_on_inert_rule(tmp_path: Path):
+    """A user rule on an inert name will silently never match — surface at load time."""
+    policy_path = tmp_path / ".agent-permissions.jsonc"
+    policy_path.write_text(
+        '{"version": 1, "permissions": {"allow": ["Bash(echo:*)"], "ask": [], "deny": []}}\n'
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        load_policy_file(policy_path)
+    inert_warnings = [w for w in caught if issubclass(w.category, PolicyWarning)]
+    assert len(inert_warnings) == 1
+    assert "echo" in str(inert_warnings[0].message)
+
+
+def test_load_policy_warns_on_inert_bash_option(tmp_path: Path):
+    """BashOption rules (dict form) targeting an inert command also warn."""
+    policy_path = tmp_path / ".agent-permissions.jsonc"
+    policy_path.write_text(
+        '{"version": 1, "permissions": {"ask": ['
+        '{"tool": "Bash", "command": "echo", "when": {"hasOption": ["-n"]}, "reason": "x"}'
+        ']}}\n'
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        load_policy_file(policy_path)
+    inert_warnings = [w for w in caught if issubclass(w.category, PolicyWarning)]
+    assert len(inert_warnings) == 1
+
+
+def test_load_policy_does_not_warn_on_normal_rule(tmp_path: Path):
+    policy_path = tmp_path / ".agent-permissions.jsonc"
+    policy_path.write_text(
+        '{"version": 1, "permissions": {"allow": ["Bash(sed:*)"]}}\n'
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        load_policy_file(policy_path)
+    inert_warnings = [w for w in caught if issubclass(w.category, PolicyWarning)]
+    assert inert_warnings == []
+
+
+def test_user_request_original_failing_case():
+    """Regression for the exact command that motivated this work."""
+    policy = Policy(allow=(BashCommand(("sed",)),))
+    cmd = "if [ -f .env.development ]; then sed -n '1,220p' .env.development; fi"
+    assert _decide(policy, cmd).decision is Decision.Allow

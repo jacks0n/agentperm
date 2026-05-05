@@ -23,6 +23,7 @@ from agentperms import (
     InstallMode,
     JsonObject,
     OpencodeAdapter,
+    Policy,
     ShellRequest,
     ToolRequest,
     Verdict,
@@ -40,7 +41,24 @@ def test_string_rule_round_trip():
     rule = parse_rule("Bash(git status:*)")
     assert isinstance(rule, BashCommand)
     assert rule.prefix == ("git", "status")
+    assert rule.trailing_wildcard is True
     assert rule.serialize() == "Bash(git status:*)"
+
+
+def test_string_rule_round_trip_with_glob():
+    rule = parse_rule("Bash(pnpm * build:*)")
+    assert isinstance(rule, BashCommand)
+    assert rule.prefix == ("pnpm", "*", "build")
+    assert rule.trailing_wildcard is True
+    assert rule.serialize() == "Bash(pnpm * build:*)"
+
+
+def test_string_rule_round_trip_exact():
+    rule = parse_rule("Bash(git status)")
+    assert isinstance(rule, BashCommand)
+    assert rule.prefix == ("git", "status")
+    assert rule.trailing_wildcard is False
+    assert rule.serialize() == "Bash(git status)"
 
 
 def test_dict_rule_round_trip():
@@ -633,3 +651,30 @@ def test_opencode_plugin_json_escapes_special_path(
     # ``json.dumps`` wraps in double quotes and escapes backslashes; the literal
     # must appear as a valid JS string.
     assert 'const bridge = "C:\\\\Program Files\\\\agentperms";' in text
+
+
+# ---- End-to-end glob matching through Claude PreToolUse ------------------
+
+
+def test_claude_pretooluse_allows_pnpm_dir_build_via_glob():
+    rule = parse_rule("Bash(pnpm --dir * build:*)")
+    assert isinstance(rule, BashCommand)
+    policy = Policy(allow=(rule,))
+    request = ClaudeAdapter().parse_event(
+        {"tool_name": "Bash", "tool_input": {"command": "pnpm --dir web-overlay/client build"}},
+        "PreToolUse",
+    )
+    assert isinstance(request, ShellRequest)
+    assert policy.decide(request).decision is Decision.Allow
+
+
+def test_claude_pretooluse_no_match_when_subcommand_differs():
+    rule = parse_rule("Bash(pnpm --dir * build:*)")
+    assert isinstance(rule, BashCommand)
+    policy = Policy(allow=(rule,))
+    request = ClaudeAdapter().parse_event(
+        {"tool_name": "Bash", "tool_input": {"command": "pnpm --dir web-overlay/client install"}},
+        "PreToolUse",
+    )
+    assert isinstance(request, ShellRequest)
+    assert policy.decide(request).decision is Decision.NoOpinion

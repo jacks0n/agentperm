@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -159,18 +160,56 @@ class Rule(ABC):
 
 @dataclass(frozen=True)
 class BashCommand(Rule):
-    """``Bash(git status:*)`` — matches a bash segment whose argv starts with the prefix."""
+    """``Bash(git status:*)`` — matches a bash segment whose argv matches the token pattern.
+
+    Tokens are literals by default; ``*`` matches exactly one argv element and ``**`` matches
+    zero or more. ``trailing_wildcard`` corresponds to the ``:*`` suffix and lets argv extend
+    past the pattern; without it, argv must be consumed exactly.
+    """
 
     prefix: tuple[str, ...]
+    trailing_wildcard: bool = True
 
     def matches(self, segment: Segment) -> bool:
-        if not self.prefix or len(segment.argv) < len(self.prefix):
+        if not self.prefix:
             return False
-        head = tuple(_basename(a) if i == 0 else a for i, a in enumerate(segment.argv[: len(self.prefix)]))
-        return head == self.prefix
+        return _glob_match_argv(self.prefix, segment.argv, self.trailing_wildcard)
 
     def serialize(self) -> str:
-        return f"Bash({' '.join(self.prefix)}:*)"
+        body = " ".join(self.prefix)
+        return f"Bash({body}:*)" if self.trailing_wildcard else f"Bash({body})"
+
+
+def _glob_match_argv(pattern: tuple[str, ...], argv: tuple[str, ...], trailing_wildcard: bool) -> bool:
+    """Match a token-glob pattern against argv.
+
+    Literals require exact equality (basename rule for argv[0] only). ``*`` consumes exactly
+    one argv token; ``**`` consumes zero or more. When ``*`` or ``**`` covers position 0 the
+    basename rule does not apply — the glob doesn't carry the literal token to compare.
+    """
+
+    def go(pi: int, ai: int) -> bool:
+        while pi < len(pattern):
+            tok = pattern[pi]
+            if tok == "**":
+                for skip in range(len(argv) - ai + 1):
+                    if go(pi + 1, ai + skip):
+                        return True
+                return False
+            if ai >= len(argv):
+                return False
+            if tok == "*":
+                pi += 1
+                ai += 1
+                continue
+            actual = _basename(argv[ai]) if ai == 0 else argv[ai]
+            if actual != tok:
+                return False
+            pi += 1
+            ai += 1
+        return trailing_wildcard or ai == len(argv)
+
+    return go(0, 0)
 
 
 @dataclass(frozen=True)
@@ -236,6 +275,27 @@ def _arg_matches_option(arg: str, option: str) -> bool:
 # -----------------------------------------------------------------------------
 
 
+# Shell builtins / synthetic AST tokens with no possible OS-level side effect.
+# Matched before user rules in ``_match_bash`` so they are unconditionally allowed —
+# user ``deny``/``ask``/``allow`` rules on these names are ignored (warned at load).
+# Redirect verdicts are still applied independently in ``_decide_segment``, so e.g.
+# ``echo foo > out`` still surfaces an Ask via the redirect rule.
+_INERT_COMMAND_NAMES: frozenset[str] = frozenset({
+    "true", "false", ":",       # status setters / no-op
+    "read",                     # in-process variable bind only
+    "echo", "printf",           # output to fds; redirects evaluated separately
+    "[", "[[",                  # synthetic from test_command
+    "((",                       # synthetic from arithmetic compound_statement
+})
+
+
+class PolicyWarning(UserWarning):
+    """Surfaced at policy-load when a user rule targets a name in ``_INERT_COMMAND_NAMES``.
+
+    The rule will be silently ignored at decision time; the warning lets the user notice.
+    """
+
+
 @dataclass(frozen=True)
 class Policy:
     deny: tuple[Rule, ...] = ()
@@ -283,6 +343,8 @@ class Policy:
         return _stricter(_evaluate_redirects(segment.redirects), self._match_bash(segment))
 
     def _match_bash(self, segment: Segment) -> Verdict:
+        if segment.argv and _basename(segment.argv[0]) in _INERT_COMMAND_NAMES:
+            return Verdict(Decision.Allow, "inert shell builtin")
         for decision, rule in self.all_rules():
             if isinstance(rule, BashCommand | BashOption) and rule.matches(segment):
                 rationale = rule.rationale if isinstance(rule, BashOption) else _format_rule(rule, decision)
@@ -681,10 +743,10 @@ def _parse_string_rule(text: str) -> Rule | None:
     text = text.strip()
     bash_wildcard = re.fullmatch(r"Bash\((.+):\*\)", text)
     if bash_wildcard:
-        return BashCommand(tuple(bash_wildcard.group(1).split()))
+        return BashCommand(tuple(bash_wildcard.group(1).split()), trailing_wildcard=True)
     bash_exact = re.fullmatch(r"Bash\((.+)\)", text)
     if bash_exact:
-        return BashCommand(tuple(bash_exact.group(1).split()))
+        return BashCommand(tuple(bash_exact.group(1).split()), trailing_wildcard=False)
     if text:
         return NamedTool(text)
     return None
@@ -755,11 +817,35 @@ def _policy_from_dict(data: JsonObject) -> Policy:
     permissions = data.get("permissions")
     if not isinstance(permissions, dict):
         return Policy()
-    return Policy(
-        deny=tuple(_rules_from_list(permissions.get("deny"))),
-        ask=tuple(_rules_from_list(permissions.get("ask"))),
-        allow=tuple(_rules_from_list(permissions.get("allow"))),
-    )
+    deny = tuple(_rules_from_list(permissions.get("deny")))
+    ask = tuple(_rules_from_list(permissions.get("ask")))
+    allow = tuple(_rules_from_list(permissions.get("allow")))
+    for rule in (*deny, *ask, *allow):
+        _warn_if_inert_shadow(rule)
+    return Policy(deny=deny, ask=ask, allow=allow)
+
+
+def _warn_if_inert_shadow(rule: Rule) -> None:
+    """Warn when a Bash rule targets a name in ``_INERT_COMMAND_NAMES``.
+
+    The rule will silently never match at decision time (inert allow short-circuits
+    in ``_match_bash``); a load-time warning makes the shadowing visible.
+    """
+    names: tuple[str, ...]
+    if isinstance(rule, BashCommand) and rule.prefix:
+        names = (_basename(rule.prefix[0]),)
+    elif isinstance(rule, BashOption):
+        names = tuple(_basename(c) for c in rule.commands)
+    else:
+        return
+    for name in names:
+        if name in _INERT_COMMAND_NAMES:
+            warnings.warn(
+                f"rule {rule.serialize()!r} targets inert shell name {name!r} and will be ignored",
+                PolicyWarning,
+                stacklevel=3,
+            )
+            return
 
 
 def _rules_from_list(raw: JsonValue) -> Iterator[Rule]:
