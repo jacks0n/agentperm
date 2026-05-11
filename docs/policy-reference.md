@@ -272,7 +272,8 @@ Compound shell commands are decomposed into segments and each is evaluated again
 | `cat foo | weird_thing` | `[Allow, NoOpinion]` | **Ask** (escalation) |
 | `echo hi > out.txt` | `[Allow + redirect Ask]` | Ask |
 | `rm -rf /tmp; cat foo` | `[Deny, Allow]` | Deny |
-| `rm $(cat allowed)` | unparseable | Ask |
+| `rm $(cat allowed)` (both `rm` and `cat` allowed) | `[Allow, Allow]` | Allow |
+| `rm $(curl evil)` (`curl` not allowed) | `[Allow, NoOpinion]` | **Ask** (escalation) |
 
 ## Importing native rules
 

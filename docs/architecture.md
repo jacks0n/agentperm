@@ -67,6 +67,9 @@ aggregate(verdicts)   →  Verdict
 coerce_for_permission_mode  (suppresses Ask under Claude bypass)
        │
        ▼
+coerce_for_pane_bypass      (suppresses Ask + NoOpinion under per-pane bypass)
+       │
+       ▼
 adapter.write_verdict (agent-specific JSON envelope)
 ```
 
@@ -107,7 +110,35 @@ def coerce_for_permission_mode(verdict, payload):
 
 `Ask` becomes `Allow`. `Deny` still bites — bypass means "skip the prompt", not "skip safety." `NoOpinion` is left alone so Claude's native fallthrough takes over.
 
-Codex / OpenCode / Gemini don't ship a bypass equivalent in the hook payload, so the coercion is a no-op there.
+Codex / OpenCode / Gemini don't ship a bypass equivalent in the hook payload, so the coercion is a no-op there. They get an out-of-band equivalent via [pane bypass](#pane-bypass-zellij) below.
+
+### Pane bypass (zellij)
+
+For users running an agent inside a [zellij](https://zellij.dev) pane, a separate coercion suppresses prompts on a per-pane basis — independent of the host agent's own bypass flag (if any). The toggle lives in a [WASM plugin](../zellij-plugin/README.md); `agentperms` only reads the flag.
+
+```python
+def coerce_for_pane_bypass(verdict, env):
+    if verdict.decision not in (Decision.Ask, Decision.NoOpinion):
+        return verdict, None
+    pane_id = env.get("ZELLIJ_PANE_ID")
+    session = env.get("ZELLIJ_SESSION_NAME")
+    if not pane_id or not session:
+        return verdict, None
+    # ...path-traversal sanitization, dir-safety check elided...
+    if not (agentperms_bypass_dir(env) / session / pane_id).exists():
+        return verdict, None
+    coerced = Verdict(Decision.Allow, f"pane bypass: {verdict.rationale}")
+    return coerced, Coercion(by="zellij_pane_bypass", ...)
+```
+
+Differences from Claude's coercion:
+
+- Coerces both `Ask` *and* `NoOpinion`. Codex falls through to its native prompt on the empty `{}` envelope that `NoOpinion` produces, so leaving it alone would defeat bypass for any unknown command.
+- Returns a structured `Coercion` record alongside the verdict, recorded in `$AGENTPERMS_TRACE` as a top-level `coercion` field. The original verdict is recoverable.
+- Reads from the process environment (`os.environ`) rather than the hook payload — works for any adapter, not just Claude.
+- Refuses to honor the flag if the bypass directory is group/world-writable or not owned by the current uid, and sanitizes pane id / session against path traversal.
+
+`Deny` still bites. Full operational details (file path, env vars, TOCTOU) are in [docs/cli.md § Pane bypass](cli.md#pane-bypass).
 
 ### Inert command names
 
@@ -144,12 +175,11 @@ Shell parsing lives in one function: `parse_pipeline(command: str) -> Pipeline`.
 - **`bash -c "..."`:** the inner command is recursively re-parsed via `parse_pipeline`, and its segments replace the wrapper
 - **Path-prefixed commands:** `/usr/bin/ls` matches a `Bash(ls:*)` rule via basename
 
+- **Command/process substitutions:** `rm $(cat allowed)`, `cat <(sort file)` — inner commands are recursively extracted as separate segments and evaluated against the policy independently. The substitution-containing argument is dropped from the outer command's argv (its runtime value is unknowable). If all segments (outer command + inner commands) are allowed, the pipeline is allowed; if any inner command is unrecognized or denied, the aggregate verdict escalates accordingly
+
 It refuses to parse:
 
-- **Command substitution:** `rm $(cat allowed)` — returns `parseable=False`, which the policy treats as `Ask`
 - **Anything Tree-sitter reports as a shell syntax error:** parse errors → `parseable=False` → `Ask`
-
-This is conservative on purpose. A static allow-list cannot reason about runtime command substitution; the right behavior is to surface a prompt rather than guess.
 
 ## Why Tree-sitter Bash
 

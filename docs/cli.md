@@ -94,6 +94,32 @@ export AGENTPERMS_TRACE=/tmp/bridge-trace.log
 
 Each invocation appends one JSON line: `{ agent, event, payload, verdict, note }`. Useful when debugging "why did this prompt me?" — see [Troubleshooting](troubleshooting.md).
 
+When the verdict was overridden by [pane bypass](#pane-bypass), the line also carries a `coercion` object: `{ by: "zellij_pane_bypass", pane_id, session, original_decision, original_rationale }`. Use that field to reconstruct what the policy *would* have decided absent the bypass.
+
+### Pane bypass
+
+A per-zellij-pane "skip prompts" toggle, analogous to Claude Code's `--dangerously-skip-permissions` but scoped to one pane. Implemented by the [`zellij-plugin/`](../zellij-plugin/README.md) WASM plugin, honored by `check`.
+
+When the focused pane has a flag file present, `check` coerces both `Decision.Ask` and `Decision.NoOpinion` to `Allow` for that invocation. `Decision.Deny` is unaffected — deny rules still bite. Coercing `NoOpinion` matters because Codex prompts on `NoOpinion` (the empty `{}` envelope falls through to its native flow), so suppressing only `Ask` would leave unknown commands prompting under bypass.
+
+The pane is identified by the pair `(ZELLIJ_SESSION_NAME, ZELLIJ_PANE_ID)` inherited from the agent's process environment. The flag file lives at:
+
+```
+$XDG_CACHE_HOME/agentperms/bypass/<session>/<pane_id>
+```
+
+…falling back to `$HOME/.cache/agentperms/bypass/<session>/<pane_id>` when `XDG_CACHE_HOME` is unset. Presence of the file = bypass on; absence = bypass off. The plugin owns all writes; `check` only reads.
+
+Safety checks `check` applies before honoring a flag:
+
+- **Path-traversal sanitization.** If `ZELLIJ_PANE_ID` or `ZELLIJ_SESSION_NAME` contains `/`, `\`, `..`, or a NUL byte, the flag is ignored.
+- **Directory ownership and mode.** The bypass directory must be owned by the current uid and not group/world-writable. A directory with mode `0777`, or owned by another user, is ignored. A missing directory is treated as "no flag" (safe).
+- **Missing env vars.** No `ZELLIJ_PANE_ID` or no `ZELLIJ_SESSION_NAME` → the bypass code path is skipped entirely.
+
+#### TOCTOU caveat
+
+Bypass applies to *future* permission decisions. A command already approved by `check` cannot be retroactively un-approved by toggling bypass off mid-flight, and a long-running command that was denied before bypass was turned on does not retroactively succeed. Toggle, then run.
+
 ## `edit`
 
 Opens `~/.agent-permissions.jsonc` in `$EDITOR` (or `$VISUAL`, falling back to `vi`). Creates the file with a sensible default policy if it doesn't exist.

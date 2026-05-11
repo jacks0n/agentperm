@@ -67,13 +67,18 @@ A compound like `cat foo 2>&1 | head -60` passes through silently with the polic
 
 `rm -rf /tmp/*` is denied without prompting.
 
+## Bypass mode (zellij)
+
+A per-pane "skip prompts" toggle for users running their agents inside [zellij](https://zellij.dev). Bind a key to flip a flag file for the focused pane; while the flag is on, `agentperms` coerces every `Ask` and `NoOpinion` verdict to `Allow` — but only in that pane, and `Deny` rules still bite. The toggle and indicator live in a small WASM plugin shipped at [`zellij-plugin/`](zellij-plugin/README.md).
+
 ## Documentation
 
 - [Architecture](docs/architecture.md) — domain model, AST parsing, aggregation, bypass coercion
 - [Policy reference](docs/policy-reference.md) — full grammar of `.agent-permissions.jsonc`
-- [CLI reference](docs/cli.md) — `install`, `import`, `check`, `edit`
+- [CLI reference](docs/cli.md) — `install`, `import`, `check`, `edit`, pane bypass
 - [Adapter notes](docs/adapters.md) — agent-specific behavior and limits
 - [Troubleshooting](docs/troubleshooting.md) — diagnosing prompts, the trace env var, common pitfalls
+- [zellij plugin](zellij-plugin/README.md) — per-pane bypass toggle and indicator
 - [Contributing](CONTRIBUTING.md) — dev setup, tests, PR conventions
 - [Changelog](CHANGELOG.md)
 
