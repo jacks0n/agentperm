@@ -27,6 +27,7 @@ from agentperms import (
     ShellRequest,
     ToolRequest,
     Verdict,
+    _cmd_check,  # pyright: ignore[reportPrivateUsage]
     _effective_event,  # pyright: ignore[reportPrivateUsage]
     _is_bridge_hook,  # pyright: ignore[reportPrivateUsage]
     _resolve_install_mode,  # pyright: ignore[reportPrivateUsage]
@@ -226,6 +227,44 @@ def test_codex_permission_request_emits_deny_with_message():
     payload = json.loads(buf.getvalue())
     assert payload["hookSpecificOutput"]["decision"]["behavior"] == "deny"
     assert payload["hookSpecificOutput"]["decision"]["message"] == "policy says no"
+
+
+def test_codex_permission_request_under_pane_bypass_allows_unknown_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """End-to-end regression: NoOpinion (no policy match) must be coerced to Allow under bypass.
+
+    Codex's ``PermissionRequest.write_verdict`` falls through to ``{}`` on NoOpinion,
+    which makes codex prompt — defeating the user's "approve everything" intent. The
+    pane-bypass coercion fixes this by lifting both Ask and NoOpinion to Allow.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "7")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "main")
+    monkeypatch.delenv("AGENTPERMS_TRACE", raising=False)
+    bypass = tmp_path / "cache" / "agentperms" / "bypass"
+    (bypass / "main").mkdir(parents=True)
+    bypass.chmod(0o700)
+    (bypass / "main").chmod(0o700)
+    (bypass / "main" / "7").touch(mode=0o600)
+    payload = {
+        "hook_event_name": "PermissionRequest",
+        "cwd": str(tmp_path),
+        "permission_mode": "default",
+        "tool_name": "Bash",
+        "tool_input": {"command": "totally-unknown-command --flag"},
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = _cmd_check(AgentName.Codex, "PermissionRequest")
+    assert rc == 0
+    out = json.loads(buf.getvalue())
+    # Codex's PermissionRequest Allow envelope intentionally omits a message;
+    # behavior=="allow" is sufficient proof that NoOpinion was coerced (NoOpinion
+    # would have produced ``{}`` here, which would make codex prompt).
+    assert out["hookSpecificOutput"]["decision"]["behavior"] == "allow"
 
 
 # ---- OpenCode adapter -----------------------------------------------------

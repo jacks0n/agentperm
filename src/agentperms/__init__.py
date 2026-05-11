@@ -1809,7 +1809,8 @@ def _cmd_check(agent: AgentName, event: str) -> int:
         return 0
     verdict = policy.decide(request)
     verdict = coerce_for_permission_mode(verdict, payload)
-    _trace(agent, event, payload, verdict, None)
+    verdict, coercion = coerce_for_pane_bypass(verdict, os.environ)
+    _trace(agent, event, payload, verdict, None, coercion)
     adapter.write_verdict(verdict, event)
     return 0
 
@@ -1864,7 +1865,12 @@ def _load_dotenv() -> None:
 
 
 def _trace(
-    agent: AgentName, event: str, payload: JsonObject | None, verdict: Verdict | None, note: str | None
+    agent: AgentName,
+    event: str,
+    payload: JsonObject | None,
+    verdict: Verdict | None,
+    note: str | None,
+    coercion: Coercion | None = None,
 ) -> None:
     """Append one JSON line per invocation to ``$AGENTPERMS_TRACE`` if set.
 
@@ -1884,6 +1890,14 @@ def _trace(
     }
     if verdict is not None:
         record["verdict"] = {"decision": verdict.decision.value, "rationale": verdict.rationale}
+    if coercion is not None:
+        record["coercion"] = {
+            "by": coercion.by,
+            "pane_id": coercion.pane_id,
+            "session": coercion.session,
+            "original_decision": coercion.original.decision.value,
+            "original_rationale": coercion.original.rationale,
+        }
     try:
         with open(target, "a") as fh:
             fh.write(json.dumps(record) + "\n")
@@ -1900,6 +1914,91 @@ def coerce_for_permission_mode(verdict: Verdict, payload: JsonObject) -> Verdict
     if payload.get("permission_mode") == "bypassPermissions" and verdict.decision is Decision.Ask:
         return Verdict(Decision.Allow, f"bypass mode: {verdict.rationale}")
     return verdict
+
+
+# -----------------------------------------------------------------------------
+# Per-pane bypass (zellij plugin writes the flag file; agentperms reads it)
+# -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Coercion:
+    """Structured trace metadata for a coerced verdict.
+
+    Captures which mechanism overrode the original decision so the trace log
+    records both the policy's actual answer and the override that suppressed it.
+    """
+
+    by: str
+    pane_id: str | None
+    session: str | None
+    original: Verdict
+
+
+def agentperms_bypass_dir(env: Mapping[str, str]) -> Path:
+    """Resolve the per-pane bypass cache dir, honoring ``XDG_CACHE_HOME``.
+
+    The plugin (writer) and agentperms (reader) must agree on this path; both
+    derive it through this same helper / the same XDG semantics in the plugin.
+    """
+    base = env.get("XDG_CACHE_HOME") or str(Path(env.get("HOME", str(Path.home()))) / ".cache")
+    return Path(base) / "agentperms" / "bypass"
+
+
+def _bypass_dir_is_safe(path: Path) -> bool:
+    """True iff the bypass dir is missing OR is owned by current uid and not group/world-writable.
+
+    A missing dir is safe: no flag file can exist, so the bypass check is a no-op.
+    Refusing a g/o-writable dir means another local user cannot drop a flag file
+    that grants themselves silent permission inside our policy mediator.
+    On Windows ``os.getuid`` is absent; the uid check is skipped (different security
+    model) and we still reject if the mode bits indicate world-writable.
+    """
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return False
+    return not st.st_mode & 0o022
+
+
+def coerce_for_pane_bypass(
+    verdict: Verdict,
+    env: Mapping[str, str],
+) -> tuple[Verdict, Coercion | None]:
+    """If the current zellij pane has a bypass flag file, suppress Ask/NoOpinion. Deny still bites.
+
+    Pane is identified by ``(ZELLIJ_SESSION_NAME, ZELLIJ_PANE_ID)`` — both inherited
+    from the zellij pane the agent runs inside. Flag file:
+    ``<agentperms_bypass_dir>/<session>/<pane_id>``. Presence = bypass on.
+
+    ``NoOpinion`` is coerced too: codex's ``PermissionRequest`` adapter falls
+    through to ``{}`` on ``NoOpinion`` (line 1089), which causes codex to prompt —
+    so the bypass must cover it for "approve everything I haven't denied" to hold.
+    """
+    if verdict.decision not in (Decision.Ask, Decision.NoOpinion):
+        return verdict, None
+    pane_id = env.get("ZELLIJ_PANE_ID")
+    session = env.get("ZELLIJ_SESSION_NAME")
+    if not pane_id or not session:
+        return verdict, None
+    if any(bad in pane_id or bad in session for bad in ("/", "\\", "..", "\0")):
+        return verdict, None
+    base = agentperms_bypass_dir(env)
+    if not _bypass_dir_is_safe(base):
+        return verdict, None
+    if not (base / session / pane_id).exists():
+        return verdict, None
+    coerced = Verdict(Decision.Allow, f"pane bypass: {verdict.rationale}")
+    return coerced, Coercion(
+        by="zellij_pane_bypass",
+        pane_id=pane_id,
+        session=session,
+        original=verdict,
+    )
 
 
 def _cmd_edit() -> int:

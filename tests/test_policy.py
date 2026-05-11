@@ -16,7 +16,9 @@ from agentperms import (
     ShellRequest,
     ToolRequest,
     Verdict,
+    agentperms_bypass_dir,
     aggregate,
+    coerce_for_pane_bypass,
     coerce_for_permission_mode,
     load_policy_file,
     parse_pipeline,
@@ -292,6 +294,130 @@ def test_missing_mode_keeps_ask():
     verdict = Verdict(Decision.Ask, "compound")
     coerced = coerce_for_permission_mode(verdict, {})
     assert coerced.decision is Decision.Ask
+
+
+# ---- Per-pane bypass (zellij plugin flag file) ----------------------------
+
+
+def _bypass_env(tmp_path: Path, *, session: str = "main", pane_id: str = "42") -> dict[str, str]:
+    return {
+        "XDG_CACHE_HOME": str(tmp_path),
+        "ZELLIJ_SESSION_NAME": session,
+        "ZELLIJ_PANE_ID": pane_id,
+    }
+
+
+def _touch_flag(tmp_path: Path, session: str, pane_id: str) -> Path:
+    """Create the bypass dir at 0700 and an empty flag file at 0600."""
+    base = tmp_path / "agentperms" / "bypass" / session
+    base.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "agentperms" / "bypass").chmod(0o700)
+    base.chmod(0o700)
+    flag = base / pane_id
+    flag.touch(mode=0o600)
+    return flag
+
+
+def test_pane_bypass_coerces_ask_to_allow(tmp_path: Path):
+    _touch_flag(tmp_path, "main", "42")
+    verdict, coercion = coerce_for_pane_bypass(Verdict(Decision.Ask, "policy ask"), _bypass_env(tmp_path))
+    assert verdict.decision is Decision.Allow
+    assert verdict.rationale.startswith("pane bypass:")
+    assert coercion is not None
+    assert coercion.by == "zellij_pane_bypass"
+    assert coercion.pane_id == "42"
+    assert coercion.session == "main"
+    assert coercion.original.decision is Decision.Ask
+
+
+def test_pane_bypass_coerces_no_opinion_to_allow(tmp_path: Path):
+    """Codex prompts on NoOpinion (CodexAdapter.write_verdict line 1089), so bypass must cover it."""
+    _touch_flag(tmp_path, "main", "42")
+    verdict, coercion = coerce_for_pane_bypass(Verdict(Decision.NoOpinion, "no rule matched"), _bypass_env(tmp_path))
+    assert verdict.decision is Decision.Allow
+    assert coercion is not None
+    assert coercion.original.decision is Decision.NoOpinion
+
+
+def test_pane_bypass_does_not_touch_deny(tmp_path: Path):
+    _touch_flag(tmp_path, "main", "42")
+    verdict, coercion = coerce_for_pane_bypass(Verdict(Decision.Deny, "rm -rf /"), _bypass_env(tmp_path))
+    assert verdict.decision is Decision.Deny
+    assert coercion is None
+
+
+def test_pane_bypass_does_not_touch_allow(tmp_path: Path):
+    _touch_flag(tmp_path, "main", "42")
+    original = Verdict(Decision.Allow, "matched ls rule")
+    verdict, coercion = coerce_for_pane_bypass(original, _bypass_env(tmp_path))
+    assert verdict is original
+    assert coercion is None
+
+
+def test_pane_bypass_no_flag_keeps_verdict(tmp_path: Path):
+    verdict, coercion = coerce_for_pane_bypass(Verdict(Decision.Ask, "x"), _bypass_env(tmp_path))
+    assert verdict.decision is Decision.Ask
+    assert coercion is None
+
+
+def test_pane_bypass_no_session_keeps_verdict(tmp_path: Path):
+    _touch_flag(tmp_path, "main", "42")
+    env = {"XDG_CACHE_HOME": str(tmp_path), "ZELLIJ_PANE_ID": "42"}
+    verdict, _ = coerce_for_pane_bypass(Verdict(Decision.Ask, "x"), env)
+    assert verdict.decision is Decision.Ask
+
+
+def test_pane_bypass_no_pane_id_keeps_verdict(tmp_path: Path):
+    _touch_flag(tmp_path, "main", "42")
+    env = {"XDG_CACHE_HOME": str(tmp_path), "ZELLIJ_SESSION_NAME": "main"}
+    verdict, _ = coerce_for_pane_bypass(Verdict(Decision.Ask, "x"), env)
+    assert verdict.decision is Decision.Ask
+
+
+def test_pane_bypass_path_traversal_pane_id_rejected(tmp_path: Path):
+    """Even if a flag exists at the resolved path, ../-bearing pane ids must be refused."""
+    # Place a flag where "../escape" would resolve to, to prove the check rejects before hitting fs.
+    base = tmp_path / "agentperms" / "bypass" / "main"
+    base.mkdir(parents=True)
+    (base.parent).chmod(0o700)
+    base.chmod(0o700)
+    (base / "..escape").touch(mode=0o600)
+    env = _bypass_env(tmp_path, pane_id="../escape")
+    verdict, coercion = coerce_for_pane_bypass(Verdict(Decision.Ask, "x"), env)
+    assert verdict.decision is Decision.Ask
+    assert coercion is None
+
+
+def test_pane_bypass_path_traversal_session_rejected(tmp_path: Path):
+    env = _bypass_env(tmp_path, session="../evil")
+    verdict, coercion = coerce_for_pane_bypass(Verdict(Decision.Ask, "x"), env)
+    assert verdict.decision is Decision.Ask
+    assert coercion is None
+
+
+def test_pane_bypass_world_writable_dir_rejected(tmp_path: Path):
+    _touch_flag(tmp_path, "main", "42")
+    (tmp_path / "agentperms" / "bypass").chmod(0o777)
+    verdict, coercion = coerce_for_pane_bypass(Verdict(Decision.Ask, "x"), _bypass_env(tmp_path))
+    assert verdict.decision is Decision.Ask
+    assert coercion is None
+
+
+def test_pane_bypass_missing_dir_is_safe_noop(tmp_path: Path):
+    """No dir at all -> no flag possible -> verdict unchanged, no error."""
+    verdict, coercion = coerce_for_pane_bypass(Verdict(Decision.Ask, "x"), _bypass_env(tmp_path))
+    assert verdict.decision is Decision.Ask
+    assert coercion is None
+
+
+def test_agentperms_bypass_dir_honors_xdg(tmp_path: Path):
+    env = {"XDG_CACHE_HOME": str(tmp_path / "x")}
+    assert agentperms_bypass_dir(env) == tmp_path / "x" / "agentperms" / "bypass"
+
+
+def test_agentperms_bypass_dir_falls_back_to_home():
+    env = {"HOME": "/var/empty"}
+    assert agentperms_bypass_dir(env) == Path("/var/empty") / ".cache" / "agentperms" / "bypass"
 
 
 # ---- Policy merging -------------------------------------------------------

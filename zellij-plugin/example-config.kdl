@@ -1,0 +1,24 @@
+// agentperms-indicator: per-pane bypass-permissions toggle and visible indicator.
+// Merge these blocks into your ~/.config/zellij/config.kdl (and your layout file
+// if you keep one separately). The MessagePlugin keybind pipes "toggle" into the
+// loaded plugin without focusing it, so the toggle works from any pane.
+
+layout {
+    default_tab_template {
+        // 1-row borderless slot at the top of every tab, owned by the plugin.
+        pane size=1 borderless=true {
+            plugin location="file:~/.config/zellij/plugins/agentperms_indicator.wasm"
+        }
+        children
+    }
+}
+
+keybinds {
+    shared {
+        bind "Ctrl Shift b" {
+            MessagePlugin "file:~/.config/zellij/plugins/agentperms_indicator.wasm" {
+                name "toggle"
+            }
+        }
+    }
+}

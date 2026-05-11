@@ -9,3 +9,4 @@ build/
 .coverage
 .python-version
 .env
+zellij-plugin/target/
