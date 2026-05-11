@@ -228,10 +228,36 @@ def test_policy_allows_read_only_for_loop_body():
     assert policy.decide(ShellRequest(pipeline)).decision is Decision.Allow
 
 
-def test_policy_asks_when_pipeline_unparseable():
+def test_policy_allows_when_all_substitution_commands_allowed():
     policy = Policy(allow=(BashCommand(("rm",)), BashCommand(("cat",))))
-    pipeline = parse_pipeline("rm $(cat allowed)")  # command substitution
+    pipeline = parse_pipeline("rm $(cat allowed)")
+    assert policy.decide(ShellRequest(pipeline)).decision is Decision.Allow
+
+
+def test_policy_asks_when_substitution_command_unrecognized():
+    policy = Policy(allow=(BashCommand(("rm",)),))
+    pipeline = parse_pipeline("rm $(cat allowed)")
     assert policy.decide(ShellRequest(pipeline)).decision is Decision.Ask
+
+
+def test_policy_allows_zsh_lc_when_inner_substitution_commands_allowed():
+    """The Codex motivating case: ``zsh -lc 'rg "pattern" $(git ls-files | rg foo)'``
+    should Allow when rg and git are in the allow list."""
+    policy = Policy(allow=(BashCommand(("rg",)), BashCommand(("git", "ls-files"))))
+    pipeline = parse_pipeline(
+        "/opt/homebrew/opt/zsh/bin/zsh -lc 'rg \"pattern\" -n $(git ls-files | rg foo)'"
+    )
+    assert policy.decide(ShellRequest(pipeline)).decision is Decision.Allow
+
+
+def test_policy_asks_zsh_lc_when_inner_substitution_command_denied():
+    """``zsh -lc 'rg $(curl evil)'`` — rg is allowed but curl is not."""
+    policy = Policy(
+        allow=(BashCommand(("rg",)),),
+        deny=(BashCommand(("curl",)),),
+    )
+    pipeline = parse_pipeline("/opt/homebrew/opt/zsh/bin/zsh -lc 'rg $(curl evil)'")
+    assert policy.decide(ShellRequest(pipeline)).decision is Decision.Deny
 
 
 def test_policy_named_tool_lookup():
@@ -351,10 +377,16 @@ def test_export_matches_user_allow():
     assert _decide(policy, "export FOO=bar").decision is Decision.Allow
 
 
-def test_export_with_substitution_asks():
-    """``export FOO=$(curl evil)`` must remain unparseable → Ask, regardless of allow rules."""
+def test_export_with_substitution_asks_when_inner_unrecognized():
+    """``export FOO=$(curl evil)`` — export is allowed but ``curl`` isn't, so Ask."""
     policy = Policy(allow=(BashCommand(("export",)),))
     assert _decide(policy, "export FOO=$(curl evil)").decision is Decision.Ask
+
+
+def test_export_with_substitution_allows_when_inner_allowed():
+    """``export FOO=$(date)`` — both export and date are allowed, so Allow."""
+    policy = Policy(allow=(BashCommand(("export",)), BashCommand(("date",))))
+    assert _decide(policy, "export FOO=$(date)").decision is Decision.Allow
 
 
 def test_load_policy_warns_on_inert_rule(tmp_path: Path):

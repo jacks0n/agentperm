@@ -71,10 +71,11 @@ def test_for_loop_extracts_body_commands_only():
     assert pipeline.segments[1].redirects[0].is_fd_dup is True
 
 
-def test_command_substitution_is_unparseable():
-    """`rm $(cat allowed)` cannot be statically allow-listed — refuse to auto-allow."""
+def test_command_substitution_extracts_inner_segments():
+    """``rm $(cat allowed)`` — outer command and substitution inner commands are separate segments."""
     pipeline = parse_pipeline("rm $(cat allowed)")
-    assert pipeline.parseable is False
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("rm",), ("cat", "allowed")]
 
 
 def test_env_assignment_prefix_stripped():
@@ -186,6 +187,115 @@ def test_sh_c_unwraps_single_quoted_command():
     assert segment.argv == ("curl", "evil.com")
 
 
+def test_shell_c_unwraps_lc_bundle():
+    """``zsh -lc '<cmd>'`` is codex's wrapper shape — bundled login + ``-c``.
+    Without bundle support the bridge sees the outer ``zsh`` and every codex
+    command falls through to a native prompt.
+    """
+    pipeline = parse_pipeline("zsh -lc 'rg foo'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("rg", "foo")
+
+
+def test_shell_c_unwraps_lc_bundle_absolute_path():
+    """Codex actually emits ``/opt/homebrew/opt/zsh/bin/zsh -lc '<cmd>'``.
+    Basename match must still kick in for absolute interpreter paths.
+    """
+    pipeline = parse_pipeline(
+        "/opt/homebrew/opt/zsh/bin/zsh -lc 'git ls-files docs/x.md'"
+    )
+    [segment] = pipeline.segments
+    assert segment.argv == ("git", "ls-files", "docs/x.md")
+
+
+def test_shell_c_unwraps_ic_bundle():
+    """``bash -ic`` (interactive + ``-c``) — common when an agent wants rc-file
+    aliases honoured. Same semantics as ``-lc``.
+    """
+    pipeline = parse_pipeline("bash -ic 'cat /etc/hosts'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("cat", "/etc/hosts")
+
+
+def test_shell_c_unwraps_ec_bundle():
+    """``sh -ec`` (errexit + ``-c``)."""
+    pipeline = parse_pipeline("sh -ec 'echo hi'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("echo", "hi")
+
+
+def test_shell_c_unwraps_multi_flag_cluster():
+    """``zsh -xlc 'rg foo'`` — multiple no-arg flags before ``c``."""
+    pipeline = parse_pipeline("zsh -xlc 'rg foo'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("rg", "foo")
+
+
+def test_shell_c_bundle_round_trips_compound_inner():
+    """Inner command is re-parsed through the full pipeline, so compound
+    structure inside a bundle wrapper composes correctly.
+    """
+    pipeline = parse_pipeline("zsh -lc 'a && b'")
+    assert [s.argv for s in pipeline.segments] == [("a",), ("b",)]
+
+
+def test_shell_c_does_not_unwrap_o_option_cluster():
+    """``zsh -ocorrect 'rg foo'`` must NOT unwrap. ``-o`` takes ``correct`` as
+    its option name; ``'rg foo'`` is then a script-file path, not a command
+    string. Adversarial repro from the codex review of this change.
+    """
+    pipeline = parse_pipeline("zsh -ocorrect 'rg foo'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("zsh", "-ocorrect", "rg foo")
+
+
+def test_shell_c_does_not_unwrap_co_cluster():
+    """``bash -co 'echo ok'``: under POSIX cluster semantics ``-c`` consumes
+    the cluster suffix ``o`` as the command string and ``'echo ok'`` becomes
+    ``$0``. ``argv[2]`` is NOT the command. Must fall through.
+    """
+    pipeline = parse_pipeline("bash -co 'echo ok'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("bash", "-co", "echo ok")
+
+
+def test_shell_c_does_not_unwrap_capital_o_cluster():
+    """``bash -Ocmdhist 'rg foo'`` enables a shopt; ``c`` here is part of the
+    option name, not the ``-c`` flag. Capital ``O`` is not in the no-arg
+    whitelist, so the cluster fails the safety check.
+    """
+    pipeline = parse_pipeline("bash -Ocmdhist 'rg foo'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("bash", "-Ocmdhist", "rg foo")
+
+
+def test_shell_c_does_not_unwrap_split_l_c():
+    """``bash -l -c 'rg foo'`` is a valid wrapper but uses split flags. The
+    heuristic only inspects ``argv[1]``; documented limitation, falls through.
+    """
+    pipeline = parse_pipeline("bash -l -c 'rg foo'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("bash", "-l", "-c", "rg foo")
+
+
+def test_shell_c_does_not_unwrap_long_option_norc():
+    """``bash --norc -c 'rg foo'`` uses a long option before ``-c``; arg
+    shapes for long options vary, so the heuristic deliberately fall through.
+    """
+    pipeline = parse_pipeline("bash --norc -c 'rg foo'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("bash", "--norc", "-c", "rg foo")
+
+
+def test_shell_c_does_not_unwrap_login_only():
+    """``zsh -l 'foo'`` has no ``c`` in the cluster; ``'foo'`` is a script
+    file, not a command string.
+    """
+    pipeline = parse_pipeline("zsh -l 'foo'")
+    [segment] = pipeline.segments
+    assert segment.argv == ("zsh", "-l", "foo")
+
+
 def test_unparseable_returns_unparseable_reason():
     pipeline = parse_pipeline("ls && && rm")
     assert pipeline.parseable is False
@@ -223,10 +333,11 @@ def test_string_with_braced_expansion_inlines_value_text():
     assert segment.argv == ("echo", "hello ${USER}")
 
 
-def test_concatenation_with_command_substitution_still_blocks():
-    """``cat foo$(date).log`` — substitution nested inside a concatenation must still trip."""
+def test_concatenation_with_command_substitution_extracts_inner():
+    """``cat foo$(date).log`` — substitution nested inside a concatenation extracts inner commands."""
     pipeline = parse_pipeline("cat foo$(date).log")
-    assert pipeline.parseable is False
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("cat",), ("date",)]
 
 
 # ---- Control-flow constructs ---------------------------------------------
@@ -287,10 +398,11 @@ def test_arithmetic_yields_arith_sentinel():
     assert [s.argv for s in pipeline.segments] == [("((",)]
 
 
-def test_arithmetic_with_substitution_unparseable():
-    """``(( $(rm -rf ~) || 1 ))`` — substitution inside arithmetic must still trip."""
+def test_arithmetic_with_substitution_extracts_inner():
+    """``(( $(rm -rf ~) || 1 ))`` — substitution inside arithmetic extracts inner commands."""
     pipeline = parse_pipeline("(( $(rm -rf ~) || 1 ))")
-    assert pipeline.parseable is False
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("((",), ("rm", "-rf", "~")]
 
 
 def test_subshell_recurses_into_body():
@@ -340,10 +452,11 @@ def test_declaration_declare_yields_declare_segment():
     assert [s.argv for s in pipeline.segments] == [("declare", "-A", "m")]
 
 
-def test_declaration_with_substitution_unparseable():
-    """``export FOO=$(curl evil)`` — substitution in a declaration must still trip."""
+def test_declaration_with_substitution_extracts_inner():
+    """``export FOO=$(curl evil)`` — substitution in a declaration extracts inner commands."""
     pipeline = parse_pipeline("export FOO=$(curl evil)")
-    assert pipeline.parseable is False
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("export",), ("curl", "evil")]
 
 
 def test_heredoc_command_passes_through():
@@ -354,44 +467,58 @@ def test_heredoc_command_passes_through():
     assert segment.redirects == ()
 
 
-def test_heredoc_body_with_substitution_unparseable():
-    """Unquoted heredoc bodies expand ``$(…)`` before the wrapped command runs,
-    so dropping the heredoc must not let a substitution through silently."""
+def test_heredoc_body_with_substitution_extracts_inner():
+    """Unquoted heredoc bodies expand ``$(…)`` before the wrapped command runs —
+    extract inner commands as segments for policy evaluation."""
     pipeline = parse_pipeline("read x <<EOF\n$(rm -rf /)\nEOF\n")
-    assert pipeline.parseable is False
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("read", "x"), ("rm", "-rf", "/")]
 
 
-def test_test_command_with_substitution_unparseable():
+def test_test_command_with_substitution_extracts_inner():
     """``[[ -f $(curl evil) ]]`` — substitution inside the predicate executes
-    before the test, so the synthetic ``[`` segment must not be emitted."""
-    for src in ("[[ -f $(rm -rf /) ]]", "[ -f $(rm -rf /) ]", "[[ $(curl evil) = ok ]]"):
-        pipeline = parse_pipeline(src)
-        assert pipeline.parseable is False, src
+    before the test; inner commands are extracted as segments for policy eval."""
+    pipeline = parse_pipeline("[[ -f $(rm -rf /) ]]")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("[",), ("rm", "-rf", "/")]
+
+    pipeline = parse_pipeline("[ -f $(rm -rf /) ]")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("[",), ("rm", "-rf", "/")]
+
+    pipeline = parse_pipeline("[[ $(curl evil) = ok ]]")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("[",), ("curl", "evil")]
 
 
-def test_case_subject_with_substitution_unparseable():
+def test_case_subject_with_substitution_extracts_inner():
     """``case foo$(curl evil) in …`` evaluates the subject before pattern match —
-    the subject is a ``concatenation`` which the control-flow handler skips, so
-    the substitution must be detected at the skip site rather than swallowed."""
+    the substitution's inner commands are extracted as segments for policy eval."""
     pipeline = parse_pipeline("case foo$(rm -rf /) in *) echo ok;; esac")
-    assert pipeline.parseable is False
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("rm", "-rf", "/"), ("echo", "ok")]
 
 
-def test_case_quoted_subject_with_substitution_unparseable():
+def test_case_quoted_subject_with_substitution_extracts_inner():
     pipeline = parse_pipeline('case "$(curl evil)" in *) echo ok;; esac')
-    assert pipeline.parseable is False
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("curl", "evil"), ("echo", "ok")]
 
 
-def test_for_iterable_with_substitution_unparseable():
+def test_for_iterable_with_substitution_extracts_inner():
     """``for f in $(curl evil); do …; done`` — the iterable runs the substitution
-    before the loop body; the iterable list must not be silently dropped."""
-    for src in (
-        "for f in $(curl evil); do echo $f; done",
-        "select f in $(curl evil); do echo $f; done",
-        "for f in <(rm -rf /); do echo $f; done",
-    ):
-        pipeline = parse_pipeline(src)
-        assert pipeline.parseable is False, src
+    before the loop body; inner commands are extracted as segments for policy eval."""
+    pipeline = parse_pipeline("for f in $(curl evil); do echo $f; done")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("curl", "evil"), ("echo", "$f")]
+
+    pipeline = parse_pipeline("select f in $(curl evil); do echo $f; done")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("curl", "evil"), ("echo", "$f")]
+
+    pipeline = parse_pipeline("for f in <(rm -rf /); do echo $f; done")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("rm", "-rf", "/"), ("echo", "$f")]
 
 
 def test_redirected_test_command():
@@ -403,6 +530,20 @@ def test_redirected_test_command():
     [redirect] = segment.redirects
     assert redirect.fd == 2
     assert redirect.target == "/dev/null"
+
+
+def test_zsh_lc_with_substitution_in_inner_command():
+    """Codex wraps commands in ``zsh -lc '…'``; substitutions inside the inner
+    command must be unwrapped and their inner commands extracted as segments."""
+    pipeline = parse_pipeline(
+        "/opt/homebrew/opt/zsh/bin/zsh -lc 'rg \"pattern\" -n $(git ls-files | rg foo)'"
+    )
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [
+        ("rg", "pattern", "-n"),
+        ("git", "ls-files"),
+        ("rg", "foo"),
+    ]
 
 
 def test_bash_c_with_if_round_trips_through_unwrap():

@@ -192,10 +192,7 @@ def _glob_match_argv(pattern: tuple[str, ...], argv: tuple[str, ...], trailing_w
         while pi < len(pattern):
             tok = pattern[pi]
             if tok == "**":
-                for skip in range(len(argv) - ai + 1):
-                    if go(pi + 1, ai + skip):
-                        return True
-                return False
+                return any(go(pi + 1, ai + skip) for skip in range(len(argv) - ai + 1))
             if ai >= len(argv):
                 return False
             if tok == "*":
@@ -488,12 +485,14 @@ def parse_pipeline(command: str) -> Pipeline:
 
 def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
     if node.type == "command":
-        segment = _build_segment(node, source)
+        segment, inner = _build_segment(node, source)
         unwrapped = _unwrap_shell_c(segment)
         if unwrapped is not None:
             yield from unwrapped
+            yield from inner
             return
         yield segment
+        yield from inner
         return
     if node.type == "redirected_statement":
         yield from _build_redirected_segment(node, source)
@@ -503,9 +502,8 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
         # Arithmetic is a pure predicate (in-process state only); brace groups are
         # ordinary command lists wrapped in braces.
         if source[node.start_byte:node.start_byte + 2] == b"((":
-            if _node_contains_substitution(node):
-                raise _UnsupportedShellError("command/process substitution requires approval")
             yield Segment(("((",), ())
+            yield from _extract_substitution_segments(node, source)
             return
         for child in node.named_children:
             if child.type in _PATTERN_CHILD_TYPES:
@@ -516,45 +514,48 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
         # ``[ … ]`` and ``[[ … ]]`` are pure predicates — collapse to a synthetic
         # segment the inert-builtin matcher recognizes. Children are expressions
         # (test_operator, unary_expression, …) and yield no commands of their own.
-        # A substitution inside (e.g. ``[[ -f $(curl evil) ]]``) executes before
-        # the predicate, so it must surface a prompt rather than be swallowed.
-        if _node_contains_substitution(node):
-            raise _UnsupportedShellError("command/process substitution requires approval")
+        # Substitutions inside (e.g. ``[[ -f $(curl evil) ]]``) execute before
+        # the predicate — extract their inner commands as segments for policy eval.
         yield Segment(("[",), ())
+        yield from _extract_substitution_segments(node, source)
         return
     if node.type == "declaration_command":
         # ``export FOO=bar`` / ``local`` / ``declare`` / ``readonly`` / ``typeset``.
         # tree-sitter parses these as their own node type, not as ``command``, so a
         # user ``Bash(export:*)`` rule would never match without explicit handling.
         # Yield a normal segment with the keyword as argv[0] and the assignments/
-        # words as subsequent argv tokens.
-        if _node_contains_substitution(node):
-            raise _UnsupportedShellError("command/process substitution requires approval")
+        # words as subsequent argv tokens. Substitution-containing children are
+        # dropped from argv and their inner commands yielded as separate segments.
         if not node.children:
             raise _UnsupportedShellError("declaration_command missing keyword")
-        argv: list[str] = [_node_text(node.children[0], source)]
+        decl_argv: list[str] = [_node_text(node.children[0], source)]
+        decl_inner: list[Segment] = []
         for child in node.named_children:
-            argv.append(_node_text(child, source))
-        yield Segment(tuple(argv), ())
+            if child.type in ("command_substitution", "process_substitution") \
+                    or _node_contains_substitution(child):
+                decl_inner.extend(_extract_substitution_segments(child, source))
+                continue
+            decl_argv.append(_node_text(child, source))
+        yield Segment(tuple(decl_argv), ())
+        yield from decl_inner
         return
     if node.type in _CONTROL_FLOW_TYPES:
         for child in node.named_children:
             if child.type in _PATTERN_CHILD_TYPES:
                 # Subjects/patterns are skipped from segment extraction, but
                 # ``case foo$(curl evil) in …`` would still execute the
-                # substitution before pattern matching. Reject anything carrying
-                # a substitution rather than silently dropping it.
-                if _node_contains_substitution(child):
-                    raise _UnsupportedShellError("command/process substitution requires approval")
+                # substitution before pattern matching. Extract inner commands
+                # as segments for policy evaluation.
+                yield from _extract_substitution_segments(child, source)
                 continue
             yield from _extract_segments(child, source)
         return
     if node.type == "for_statement":
         # Covers ``for v in …`` and ``select v in …`` (same node). The iterable
         # list is opaque text; only the ``do_group`` body holds executable commands.
-        # The iterable can still trigger substitutions (e.g. ``for f in $(curl
-        # evil); do …; done``) which execute before the loop runs, so reject
-        # any non-body child that carries a substitution.
+        # The iterable can trigger substitutions (e.g. ``for f in $(curl evil);
+        # do …; done``) which execute before the loop runs — extract their inner
+        # commands as segments for policy evaluation.
         for child in node.named_children:
             if child.type == "do_group":
                 yield from _extract_segments(child, source)
@@ -563,19 +564,28 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
                 continue
             if child.type in ("command_substitution", "process_substitution") \
                     or _node_contains_substitution(child):
-                raise _UnsupportedShellError("command/process substitution requires approval")
+                yield from _extract_substitution_segments(child, source)
         return
     raise _UnsupportedShellError(f"unsupported shell node {node.type!r}")
 
 
-def _build_segment(command_node: Node, source: bytes) -> Segment:
+def _build_segment(command_node: Node, source: bytes) -> tuple[Segment, tuple[Segment, ...]]:
+    """Build a ``Segment`` from a ``command`` AST node.
+
+    Returns ``(segment, substitution_segments)`` — the main command plus any
+    segments extracted from command/process substitutions in its arguments.
+    Substitution-containing arguments are dropped from argv (their runtime
+    value is unknowable); the inner commands are returned so the policy
+    evaluator can check them independently.
+    """
     argv: list[str] = []
+    inner: list[Segment] = []
     for child in command_node.named_children:
-        if _node_contains_substitution(child):
-            raise _UnsupportedShellError("command/process substitution requires approval")
+        if child.type in ("command_substitution", "process_substitution") \
+                or _node_contains_substitution(child):
+            inner.extend(_extract_substitution_segments(child, source))
+            continue
         if child.type == "variable_assignment":
-            # Tree-sitter marks leading ``FOO=bar`` env-assignment words as variable assignments;
-            # they are not part of the executed command's argv.
             continue
         if child.type == "command_name":
             argv.append(_node_text(child, source))
@@ -584,7 +594,7 @@ def _build_segment(command_node: Node, source: bytes) -> Segment:
             argv.append(_argument_text(child, source))
             continue
         raise _UnsupportedShellError(f"unsupported command part {child.type!r}")
-    return Segment(tuple(argv), ())
+    return Segment(tuple(argv), ()), tuple(inner)
 
 
 def _build_redirected_segment(node: Node, source: bytes) -> Iterator[Segment]:
@@ -597,11 +607,14 @@ def _build_redirected_segment(node: Node, source: bytes) -> Iterator[Segment]:
     # spillover words to the last segment, and attach all collected redirects
     # to that same last segment.
     inner_segments: list[Segment] = []
+    substitution_segments: list[Segment] = []
     redirects: list[Redirect] = []
     spillover: list[str] = []
     for child in node.named_children:
         if child.type == "command":
-            inner_segments.append(_build_segment(child, source))
+            segment, sub_segs = _build_segment(child, source)
+            inner_segments.append(segment)
+            substitution_segments.extend(sub_segs)
             continue
         if child.type in _REDIRECT_INNER_TYPES:
             inner_segments.extend(_extract_segments(child, source))
@@ -615,10 +628,8 @@ def _build_redirected_segment(node: Node, source: bytes) -> Iterator[Segment]:
             # ``cat <<EOF … EOF`` feeds the body to stdin; no file write, no policy
             # impact. Drop it so the wrapped command flows through normal matching.
             # An unquoted heredoc body still expands ``$(…)`` before the command
-            # runs, so reject any heredoc carrying a substitution rather than
-            # silently feeding it through.
-            if _node_contains_substitution(child):
-                raise _UnsupportedShellError("command/process substitution requires approval")
+            # runs — extract inner commands as segments for policy evaluation.
+            substitution_segments.extend(_extract_substitution_segments(child, source))
             continue
         raise _UnsupportedShellError(f"unsupported redirected statement part {child.type!r}")
     if not inner_segments:
@@ -629,18 +640,48 @@ def _build_redirected_segment(node: Node, source: bytes) -> Iterator[Segment]:
         last.argv + tuple(spillover),
         last.redirects + tuple(redirects),
     )
+    yield from substitution_segments
+
+
+# Short flags that take no argument and are safe to share a ``-c`` cluster with.
+# Intersection of ``bash(1)`` / ``zsh(1)`` / POSIX ``sh(1)`` no-arg short options.
+# A flag absent from this set forces fall-through (NoOpinion → native prompt)
+# rather than a guess about which cluster element steals ``argv[2]``.
+_NO_ARG_SHELL_FLAGS = frozenset("efilmnpstuvx")
+
+
+def _is_safe_c_bundle(flag: str) -> bool:
+    """True iff ``flag`` is ``-c`` or a short-flag cluster ending in ``c`` whose
+    other chars are all in ``_NO_ARG_SHELL_FLAGS``. Only then is ``argv[2]``
+    reliably the command string under POSIX cluster semantics: any arg-taking
+    flag in the cluster (``-o``, ``-O``…) would steal it instead.
+    """
+    if not flag.startswith("-") or flag.startswith("--") or "=" in flag:
+        return False
+    chars = flag[1:]
+    if not chars or chars[-1] != "c":
+        return False
+    return all(ch in _NO_ARG_SHELL_FLAGS for ch in chars[:-1])
 
 
 def _unwrap_shell_c(segment: Segment) -> tuple[Segment, ...] | None:
-    """``bash -c "ls -la"`` → segments of the inner command. None if not a shell-wrapper.
+    """``bash -c "ls -la"`` → segments of the inner command. None if the
+    wrapper shape is not provably safe to unwrap.
 
-    Tree-sitter string arguments are normalized before this point, so the inner
-    command is just ``segment.argv[2]``. We re-parse it via the same pipeline so
-    any compound/redirect structure inside is faithfully preserved.
+    Accepts ``-c`` alone or short-flag clusters of known no-arg flags ending
+    in ``c`` (``-lc``, ``-ic``, ``-xc``, ``-xlc``…). Codex emits ``zsh -lc``;
+    that's the motivating case. Splits and long-option forms (``bash -l -c``,
+    ``bash --norc -c``, ``bash -O cmdhist -c``) fall through cleanly to the
+    native prompt — long-option arg shapes vary too much to model conservatively.
+
+    Tree-sitter string arguments are normalised before this point, so the inner
+    command is just ``segment.argv[2]``. We re-parse it via ``parse_pipeline``
+    so any compound/redirect/control-flow structure inside is faithfully
+    preserved.
     """
     if len(segment.argv) < 3 or _basename(segment.argv[0]) not in _SHELL_COMMANDS:
         return None
-    if segment.argv[1] != "-c":
+    if not _is_safe_c_bundle(segment.argv[1]):
         return None
     inner = parse_pipeline(segment.argv[2])
     if not inner.parseable:
@@ -655,6 +696,16 @@ def _node_contains_substitution(node: Node) -> bool:
         if _node_contains_substitution(child):
             return True
     return False
+
+
+def _extract_substitution_segments(node: Node, source: bytes) -> Iterator[Segment]:
+    """Find command/process substitutions in *node* and yield their inner commands as segments."""
+    if node.type in ("command_substitution", "process_substitution"):
+        for child in node.named_children:
+            yield from _extract_segments(child, source)
+        return
+    for child in node.children:
+        yield from _extract_substitution_segments(child, source)
 
 
 def _build_redirect(node: Node, source: bytes) -> tuple[Redirect, tuple[str, ...]]:
