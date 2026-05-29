@@ -103,14 +103,35 @@ Claude Code's hook payload includes `permission_mode`. When the user is in `bypa
 def coerce_for_permission_mode(verdict, payload):
     if payload.get("permission_mode") != "bypassPermissions":
         return verdict
-    if verdict.decision is Decision.Ask:
+    if verdict.decision is Decision.Ask and not verdict.parse_failure:
         return Verdict(Decision.Allow, f"bypass mode: {verdict.rationale}")
     return verdict
 ```
 
-`Ask` becomes `Allow`. `Deny` still bites — bypass means "skip the prompt", not "skip safety." `NoOpinion` is left alone so Claude's native fallthrough takes over.
+A *policy* `Ask` becomes `Allow`. `Deny` still bites — bypass means "skip the prompt", not "skip safety." `NoOpinion` is left alone so Claude's native fallthrough takes over. The exception is a **parse-failure `Ask`** — one the parser raised because it could not safely analyze the command (a syntax error, or a valid construct the grammar walk doesn't model). Those are *not* coerced: an un-analyzable command may hide a denied one, so it keeps prompting even under bypass. Every command the parser *can* read is decomposed into segments, so a `Deny` rule on any segment — including inside `bash -c "…"` / `bash -l -c "…"` wrappers, process- and command-substitution redirect targets, `case $(…)` subjects, and herestrings — still wins.
 
-Codex / OpenCode / Gemini don't ship a bypass equivalent in the hook payload, so the coercion is a no-op there. They get an out-of-band equivalent via [pane bypass](#pane-bypass-zellij) below.
+Codex / OpenCode / Gemini don't ship a bypass equivalent in the hook payload, so the coercion is a no-op there. They get an out-of-band equivalent via [pane bypass](#pane-bypass-zellij) below or [MCP bypass propagation](#mcp-bypass-propagation) when running as a Claude Code MCP server.
+
+### MCP bypass propagation
+
+When Claude Code is in bypass mode and calls a Codex MCP tool (`mcp__codex__*`), the downstream Codex agent's own hooks don't know about Claude Code's bypass state — their payloads carry `"permission_mode": "default"`. The bridge solves this with Claude Code's `updatedInput` hook mechanism: when a PreToolUse hook fires for an `mcp__codex__*` tool in bypass mode, the bridge injects `"approval-policy": "never"` into the tool input. Codex then runs in full-auto mode, so its `PermissionRequest` hooks never fire. `PreToolUse` hooks still fire, so Deny rules still bite for any command the parser can read.
+
+The injection is scoped to `mcp__codex__*` because `approval-policy` is Codex's input contract; other MCP servers don't honour it, so widening the prefix would inject a meaningless key into unrelated tool calls.
+
+```python
+def _mcp_bypass_input(payload):
+    if payload.get("permission_mode") != "bypassPermissions":
+        return None
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name.startswith("mcp__codex__"):
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    return {**tool_input, "approval-policy": "never"}
+```
+
+This requires no configuration — it activates automatically when the hook detects bypass mode on a Codex MCP tool call.
 
 ### Pane bypass (zellij)
 
@@ -118,7 +139,7 @@ For users running an agent inside a [zellij](https://zellij.dev) pane, a separat
 
 ```python
 def coerce_for_pane_bypass(verdict, env):
-    if verdict.decision not in (Decision.Ask, Decision.NoOpinion):
+    if verdict.decision not in (Decision.Ask, Decision.NoOpinion) or verdict.parse_failure:
         return verdict, None
     pane_id = env.get("ZELLIJ_PANE_ID")
     session = env.get("ZELLIJ_SESSION_NAME")
@@ -133,7 +154,7 @@ def coerce_for_pane_bypass(verdict, env):
 
 Differences from Claude's coercion:
 
-- Coerces both `Ask` *and* `NoOpinion`. Codex falls through to its native prompt on the empty `{}` envelope that `NoOpinion` produces, so leaving it alone would defeat bypass for any unknown command.
+- Coerces both `Ask` *and* `NoOpinion`. Codex falls through to its native prompt on the empty `{}` envelope that `NoOpinion` produces, so leaving it alone would defeat bypass for any unknown command. A parse-failure `Ask` is the exception — like Claude's coercion, an un-analyzable command keeps prompting rather than being allowed.
 - Returns a structured `Coercion` record alongside the verdict, recorded in `$AGENTPERMS_TRACE` as a top-level `coercion` field. The original verdict is recoverable.
 - Reads from the process environment (`os.environ`) rather than the hook payload — works for any adapter, not just Claude.
 - Refuses to honor the flag if the bypass directory is group/world-writable or not owned by the current uid, and sanitizes pane id / session against path traversal.
@@ -142,17 +163,20 @@ Differences from Claude's coercion:
 
 ### Inert command names
 
-A small set of shell builtins / synthetic AST tokens have no possible OS-level side effect — they cannot create, modify, or read files; cannot fork processes; cannot mutate state visible outside the parsing shell. `_match_bash` short-circuits to `Allow` for any segment whose argv[0] basename is in this set, *before* user rules are consulted:
+A small set of shell builtins / synthetic AST tokens have no possible OS-level side effect — they cannot create, modify, or read files; cannot fork processes; cannot mutate state visible outside the parsing shell. They split into two groups:
 
 ```
+# synthetic markers — emitted by the parser, never real commands
+[  [[                  synthetic from test_command (both collapse to "[")
+((                     synthetic from arithmetic compound_statement
+
+# real builtins — actual commands with no OS-level side effect
 true  false  :         status setters / no-op
 read                   binds shell variable from stdin (process-local)
 echo  printf           write to fds; redirects evaluated separately
-[  [[                  synthetic from test_command
-((                     synthetic from arithmetic compound_statement
 ```
 
-This is unconditional: user `deny` / `ask` / `allow` rules targeting these names are silently ignored at decision time. `load_policy_file` emits a `PolicyWarning` when it sees one so the shadowing isn't invisible. Redirect verdicts still apply per-segment via `_decide_segment`, so `echo foo > out` correctly surfaces an Ask via the redirect rule, and pipe aggregation still escalates `echo foo | unknown` to Ask.
+`_match_bash` allows the **synthetic markers** *before* user rules are consulted — they aren't real commands, so a user rule can't meaningfully target them. The **real builtins** are allowed only as a *fallback* when no user rule matches, so an explicit `deny` / `ask` / `allow` rule on one of them (e.g. `deny: Bash(echo:*)`) still takes precedence. Redirect verdicts apply per-segment via `_decide_segment`, so `echo foo > out` correctly surfaces an Ask via the redirect rule, and pipe aggregation still escalates `echo foo | unknown` to Ask.
 
 The contract is "nothing the bridge does should turn an inert shell primitive into a permission prompt." Anything with real side effects — `cd`, `export`, `kill`, `eval`, etc. — stays under user rules.
 
@@ -170,16 +194,26 @@ Shell parsing lives in one function: `parse_pipeline(command: str) -> Pipeline`.
 - **Function definitions:** `foo() { … }` → body recursed at definition time so policy applies even before `foo` is invoked
 - **Test / arithmetic:** `[ … ]`, `[[ … ]]`, `(( … ))` → collapsed to synthetic inert segments (`("[",)` / `("((",)`); see "Inert command names" below
 - **Declarations:** `export FOO=bar`, `local`, `declare`, `readonly`, `typeset` → yielded as a normal segment with the keyword as argv[0] so `Bash(export:*)` rules match
-- **Redirects:** `>`, `>>`, `<`, `2>`, `2>&1`, `&>` — captured as `Redirect(fd, op, target, is_fd_dup)`. `<<EOF` heredocs are dropped (input-only, no file write)
+- **Redirects:** `>`, `>>`, `<`, `2>`, `2>&1`, `&>`, `>|`, `&>>`, `<&` — captured as `Redirect(fd, op, target, is_fd_dup)`. A process/command-substitution target (`> $(…)`, `< <(…)`) is decomposed: the inner command becomes its own segment, and a write to a runtime-computed name still asks. `<<EOF` heredocs and `<<<` herestrings are dropped (input-only, no file write); substitutions inside them are still extracted
 - **Environment prefixes:** `FOO=bar ls -la` — Tree-sitter marks `FOO=bar` as a `variable_assignment` and `_build_segment` skips it
-- **`bash -c "..."`:** the inner command is recursively re-parsed via `parse_pipeline`, and its segments replace the wrapper
+- **`bash -c "..."`:** the inner command is recursively re-parsed via `parse_pipeline`, and its segments replace the wrapper (bundled or split no-arg flags before `-c` are handled: `bash -lc`, `bash -l -c`). A `-c` form we can't safely locate the command in (`bash --norc -c`, `bash -o emacs -c`) is flagged as a parse-failure rather than left as an opaque allow
+- **Exec-prefix wrappers:** `command`, `exec`, `nohup`, `setsid`, `env`, `nice`, `time` are decomposed to their inner command (`env -i FOO=bar git status` → `git status`) so a rule on the real command applies. Wrappers with leading positionals or arg-taking options we don't model (`timeout`, `sudo`, `xargs`, `nice -n N`, …) are left intact and flagged as parse-failures — an explicit `Bash(<wrapper>:*)` rule still allow-lists them
 - **Path-prefixed commands:** `/usr/bin/ls` matches a `Bash(ls:*)` rule via basename
 
 - **Command/process substitutions:** `rm $(cat allowed)`, `cat <(sort file)` — inner commands are recursively extracted as separate segments and evaluated against the policy independently. The substitution-containing argument is dropped from the outer command's argv (its runtime value is unknowable). If all segments (outer command + inner commands) are allowed, the pipeline is allowed; if any inner command is unrecognized or denied, the aggregate verdict escalates accordingly
 
 It refuses to parse:
 
-- **Anything Tree-sitter reports as a shell syntax error:** parse errors → `parseable=False` → `Ask`
+- **Anything Tree-sitter reports as a shell syntax error:** parse errors → `parseable=False` → `Ask(parse_failure=True)`
+
+## Limitations
+
+The bridge analyzes shell *command structure*. It cannot see commands that exist only at runtime or inside another language:
+
+- **Interpreters running inline code:** `python -c "…"`, `perl -e "…"`, `ruby -e`, `node -e`, `awk 'prog'`, etc. The code is a string in another language, not shell — the bridge sees only the interpreter invocation (`python`), which returns `NoOpinion` unless you write a rule for it.
+- **Unrecognized executor prefixes:** the decomposed/​flagged wrapper lists (`command`, `env`, `timeout`, …) are not exhaustive. An executor not on either list (`busybox rm …`, `find . -exec rm …`) is treated as an ordinary command and returns `NoOpinion`.
+
+`NoOpinion` defers to the host agent (and is coerced to `Allow` under a bypass). So a denied command hidden behind an interpreter or unrecognized executor is **not** caught under bypass. Mitigations: write explicit `deny`/`ask` rules for the interpreters and executors you care about (`Bash(python:*)`, `find` via `BashOption` on `-exec`/`-delete`), and treat bypass as "skip prompts for commands I trust", not a security boundary against a command deliberately crafted to evade analysis. The `parse_failure` defense only covers commands the parser recognizes as un-analyzable, not ones that look like an ordinary opaque command.
 
 ## Why Tree-sitter Bash
 

@@ -9,4 +9,8 @@ build/
 .coverage
 .python-version
 .env
+.claude/
+.codex/
+.gemini/
+.opencode/
 zellij-plugin/target/

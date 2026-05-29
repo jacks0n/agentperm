@@ -58,13 +58,13 @@ When Claude Code is in `bypassPermissions` mode, the bridge coerces `Ask → All
 
 The trace will show the verdict rationale: `"compound includes unrecognized segment: no rule matched 'weird_thing'"`.
 
-### 6. My `Bash(echo:*)` / `Bash(true:*)` / etc. rule isn't taking effect
+### 6. Rules on `[ … ]` test predicates aren't taking effect
 
-A small set of shell primitives (`true`, `false`, `:`, `read`, `echo`, `printf`, `[`, `[[`, `((`) are **unconditionally allowed** because they have no OS-level side effect on their own. User rules — `allow`, `ask`, or `deny` — targeting these names are silently ignored at decision time, and `load_policy_file` emits a `PolicyWarning` so the shadowing isn't invisible.
+The synthetic predicate markers (`[`, `[[`, `((`) are parser artifacts, not real commands, so a `Bash([:*)` rule can't gate them — they are always allowed. This is intentional: `[ -f x ]` and `(( 1 + 1 ))` have no OS-level side effect.
 
-If you wanted to gate `echo`, the gate is on the *side effect*, not the command. `echo foo > sensitive.txt` still surfaces an Ask via the redirect rule (write-to-file). `echo foo | weird_cmd` still escalates to Ask via pipe aggregation if `weird_cmd` is unrecognised. There's no way to prompt on a bare `echo foo` because there's nothing to prompt about.
+Rules on the **real builtins** (`true`, `false`, `:`, `read`, `echo`, `printf`) *do* take effect — e.g. `deny: Bash(echo:*)` blocks `echo`. Absent any rule, those builtins fall through to an inert allow (nothing to prompt about on a bare `echo foo`). The side effects around them are still gated regardless: `echo foo > sensitive.txt` surfaces an Ask via the redirect rule, and `echo foo | weird_cmd` escalates to Ask via pipe aggregation if `weird_cmd` is unrecognised.
 
-See [Policy reference: Built-in unconditional allows](policy-reference.md#built-in-unconditional-allows) for the full list and rationale.
+See [Policy reference: Inert command names](policy-reference.md#inert-command-names) for the full list and rationale.
 
 ### 7. The policy file is broken
 

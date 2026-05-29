@@ -85,14 +85,13 @@ def test_env_assignment_prefix_stripped():
     assert segment.argv == ("ls", "-la")
 
 
-def test_env_command_is_treated_as_literal():
-    """``env -i PATH=/usr/bin git status`` is matched against ``env``, not ``git``.
-    Stripping the wrapper would require a regex shim — we choose strict literal matching
-    instead. Users who want to allow this combo write a rule for ``env``.
-    """
+def test_env_wrapper_decomposes_to_inner_command():
+    """``env -i PATH=/usr/bin git status`` decomposes to the inner ``git status``:
+    ``env``'s no-arg ``-i`` and ``NAME=value`` assignments are skipped, so a rule on
+    the real command (``git``) applies rather than one on the ``env`` wrapper."""
     pipeline = parse_pipeline("env -i PATH=/usr/bin git status")
     [segment] = pipeline.segments
-    assert segment.argv == ("env", "-i", "PATH=/usr/bin", "git", "status")
+    assert segment.argv == ("git", "status")
 
 
 def test_file_write_redirect_captured():
@@ -269,13 +268,57 @@ def test_shell_c_does_not_unwrap_capital_o_cluster():
     assert segment.argv == ("bash", "-Ocmdhist", "rg foo")
 
 
-def test_shell_c_does_not_unwrap_split_l_c():
-    """``bash -l -c 'rg foo'`` is a valid wrapper but uses split flags. The
-    heuristic only inspects ``argv[1]``; documented limitation, falls through.
-    """
+def test_shell_c_unwraps_split_no_arg_flags_before_c():
+    """``bash -l -c 'rg foo'`` — split no-arg flags before ``-c`` are skipped and
+    the inner command is unwrapped, so a deny rule on it still bites."""
     pipeline = parse_pipeline("bash -l -c 'rg foo'")
+    assert pipeline.parseable
     [segment] = pipeline.segments
-    assert segment.argv == ("bash", "-l", "-c", "rg foo")
+    assert segment.argv == ("rg", "foo")
+
+
+def test_shell_c_unwraps_multiple_split_no_arg_flags():
+    """``zsh -i -x -c '…'`` — several split no-arg flags before ``-c``."""
+    pipeline = parse_pipeline("zsh -i -x -c 'rm -rf /'")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("rm", "-rf", "/")]
+
+
+def test_exec_wrapper_decomposes_to_inner_command():
+    """``command``/``exec``/``nohup``/``nice``/``time`` with clean options decompose
+    to the inner command so it can be policed."""
+    for command, expected in (
+        ("command rm -rf /", ("rm", "-rf", "/")),
+        ("exec rm -rf /", ("rm", "-rf", "/")),
+        ("nohup rm -rf /", ("rm", "-rf", "/")),
+        ("nice rm -rf /", ("rm", "-rf", "/")),
+        ("time rm -rf /", ("rm", "-rf", "/")),
+        ("command nice rm -rf /", ("rm", "-rf", "/")),
+    ):
+        pipeline = parse_pipeline(command)
+        assert pipeline.parseable, command
+        assert [s.argv for s in pipeline.segments] == [expected], command
+
+
+def test_env_wrapper_skips_options_and_assignments():
+    """``env -i FOO=bar rm …`` — env's no-arg ``-i`` and ``NAME=value`` assignments
+    are skipped to reach the inner command."""
+    pipeline = parse_pipeline("env -i FOO=bar BAZ=qux rm -rf /")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("rm", "-rf", "/")]
+
+
+def test_opaque_exec_wrapper_left_intact():
+    """``timeout``/``nice -n``/``sudo`` aren't decomposed (leading positional or
+    arg-taking option) — the segment stays whole for decision-time flagging."""
+    for command, expected in (
+        ("timeout 5 rm -rf /", ("timeout", "5", "rm", "-rf", "/")),
+        ("nice -n 10 rm -rf /", ("nice", "-n", "10", "rm", "-rf", "/")),
+        ("sudo rm -rf /", ("sudo", "rm", "-rf", "/")),
+    ):
+        pipeline = parse_pipeline(command)
+        assert pipeline.parseable, command
+        assert [s.argv for s in pipeline.segments] == [expected], command
 
 
 def test_shell_c_does_not_unwrap_long_option_norc():
@@ -551,6 +594,51 @@ def test_bash_c_with_if_round_trips_through_unwrap():
     pipeline = parse_pipeline("bash -c 'if [ -f x ]; then cat x; fi'")
     assert pipeline.parseable
     assert [s.argv for s in pipeline.segments] == [("[",), ("cat", "x")]
+
+
+def test_redirected_shell_c_unwraps_inner_command():
+    """``zsh -lc "rm -rf /" 2>/dev/null`` — the wrapper sits inside a
+    redirected_statement; the inner command must still be unwrapped so a deny
+    rule can see it. The trailing redirect attaches to the unwrapped segment."""
+    pipeline = parse_pipeline('zsh -lc "rm -rf /" 2>/dev/null')
+    assert pipeline.parseable
+    [segment] = pipeline.segments
+    assert segment.argv == ("rm", "-rf", "/")
+    [redirect] = segment.redirects
+    assert redirect.fd == 2
+    assert redirect.target == "/dev/null"
+
+
+def test_process_substitution_redirect_target_extracts_inner_command():
+    """``cat < <(rm -rf /)`` — the redirect target is a process substitution, not
+    a file. It must stay parseable and surface the inner command as a segment so
+    a deny rule bites instead of degrading to an unparseable Ask."""
+    pipeline = parse_pipeline("cat < <(rm -rf /)")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("cat",), ("rm", "-rf", "/")]
+
+
+def test_substitution_nested_in_redirect_target_word_extracts_inner_command():
+    """``echo hi > out$(rm -rf /)`` — a substitution nested inside a concatenation/
+    string redirect target must still be extracted, not bailed as unparseable."""
+    for command in (
+        "echo hi > out$(rm -rf /)",
+        'echo hi > "$(rm -rf /)"',
+        "echo hi > foo$(rm -rf /)bar",
+    ):
+        pipeline = parse_pipeline(command)
+        assert pipeline.parseable, command
+        assert ("rm", "-rf", "/") in [s.argv for s in pipeline.segments], command
+
+
+def test_redirected_shell_c_spillover_not_appended_to_inner_command():
+    """``zsh -lc "rm -rf /" 2>/dev/null harmless`` — ``harmless`` is a positional
+    param of the wrapper, not argv of the inner command. It must not corrupt the
+    unwrapped inner segment (which would let an exact deny rule miss)."""
+    pipeline = parse_pipeline('zsh -lc "rm -rf /" 2>/dev/null harmless')
+    assert pipeline.parseable
+    [segment] = pipeline.segments
+    assert segment.argv == ("rm", "-rf", "/")
 
 
 def test_nested_if_in_for():

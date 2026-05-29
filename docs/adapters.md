@@ -41,7 +41,9 @@ Claude Code's `permission_mode == "bypassPermissions"` means the user has opted 
 - `Ask` → coerced to `Allow` with rationale prefix `"bypass mode: ..."`
 - `Allow` / `NoOpinion` → unchanged (Claude's native bypass takes over for `NoOpinion`)
 
-This is the only Claude-specific behavior in the policy layer. Codex / OpenCode / Gemini don't surface a bypass equivalent in their hook payloads.
+### MCP bypass propagation
+
+When Claude Code calls an MCP tool (e.g. `mcp__codex__codex`) in bypass mode, the bridge uses `updatedInput` to inject `"approval-policy": "never"` into the tool input. This causes the downstream agent (Codex) to run in full-auto mode — its `PermissionRequest` hooks don't fire, so agentperms doesn't prompt. `PreToolUse` hooks still fire, so Deny rules still apply. See [architecture — MCP bypass propagation](architecture.md#mcp-bypass-propagation).
 
 ### Concatenation, not merging
 
@@ -51,7 +53,7 @@ Claude Code concatenates hooks across user (`~/.claude/settings.json`), project 
 
 **Hooks:** `PreToolUse` (matcher `Bash`) and `PermissionRequest` (matcher `Bash|apply_patch|mcp__.*`) in `~/.codex/hooks.json`. In rulesync mode, both events are merged into `codexcli.hooks.{preToolUse,permissionRequest}` of `~/.rulesync/hooks.json` with matcher `.*`.
 
-Codex requires `[features].codex_hooks = true` in `~/.codex/config.toml`. `install` sets this automatically in direct mode; in rulesync mode, it's rulesync's responsibility — the bridge does not touch `config.toml`.
+Codex requires `[features].hooks = true` in `~/.codex/config.toml`. `install` sets this automatically in direct mode; in rulesync mode, it's rulesync's responsibility — the bridge does not touch `config.toml`.
 
 ### Two events, two roles
 

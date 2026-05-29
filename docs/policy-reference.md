@@ -109,9 +109,9 @@ For anything more expressive than a prefix, use the dict form.
 
 ⚠️  `--` terminator handling: the matcher does not yet track the POSIX `--` boundary. `sed -e s/x/y/ -- -i` will still match `BashOption(-i)` even though `-i` after `--` is a positional filename. The conservative direction (Ask on `-i`) is correct for a permission policy.
 
-## Built-in unconditional allows
+## Inert command names
 
-Two categories of shell input bypass policy entirely because they have no OS-level side effect on their own:
+Two categories of shell input have no OS-level side effect on their own:
 
 **Control flow and grouping** — the parser traverses these and evaluates the *commands they contain*. The control-flow construct itself is never something to allow or deny:
 
@@ -124,27 +124,23 @@ Two categories of shell input bypass policy entirely because they have no OS-lev
 - `! cmd` negation
 - `foo() { … }` function definitions (body evaluated at definition time)
 
-**Inert command names** — these are always allowed regardless of arguments, because they cannot create, modify, or read files; cannot fork processes; cannot mutate state visible outside the parsing shell:
+**Inert command names** — these have no OS-level side effect of their own (they cannot create, modify, or read files; cannot fork processes; cannot mutate state visible outside the parsing shell). They split into two groups with different precedence:
 
-| Name | Why inert |
-|---|---|
-| `true`, `false`, `:` | Status setters / no-op |
-| `read` | Binds shell variable from stdin (process-local) |
-| `echo`, `printf` | Write to fds; redirects evaluated separately |
-| `[`, `[[` | Synthetic from `test_command` AST node |
-| `((` | Synthetic from arithmetic `compound_statement` |
+| Name | Why inert | Precedence |
+|---|---|---|
+| `[`, `[[` | Synthetic from `test_command` AST node (both emit `("[",)`) | Allowed *before* user rules — not real commands |
+| `((` | Synthetic from arithmetic `compound_statement` | Allowed *before* user rules — not real commands |
+| `true`, `false`, `:` | Status setters / no-op | Allowed as a *fallback* — user rules override |
+| `read` | Binds shell variable from stdin (process-local) | Allowed as a *fallback* — user rules override |
+| `echo`, `printf` | Write to fds; redirects evaluated separately | Allowed as a *fallback* — user rules override |
 
-User `Bash(<name>:*)` rules targeting any of these names are **silently ignored at decision time**. `load_policy_file` emits a `PolicyWarning` so the shadowing isn't invisible:
+The **synthetic markers** (`[`, `[[`, `((`) aren't real commands, so a user rule can't target them; they are always allowed. A user rule on a **real builtin** still bites — e.g. `deny: Bash(echo:*)` blocks `echo`, because the inert allow for real builtins is only a fallback used when no rule matches.
 
-```
-PolicyWarning: rule Bash(echo:*) targets inert shell name 'echo' and will be ignored
-```
-
-What is *not* bypassed:
+What is *not* bypassed for the fallback-allowed builtins:
 
 - **Redirects** are evaluated independently. `echo foo > out.txt` still surfaces an Ask via the redirect rule (write-to-file), because `>` is a side effect even though `echo` isn't.
 - **Pipe aggregation** still applies. `echo foo | weird_cmd` still escalates to Ask under "Allow + NoOpinion → Ask" if `weird_cmd` is unrecognised.
-- **Anything with real side effects** stays under user rules: `cd`, `export`, `kill`, `eval`, `exec`, `source`, etc. are all parsed as regular commands and require an explicit `Bash(<name>:*)` rule.
+- **Anything with real side effects** stays under user rules: `cd`, `export`, `kill`, `source`, etc. are parsed as regular commands and require an explicit `Bash(<name>:*)` rule. Command-introducing wrappers (`bash -c`, `eval`, `command`, `exec`, `env`, `nice`, …) are decomposed to the inner command where possible, so you rule the inner command, not the wrapper; wrappers that can't be safely decomposed prompt under bypass instead of being allowed.
 
 See [Architecture: Inert command names](architecture.md#inert-command-names) for the rationale.
 

@@ -145,6 +145,113 @@ def test_claude_permission_request_emits_allow_behavior():
     assert payload["hookSpecificOutput"]["decision"]["behavior"] == "allow"
 
 
+# ---- Claude MCP bypass (updatedInput injection) --------------------------
+
+
+def test_claude_pretooluse_mcp_bypass_injects_approval_policy():
+    adapter = ClaudeAdapter()
+    buf = io.StringIO()
+    updated: JsonObject = {"prompt": "do stuff", "approval-policy": "never"}
+    with redirect_stdout(buf):
+        adapter.write_verdict(Verdict(Decision.Allow, "bypass"), "PreToolUse", updated_input=updated)
+    payload = json.loads(buf.getvalue())
+    assert payload["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert payload["hookSpecificOutput"]["updatedInput"] == updated
+
+
+def test_claude_pretooluse_no_updated_input_omits_key():
+    adapter = ClaudeAdapter()
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        adapter.write_verdict(Verdict(Decision.Allow, "ok"), "PreToolUse")
+    payload = json.loads(buf.getvalue())
+    assert "updatedInput" not in payload["hookSpecificOutput"]
+
+
+def test_claude_pretooluse_updated_input_preserves_original_fields():
+    adapter = ClaudeAdapter()
+    buf = io.StringIO()
+    updated: JsonObject = {"prompt": "hello", "cwd": "/tmp", "approval-policy": "never"}
+    with redirect_stdout(buf):
+        adapter.write_verdict(Verdict(Decision.Allow, "bypass"), "PreToolUse", updated_input=updated)
+    payload = json.loads(buf.getvalue())
+    ui = payload["hookSpecificOutput"]["updatedInput"]
+    assert ui["prompt"] == "hello"
+    assert ui["cwd"] == "/tmp"
+    assert ui["approval-policy"] == "never"
+
+
+def test_claude_pretooluse_deny_omits_updated_input():
+    adapter = ClaudeAdapter()
+    buf = io.StringIO()
+    updated: JsonObject = {"prompt": "hello", "approval-policy": "never"}
+    with redirect_stdout(buf):
+        adapter.write_verdict(Verdict(Decision.Deny, "blocked"), "PreToolUse", updated_input=updated)
+    payload = json.loads(buf.getvalue())
+    hook_output = payload["hookSpecificOutput"]
+    assert hook_output["permissionDecision"] == "deny"
+    assert "updatedInput" not in hook_output
+
+
+def _mcp_bypass_payload(
+    *,
+    permission_mode: str = "bypassPermissions",
+    tool_name: str = "mcp__codex__codex",
+) -> JsonObject:
+    return {
+        "permission_mode": permission_mode,
+        "tool_name": tool_name,
+        "tool_input": {"prompt": "do stuff", "cwd": "/tmp"},
+    }
+
+
+def test_claude_mcp_bypass_injects_approval_policy_without_policy_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("AGENTPERMS_TRACE", raising=False)
+    monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    payload = _mcp_bypass_payload()
+    payload["hook_event_name"] = "PreToolUse"
+    payload["cwd"] = str(tmp_path)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = _cmd_check(AgentName.Claude, "PreToolUse")
+    assert rc == 0
+    output = json.loads(buf.getvalue())
+    hook_output = output["hookSpecificOutput"]
+    updated_input = hook_output["updatedInput"]
+    assert hook_output["hookEventName"] == "PreToolUse"
+    assert "permissionDecision" not in hook_output
+    assert updated_input["approval-policy"] == "never"
+    assert updated_input["prompt"] == "do stuff"
+
+
+def test_claude_mcp_bypass_skips_non_codex_mcp_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Non-codex MCP tools must not receive approval-policy injection."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("AGENTPERMS_TRACE", raising=False)
+    monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+
+    for tool in (
+        "mcp__google_workspace__search_gmail_messages",
+        "mcp__todoist__find-tasks",
+        "mcp__notion__notion-fetch",
+    ):
+        payload = _mcp_bypass_payload(tool_name=tool)
+        payload["hook_event_name"] = "PreToolUse"
+        payload["cwd"] = str(tmp_path)
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = _cmd_check(AgentName.Claude, "PreToolUse")
+        assert rc == 0
+        assert json.loads(buf.getvalue()) == {}
+
+
 # ---- Codex adapter --------------------------------------------------------
 
 
@@ -383,8 +490,10 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "_rulesync_hooks_path",
         lambda: tmp_path / ".rulesync/hooks.json",
     )
+
     def _stub_which(_name: str, *_args: object, **_kwargs: object) -> str:
         return "/abs/agentperms"
+
     monkeypatch.setattr(shutil, "which", _stub_which)
     return tmp_path
 
@@ -429,10 +538,7 @@ def test_claude_install_direct_replaces_stale_bridge_entry(fake_home: Path):
     data = json.loads(settings.read_text())
     groups = data["hooks"]["PreToolUse"]
     assert len(groups) == 1
-    assert (
-        groups[0]["hooks"][0]["command"]
-        == "/abs/agentperms check --agent claude --event PreToolUse"
-    )
+    assert groups[0]["hooks"][0]["command"] == "/abs/agentperms check --agent claude --event PreToolUse"
 
 
 def test_claude_install_direct_strips_spurious_permissionrequest(fake_home: Path):
@@ -526,12 +632,25 @@ def test_codex_install_direct_writes_both_files(fake_home: Path):
     assert "--event PermissionRequest" in perm[0]["hooks"][0]["command"]
 
 
-def test_codex_install_direct_enables_codex_hooks_feature(fake_home: Path):
+def test_codex_install_direct_enables_hooks_feature(fake_home: Path):
     CodexAdapter().install(InstallMode.Direct)
     config = tomlkit.parse((fake_home / ".codex/config.toml").read_text())
     features = config.get("features")
     assert isinstance(features, dict)
-    assert features.get("codex_hooks") is True
+    assert features.get("hooks") is True
+    assert "codex_hooks" not in features
+
+
+def test_codex_install_direct_migrates_deprecated_codex_hooks_feature(fake_home: Path):
+    config = fake_home / ".codex/config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text("[features]\ncodex_hooks = true\n")
+    CodexAdapter().install(InstallMode.Direct)
+    parsed = tomlkit.parse(config.read_text())
+    features = parsed.get("features")
+    assert isinstance(features, dict)
+    assert features.get("hooks") is True
+    assert "codex_hooks" not in features
 
 
 def test_codex_install_direct_preserves_existing_toml(fake_home: Path):
@@ -545,7 +664,7 @@ def test_codex_install_direct_preserves_existing_toml(fake_home: Path):
     assert isinstance(approval, dict)
     assert isinstance(features, dict)
     assert approval.get("policy") == "untrusted"
-    assert features.get("codex_hooks") is True
+    assert features.get("hooks") is True
 
 
 def test_codex_install_rulesync_writes_both_events(fake_home: Path):
@@ -639,9 +758,7 @@ def test_resolve_install_mode_explicit_rulesync_requires_directory(tmp_path: Pat
 
 
 def test_is_bridge_hook_matches_bridge_command():
-    assert _is_bridge_hook(
-        {"type": "command", "command": "/abs/agentperms check --agent claude --event PreToolUse"}
-    )
+    assert _is_bridge_hook({"type": "command", "command": "/abs/agentperms check --agent claude --event PreToolUse"})
 
 
 def test_is_bridge_hook_rejects_unrelated_wrapper_with_substring():
@@ -649,16 +766,12 @@ def test_is_bridge_hook_rejects_unrelated_wrapper_with_substring():
     ``agentperms`` (e.g. ``agentperms-debug``). Strict basename +
     second-arg ``check`` is required to identify our own entries.
     """
-    assert not _is_bridge_hook(
-        {"type": "command", "command": "/usr/local/bin/agentperms-debug trace"}
-    )
+    assert not _is_bridge_hook({"type": "command", "command": "/usr/local/bin/agentperms-debug trace"})
 
 
 def test_is_bridge_hook_rejects_bridge_with_other_subcommand():
     """A user's manual ``agentperms edit`` should not be treated as installer-owned."""
-    assert not _is_bridge_hook(
-        {"type": "command", "command": "/abs/agentperms edit"}
-    )
+    assert not _is_bridge_hook({"type": "command", "command": "/abs/agentperms edit"})
 
 
 def test_is_bridge_hook_rejects_non_dict():
@@ -673,16 +786,16 @@ def test_is_bridge_hook_rejects_empty_command():
 # ---- shell-safe path embedding -------------------------------------------
 
 
-def test_install_quotes_paths_with_spaces(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_install_quotes_paths_with_spaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A user's bridge installed under e.g. ``/Users/jane doe/.local/bin/`` must
     survive interpolation into a hook command — without ``shlex.quote`` the path
     splits on the space and the hook silently fails. Regression guard for M1.
     """
     monkeypatch.setattr(ClaudeAdapter, "settings_path", tmp_path / ".claude/settings.json")
+
     def _spaced_which(_name: str, *_args: object, **_kwargs: object) -> str:
         return "/Users/jane doe/bin/agentperms"
+
     monkeypatch.setattr(shutil, "which", _spaced_which)
     paths = ClaudeAdapter().install(InstallMode.Direct)
     data = json.loads(paths[0].read_text())
@@ -697,16 +810,16 @@ def test_install_quotes_paths_with_spaces(
     assert parts[1] == "check"
 
 
-def test_opencode_plugin_json_escapes_special_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_opencode_plugin_json_escapes_special_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The plugin embeds the bridge path as a JS string literal; ``json.dumps``
     correctly handles backslashes and quotes. A path with a backslash must
     survive interpolation as a valid JS literal.
     """
     monkeypatch.setattr(OpencodeAdapter, "plugin_path", tmp_path / "agentperms.js")
+
     def _windows_which(_name: str, *_args: object, **_kwargs: object) -> str:
         return "C:\\Program Files\\agentperms"
+
     monkeypatch.setattr(shutil, "which", _windows_which)
     paths = OpencodeAdapter().install(InstallMode.Direct)
     text = paths[0].read_text()

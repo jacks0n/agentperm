@@ -23,7 +23,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -113,6 +112,11 @@ _STRICTNESS = {Decision.Deny: 3, Decision.Ask: 2, Decision.Allow: 1, Decision.No
 class Verdict:
     decision: Decision
     rationale: str
+    # True when the decision is an ``Ask`` the parser produced because it could
+    # not safely analyze the command (not a deliberate policy Ask). Bypass modes
+    # must NOT coerce these to Allow — an un-analyzable command may hide a denied
+    # one, so it still warrants a prompt.
+    parse_failure: bool = False
 
 
 @dataclass(frozen=True)
@@ -272,25 +276,22 @@ def _arg_matches_option(arg: str, option: str) -> bool:
 # -----------------------------------------------------------------------------
 
 
-# Shell builtins / synthetic AST tokens with no possible OS-level side effect.
-# Matched before user rules in ``_match_bash`` so they are unconditionally allowed —
-# user ``deny``/``ask``/``allow`` rules on these names are ignored (warned at load).
-# Redirect verdicts are still applied independently in ``_decide_segment``, so e.g.
+# Synthetic argv markers the parser emits for predicate constructs — never real
+# commands, so user rules can't meaningfully target them. Matched *before* user
+# rules in ``_match_bash`` and always allowed. ``test_command`` (`[ … ]` and
+# `[[ … ]]`) both collapse to ``"["``; arithmetic ``(( … ))`` to ``"(("``.
+_SYNTHETIC_INERT_MARKERS: frozenset[str] = frozenset({"[", "[[", "(("})
+
+# Real shell builtins with no OS-level side effect of their own. Allowed as a
+# *fallback* in ``_match_bash`` when no user rule matches — an explicit
+# ``deny``/``ask``/``allow`` rule on one of these still takes precedence.
+# Redirect verdicts are applied independently in ``_decide_segment``, so e.g.
 # ``echo foo > out`` still surfaces an Ask via the redirect rule.
 _INERT_COMMAND_NAMES: frozenset[str] = frozenset({
     "true", "false", ":",       # status setters / no-op
     "read",                     # in-process variable bind only
     "echo", "printf",           # output to fds; redirects evaluated separately
-    "[", "[[",                  # synthetic from test_command
-    "((",                       # synthetic from arithmetic compound_statement
 })
-
-
-class PolicyWarning(UserWarning):
-    """Surfaced at policy-load when a user rule targets a name in ``_INERT_COMMAND_NAMES``.
-
-    The rule will be silently ignored at decision time; the warning lets the user notice.
-    """
 
 
 @dataclass(frozen=True)
@@ -330,7 +331,11 @@ class Policy:
 
     def _decide_shell(self, pipeline: Pipeline) -> Verdict:
         if not pipeline.parseable:
-            return Verdict(Decision.Ask, pipeline.unparseable_reason or "shell syntax not safely parseable")
+            return Verdict(
+                Decision.Ask,
+                pipeline.unparseable_reason or "shell syntax not safely parseable",
+                parse_failure=True,
+            )
         if not pipeline.segments:
             return Verdict(Decision.NoOpinion, "")
         verdicts = [self._decide_segment(seg) for seg in pipeline.segments]
@@ -340,14 +345,38 @@ class Policy:
         return _stricter(_evaluate_redirects(segment.redirects), self._match_bash(segment))
 
     def _match_bash(self, segment: Segment) -> Verdict:
-        if segment.argv and _basename(segment.argv[0]) in _INERT_COMMAND_NAMES:
-            return Verdict(Decision.Allow, "inert shell builtin")
+        argv0 = _basename(segment.argv[0]) if segment.argv else None
+        # Synthetic predicate markers ([, ((, …) aren't real commands, so user
+        # rules can't target them — allow before the rule loop.
+        if argv0 in _SYNTHETIC_INERT_MARKERS:
+            return Verdict(Decision.Allow, "inert predicate")
         for decision, rule in self.all_rules():
             if isinstance(rule, BashCommand | BashOption) and rule.matches(segment):
                 rationale = rule.rationale if isinstance(rule, BashOption) else _format_rule(rule, decision)
                 return Verdict(decision, rationale)
-        argv0 = segment.argv[0] if segment.argv else "<empty>"
-        return Verdict(Decision.NoOpinion, f"no rule matched {argv0!r}")
+        # ``command -v/-V X`` is a benign name lookup, not execution.
+        if _is_command_lookup(segment):
+            return Verdict(Decision.Allow, "command lookup")
+        # A command-introducing wrapper whose inner command we couldn't extract —
+        # a shell ``-c`` form we declined to unwrap (``bash --norc -c "rm -rf /"``),
+        # or an exec-prefix wrapper left intact (``timeout 5 rm -rf /``, ``nice -n 10
+        # rm -rf /``). It hides its real command, so treat it as a parse failure:
+        # bypass keeps prompting rather than coercing the otherwise-NoOpinion verdict
+        # to Allow. Reached only when no explicit rule matched, so ``Bash(sudo:*)``
+        # and friends still allow-list. (Cleanly-decomposable forms never reach here —
+        # they were already expanded into their inner segments.)
+        if _is_opaque_shell_command(segment) or (argv0 in _ALL_EXEC_WRAPPERS):
+            return Verdict(Decision.Ask, f"unanalyzable command wrapper {segment.argv[0]!r}", parse_failure=True)
+        # A command whose *name* is a runtime expansion (``eval "$cmd"``, ``bash -c
+        # "$cmd"``, ``$TOOL args``) is unknowable statically. Flag it so bypass
+        # prompts rather than allowing whatever the variable resolves to.
+        if segment.argv and "$" in segment.argv[0]:
+            return Verdict(Decision.Ask, f"dynamic command name {segment.argv[0]!r}", parse_failure=True)
+        # Real inert builtins (echo, true, …) are a fallback, not a pre-rule short
+        # circuit: an explicit deny/ask rule on one of them must still bite.
+        if argv0 in _INERT_COMMAND_NAMES:
+            return Verdict(Decision.Allow, "inert shell builtin")
+        return Verdict(Decision.NoOpinion, f"no rule matched {segment.argv[0] if segment.argv else '<empty>'!r}")
 
     def _decide_tool(self, name: str) -> Verdict:
         for decision, rule in self.all_rules():
@@ -362,11 +391,25 @@ def _format_rule(rule: Rule, decision: Decision) -> str:
 
 def _stricter(left: Verdict, right: Verdict) -> Verdict:
     if _STRICTNESS[left.decision] > _STRICTNESS[right.decision]:
-        return left
-    if _STRICTNESS[right.decision] > _STRICTNESS[left.decision]:
-        return right
-    # Tie on strictness: prefer the side with an informative rationale.
-    return left if left.rationale else right
+        winner = left
+    elif _STRICTNESS[right.decision] > _STRICTNESS[left.decision]:
+        winner = right
+    else:
+        # Tie on strictness: prefer the side with an informative rationale.
+        winner = left if left.rationale else right
+    return _carry_parse_failure(winner, left, right)
+
+
+def _carry_parse_failure(winner: Verdict, *contributors: Verdict) -> Verdict:
+    """Preserve ``parse_failure`` onto an ``Ask`` winner if any contributor had it.
+
+    A same-strictness ordinary ``Ask`` (e.g. a redirect "writes to …") must not mask
+    an un-analyzable ``Ask(parse_failure=True)``, or bypass would coerce the combined
+    verdict to Allow and launder the hidden command.
+    """
+    if winner.decision is Decision.Ask and not winner.parse_failure and any(c.parse_failure for c in contributors):
+        return Verdict(Decision.Ask, winner.rationale, parse_failure=True)
+    return winner
 
 
 def aggregate(verdicts: list[Verdict]) -> Verdict:
@@ -378,7 +421,7 @@ def aggregate(verdicts: list[Verdict]) -> Verdict:
         unknown = next((v for v in verdicts if v.decision is Decision.NoOpinion), None)
         if unknown is not None:
             return Verdict(Decision.Ask, f"compound includes unrecognized segment: {unknown.rationale}")
-    return strictest
+    return _carry_parse_failure(strictest, *verdicts)
 
 
 # -----------------------------------------------------------------------------
@@ -399,7 +442,8 @@ def _evaluate_redirect(r: Redirect) -> Verdict:
         return Verdict(Decision.NoOpinion, "")
     if r.fd == 2 and r.op in (">", ">>") and r.target == "/dev/null":
         return Verdict(Decision.NoOpinion, "")
-    if r.op in (">", ">>", "&>"):
+    # ``>|`` force-clobber and ``&>>`` append-both are writes like ``>`` / ``&>``.
+    if r.op in (">", ">>", "&>", ">|", "&>>"):
         return Verdict(Decision.Ask, f"writes to {r.target!r}")
     if r.op == "<":
         return Verdict(Decision.NoOpinion, "")
@@ -420,6 +464,33 @@ class _UnsupportedShellError(Exception):
 
 
 _SHELL_COMMANDS = frozenset({"bash", "sh", "zsh"})
+
+# Exec-prefix wrappers run a *following* command. We decompose them so a deny rule
+# on the inner command still bites. Value = short option letters that take NO
+# argument; the inner command is the first token that is neither one of those
+# options nor (for ``env``) a ``NAME=value`` assignment. A wrapper invocation whose
+# options we can't classify is left intact and flagged at decision time.
+_EXEC_WRAPPER_NO_ARG_OPTS: dict[str, frozenset[str]] = {
+    "command": frozenset("pvV"),
+    "exec": frozenset("cl"),
+    "nohup": frozenset(),
+    "setsid": frozenset("cfw"),
+    "env": frozenset("i"),
+    "nice": frozenset(),
+    "time": frozenset("p"),
+}
+
+# Exec wrappers we never decompose — leading positionals (``timeout 5 cmd``) or
+# option grammars too varied to model. Flagged at decision time so bypass prompts
+# rather than allowing the hidden command; an explicit rule still allow-lists them.
+_OPAQUE_EXEC_WRAPPERS: frozenset[str] = frozenset({
+    "timeout", "sudo", "doas", "su", "runuser", "xargs", "stdbuf", "ionice",
+    "chrt", "setarch", "setpriv", "unshare", "watch", "parallel", "flock", "eval",
+})
+
+_ALL_EXEC_WRAPPERS: frozenset[str] = frozenset(_EXEC_WRAPPER_NO_ARG_OPTS) | _OPAQUE_EXEC_WRAPPERS
+
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _BASH_LANGUAGE = Language(tree_sitter_bash.language())
 _BASH_PARSER = Parser()
 _BASH_PARSER.language = _BASH_LANGUAGE
@@ -491,11 +562,17 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
             yield from unwrapped
             yield from inner
             return
-        yield segment
+        yield from _unwrap_exec_wrapper(segment)
         yield from inner
         return
     if node.type == "redirected_statement":
         yield from _build_redirected_segment(node, source)
+        return
+    if node.type in ("command_substitution", "process_substitution"):
+        # A bare substitution standing where a command is expected — e.g. a
+        # ``case $(rm -rf /) in …`` subject. The substitution runs; extract its
+        # inner commands for policy evaluation rather than bailing as unparseable.
+        yield from _extract_substitution_segments(node, source)
         return
     if node.type == "compound_statement":
         # ``(( … ))`` and ``{ …; }`` share this AST node — disambiguate by source prefix.
@@ -593,6 +670,10 @@ def _build_segment(command_node: Node, source: bytes) -> tuple[Segment, tuple[Se
         if child.type in _OPAQUE_ARG_TYPES:
             argv.append(_argument_text(child, source))
             continue
+        if child.type == "herestring_redirect":
+            # ``cmd <<< word`` feeds a string to stdin — input only, no file write.
+            # A herestring carrying a substitution is extracted by the branch above.
+            continue
         raise _UnsupportedShellError(f"unsupported command part {child.type!r}")
     return Segment(tuple(argv), ()), tuple(inner)
 
@@ -610,19 +691,34 @@ def _build_redirected_segment(node: Node, source: bytes) -> Iterator[Segment]:
     substitution_segments: list[Segment] = []
     redirects: list[Redirect] = []
     spillover: list[str] = []
+    last_was_unwrapped_wrapper = False
     for child in node.named_children:
         if child.type == "command":
             segment, sub_segs = _build_segment(child, source)
-            inner_segments.append(segment)
+            # ``zsh -lc "rm -rf /" 2>file`` wraps the inner command; unwrap it like
+            # ``_extract_segments`` does, else a deny rule on the inner command can't
+            # bite. The trailing redirect then attaches to the last inner segment.
+            unwrapped = _unwrap_shell_c(segment)
+            if unwrapped is not None:
+                inner_segments.extend(unwrapped)
+                last_was_unwrapped_wrapper = True
+            else:
+                # Exec-wrapper spillover (`nohup cmd 2>f extra`) is argv of the inner
+                # command, so it must rejoin — unlike a shell -c wrapper's positionals.
+                inner_segments.extend(_unwrap_exec_wrapper(segment))
+                last_was_unwrapped_wrapper = False
             substitution_segments.extend(sub_segs)
             continue
         if child.type in _REDIRECT_INNER_TYPES:
             inner_segments.extend(_extract_segments(child, source))
+            last_was_unwrapped_wrapper = False
             continue
         if child.type == "file_redirect":
-            redirect, extras = _build_redirect(child, source)
-            redirects.append(redirect)
+            redirect, extras, redirect_subs = _build_redirect(child, source)
+            if redirect is not None:
+                redirects.append(redirect)
             spillover.extend(extras)
+            substitution_segments.extend(redirect_subs)
             continue
         if child.type == "heredoc_redirect":
             # ``cat <<EOF … EOF`` feeds the body to stdin; no file write, no policy
@@ -634,6 +730,12 @@ def _build_redirected_segment(node: Node, source: bytes) -> Iterator[Segment]:
         raise _UnsupportedShellError(f"unsupported redirected statement part {child.type!r}")
     if not inner_segments:
         raise _UnsupportedShellError("redirected statement missing command")
+    # Words after a ``shell -c "…"`` wrapper are the wrapper's positional params
+    # ($0, $1, …), not argv of the unwrapped inner command — they vanish with the
+    # discarded wrapper. Spillover only rejoins argv when the last segment is a
+    # real command tree-sitter split the redirect away from.
+    if last_was_unwrapped_wrapper:
+        spillover = []
     *head, last = inner_segments
     yield from head
     yield Segment(
@@ -652,8 +754,8 @@ _NO_ARG_SHELL_FLAGS = frozenset("efilmnpstuvx")
 
 def _is_safe_c_bundle(flag: str) -> bool:
     """True iff ``flag`` is ``-c`` or a short-flag cluster ending in ``c`` whose
-    other chars are all in ``_NO_ARG_SHELL_FLAGS``. Only then is ``argv[2]``
-    reliably the command string under POSIX cluster semantics: any arg-taking
+    other chars are all in ``_NO_ARG_SHELL_FLAGS``. Only then is the token after
+    it reliably the command string under POSIX cluster semantics: any arg-taking
     flag in the cluster (``-o``, ``-O``…) would steal it instead.
     """
     if not flag.startswith("-") or flag.startswith("--") or "=" in flag:
@@ -664,29 +766,140 @@ def _is_safe_c_bundle(flag: str) -> bool:
     return all(ch in _NO_ARG_SHELL_FLAGS for ch in chars[:-1])
 
 
+def _is_no_arg_short_cluster(flag: str) -> bool:
+    """True iff ``flag`` is a short-flag cluster of known no-arg flags (``-l``,
+    ``-i``, ``-xv``…). Such flags consume no following token, so we can skip past
+    them when locating ``-c``. Excludes ``-c`` bundles (handled separately) since
+    ``c`` is not in ``_NO_ARG_SHELL_FLAGS``, long options, and arg-taking flags.
+    """
+    if not flag.startswith("-") or flag.startswith("--") or "=" in flag:
+        return False
+    chars = flag[1:]
+    return bool(chars) and all(ch in _NO_ARG_SHELL_FLAGS for ch in chars)
+
+
 def _unwrap_shell_c(segment: Segment) -> tuple[Segment, ...] | None:
     """``bash -c "ls -la"`` → segments of the inner command. None if the
     wrapper shape is not provably safe to unwrap.
 
-    Accepts ``-c`` alone or short-flag clusters of known no-arg flags ending
-    in ``c`` (``-lc``, ``-ic``, ``-xc``, ``-xlc``…). Codex emits ``zsh -lc``;
-    that's the motivating case. Splits and long-option forms (``bash -l -c``,
-    ``bash --norc -c``, ``bash -O cmdhist -c``) fall through cleanly to the
-    native prompt — long-option arg shapes vary too much to model conservatively.
+    Accepts ``-c`` whether bundled (``-lc``, ``-xlc``) or split across preceding
+    no-arg short flags (``bash -l -c``, ``zsh -i -x -c``). The command string is
+    the token immediately after the ``-c`` flag. Long-option and arg-taking-flag
+    forms (``bash --norc -c``, ``bash -O cmdhist -c``, ``zsh -ocorrect``) fall
+    through to the native prompt — their arg shapes vary too much to model safely.
 
-    Tree-sitter string arguments are normalised before this point, so the inner
-    command is just ``segment.argv[2]``. We re-parse it via ``parse_pipeline``
-    so any compound/redirect/control-flow structure inside is faithfully
-    preserved.
+    Tree-sitter string arguments are normalised before this point, so the command
+    string is a single argv token. We re-parse it via ``parse_pipeline`` so any
+    compound/redirect/control-flow structure inside is faithfully preserved.
     """
-    if len(segment.argv) < 3 or _basename(segment.argv[0]) not in _SHELL_COMMANDS:
+    argv = segment.argv
+    if len(argv) < 3 or _basename(argv[0]) not in _SHELL_COMMANDS:
         return None
-    if not _is_safe_c_bundle(segment.argv[1]):
+    idx = 1
+    while idx < len(argv) - 1:
+        token = argv[idx]
+        if _is_safe_c_bundle(token):
+            inner = parse_pipeline(argv[idx + 1])
+            return inner.segments if inner.parseable else None
+        if _is_no_arg_short_cluster(token):
+            idx += 1
+            continue
         return None
-    inner = parse_pipeline(segment.argv[2])
-    if not inner.parseable:
-        return None
-    return inner.segments
+    return None
+
+
+def _unwrap_exec_wrapper(segment: Segment) -> tuple[Segment, ...]:
+    """``command rm -rf /`` / ``env -i rm -rf /`` → segments of the inner command,
+    so a deny rule on it still bites. Returns ``(segment,)`` unchanged when the
+    segment is not a decomposable wrapper, or when its options can't be classified
+    (then it's flagged at decision time instead — see ``_match_bash``).
+
+    The inner command is the first token after the wrapper that is neither a known
+    no-arg option nor (for ``env``) a ``NAME=value`` assignment. Decomposition
+    recurses, so stacked wrappers (``command nice rm -rf /``) fully unwrap.
+    """
+    if not segment.argv:
+        return (segment,)
+    name = _basename(segment.argv[0])
+    if name == "eval":
+        # ``eval`` joins its args and executes the result as a command — re-parse
+        # the joined string like a ``-c`` wrapper. If it isn't statically parseable
+        # (e.g. ``eval "$cmd"``), leave it intact for decision-time flagging.
+        if len(segment.argv) < 2:
+            return (segment,)
+        inner = parse_pipeline(" ".join(segment.argv[1:]))
+        return inner.segments if inner.parseable else (segment,)
+    no_arg = _EXEC_WRAPPER_NO_ARG_OPTS.get(name)
+    if no_arg is None:
+        return (segment,)
+    if _is_command_lookup(segment):
+        return (segment,)  # `command -v/-V X` resolves X without running it
+    argv = segment.argv
+    idx = 1
+    while idx < len(argv):
+        token = argv[idx]
+        if token == "--":
+            idx += 1
+            break
+        if _basename(argv[0]) == "env" and _ENV_ASSIGNMENT_RE.match(token):
+            idx += 1
+            continue
+        if token.startswith("-") and len(token) > 1:
+            if all(ch in no_arg for ch in token[1:]):
+                idx += 1
+                continue
+            return (segment,)  # arg-taking/unknown option — leave intact, flag later
+        break
+    if idx >= len(argv):
+        return (segment,)  # wrapper with no inner command (bare ``env`` / ``command``)
+    inner = Segment(argv[idx:], segment.redirects)
+    unwrapped = _unwrap_shell_c(inner)
+    return unwrapped if unwrapped is not None else _unwrap_exec_wrapper(inner)
+
+
+def _is_command_lookup(segment: Segment) -> bool:
+    """True for ``command -v X`` / ``command -V X`` — these resolve ``X`` (like
+    ``which``) without executing it, so the inner command must not be decomposed
+    and policed as if it ran."""
+    if not segment.argv or _basename(segment.argv[0]) != "command":
+        return False
+    for token in segment.argv[1:]:
+        if token == "--" or not token.startswith("-"):
+            return False
+        if "v" in token[1:] or "V" in token[1:]:
+            return True
+    return False
+
+
+def _is_opaque_shell_command(segment: Segment) -> bool:
+    """True iff ``segment`` is a shell wrapper (``bash``/``sh``/``zsh``) carrying a
+    ``-c`` command flag that ``_unwrap_shell_c`` could not safely unwrap — the
+    embedded command is hidden, so the segment cannot be analyzed.
+
+    Unwrappable ``-c`` forms never reach a verdict as a wrapper segment (they were
+    expanded into their inner segments upstream), so any ``-c``-bearing shell
+    segment seen at decision time is one we declined to unwrap. Plain script /
+    interactive invocations (``bash script.sh``, ``zsh -l``) carry no ``-c`` and
+    stay NoOpinion.
+
+    Cluster semantics matter: in a short-flag cluster a ``c`` only means the
+    command flag if every preceding char is a no-arg flag. ``-Ocmdhist`` /
+    ``-ocorrect`` are ``-O``/``-o`` with an *argument* that happens to contain
+    ``c`` — not a ``-c`` command flag — so they don't count.
+    """
+    if not segment.argv or _basename(segment.argv[0]) not in _SHELL_COMMANDS:
+        return False
+    for token in segment.argv[1:]:
+        if token == "--":
+            break
+        if not token.startswith("-") or token.startswith("--"):
+            continue
+        for ch in token[1:]:
+            if ch == "c":
+                return True
+            if ch not in _NO_ARG_SHELL_FLAGS:
+                break  # an arg-taking/unknown flag consumes the rest of the cluster
+    return False
 
 
 def _node_contains_substitution(node: Node) -> bool:
@@ -708,25 +921,46 @@ def _extract_substitution_segments(node: Node, source: bytes) -> Iterator[Segmen
         yield from _extract_substitution_segments(child, source)
 
 
-def _build_redirect(node: Node, source: bytes) -> tuple[Redirect, tuple[str, ...]]:
-    """Return the redirect plus any extra positional words tree-sitter folded in.
+def _build_redirect(node: Node, source: bytes) -> tuple[Redirect | None, tuple[str, ...], tuple[Segment, ...]]:
+    """Return the redirect, extra positional words, and any inner substitution segments.
 
     tree-sitter-bash will absorb ``b.py`` from ``cmd a 2>/dev/null b.py`` into
     the redirect node as a second ``word`` child, even though bash treats
     ``b.py`` as argv to ``cmd``. We take the first ``word``/``number`` after
     the operator as the target and return the rest as spillover for the caller
     to re-attach to the surrounding command.
+
+    A process-substitution target (``cat < <(rm -rf /)``) is not a file path —
+    it's a pipe to a command that runs. The returned ``Redirect`` is ``None`` (no
+    file write to police) and the substitution's inner commands are returned as
+    segments so a deny rule on them still bites. A command-substitution target
+    (``cmd > $(echo f)``), or one nested in a word (``cmd > out$(echo f)``,
+    ``cmd > "$(echo f)"``), *is* a file path, but computed at runtime: it stays
+    the (opaque) target so a write still asks, and its inner command is extracted.
     """
     fd: int | None = None
     op: str | None = None
     target: str | None = None
     extras: list[str] = []
+    substitutions: list[Segment] = []
     for child in node.children:
         if child.type == "file_descriptor":
             fd = int(_node_text(child, source))
             continue
-        if child.type in (">", ">>", "<", ">&", "&>"):
+        if child.type in (">", ">>", "<", ">&", "&>", ">|", "&>>", "<&"):
             op = child.type
+            continue
+        if child.type == "process_substitution":
+            substitutions.extend(_extract_substitution_segments(child, source))
+            continue
+        if child.type == "command_substitution" or _node_contains_substitution(child):
+            # A command substitution (bare or nested in a string/concatenation
+            # target word): the filename is runtime-computed and unknowable. Keep
+            # it as the opaque target so a write still asks, and extract the inner
+            # command so a deny rule on it still bites.
+            substitutions.extend(_extract_substitution_segments(child, source))
+            if target is None:
+                target = _node_text(child, source)
             continue
         if child.is_named and child.type in ("word", "number"):
             text = _node_text(child, source)
@@ -735,9 +969,11 @@ def _build_redirect(node: Node, source: bytes) -> tuple[Redirect, tuple[str, ...
             else:
                 extras.append(text)
             continue
+    if op is not None and target is None and substitutions:
+        return None, tuple(extras), tuple(substitutions)
     if op is None or target is None:
         raise _UnsupportedShellError("redirect target unparseable")
-    return Redirect(fd=fd, op=op, target=target, is_fd_dup=op == ">&"), tuple(extras)
+    return Redirect(fd=fd, op=op, target=target, is_fd_dup=op in (">&", "<&")), tuple(extras), tuple(substitutions)
 
 
 def _argument_text(node: Node, source: bytes) -> str:
@@ -871,32 +1107,7 @@ def _policy_from_dict(data: JsonObject) -> Policy:
     deny = tuple(_rules_from_list(permissions.get("deny")))
     ask = tuple(_rules_from_list(permissions.get("ask")))
     allow = tuple(_rules_from_list(permissions.get("allow")))
-    for rule in (*deny, *ask, *allow):
-        _warn_if_inert_shadow(rule)
     return Policy(deny=deny, ask=ask, allow=allow)
-
-
-def _warn_if_inert_shadow(rule: Rule) -> None:
-    """Warn when a Bash rule targets a name in ``_INERT_COMMAND_NAMES``.
-
-    The rule will silently never match at decision time (inert allow short-circuits
-    in ``_match_bash``); a load-time warning makes the shadowing visible.
-    """
-    names: tuple[str, ...]
-    if isinstance(rule, BashCommand) and rule.prefix:
-        names = (_basename(rule.prefix[0]),)
-    elif isinstance(rule, BashOption):
-        names = tuple(_basename(c) for c in rule.commands)
-    else:
-        return
-    for name in names:
-        if name in _INERT_COMMAND_NAMES:
-            warnings.warn(
-                f"rule {rule.serialize()!r} targets inert shell name {name!r} and will be ignored",
-                PolicyWarning,
-                stacklevel=3,
-            )
-            return
 
 
 def _rules_from_list(raw: JsonValue) -> Iterator[Rule]:
@@ -987,6 +1198,23 @@ class AgentAdapter(ABC):
         return []
 
 
+def _mcp_bypass_input(payload: JsonObject) -> JsonObject | None:
+    """When Claude Code is in bypass mode and the tool call targets an MCP server,
+    return an updated tool input with ``approval-policy: "never"`` so the downstream
+    agent runs full-auto.  PreToolUse hooks on the downstream agent still fire, so
+    Deny rules still bite.
+    """
+    if payload.get("permission_mode") != "bypassPermissions":
+        return None
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name.startswith("mcp__codex__"):
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    return {**tool_input, "approval-policy": "never"}
+
+
 def _pretooluse_output(decision: Decision, rationale: str) -> JsonObject:
     return {
         "hookSpecificOutput": {
@@ -1048,12 +1276,39 @@ class ClaudeAdapter(AgentAdapter):
             return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
         return ToolRequest(tool_name)
 
-    def write_verdict(self, verdict: Verdict, event_name: str) -> None:
+    def write_verdict(
+        self,
+        verdict: Verdict,
+        event_name: str,
+        *,
+        updated_input: JsonObject | None = None,
+    ) -> None:
         if verdict.decision is Decision.NoOpinion:
+            if event_name == "PreToolUse" and updated_input is not None:
+                json.dump(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "updatedInput": updated_input,
+                        }
+                    },
+                    sys.stdout,
+                )
+                return
             json.dump({}, sys.stdout)
             return
         if event_name == "PreToolUse":
-            json.dump(_pretooluse_output(verdict.decision, verdict.rationale), sys.stdout)
+            if verdict.decision is Decision.Deny:
+                json.dump(_pretooluse_output(Decision.Deny, verdict.rationale), sys.stdout)
+                return
+            hook_output: JsonObject = {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": verdict.decision.value,
+                "permissionDecisionReason": verdict.rationale,
+            }
+            if updated_input is not None:
+                hook_output["updatedInput"] = updated_input
+            json.dump({"hookSpecificOutput": hook_output}, sys.stdout)
             return
         if event_name == "PermissionRequest":
             json.dump(_permission_request_output(verdict.decision, verdict.rationale), sys.stdout)
@@ -1141,7 +1396,7 @@ class CodexAdapter(AgentAdapter):
 
     def install(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
         if mode is InstallMode.Rulesync:
-            # rulesync owns enabling [features].codex_hooks; we only emit hook entries.
+            # rulesync owns enabling Codex's hook feature flag; we only emit hook entries.
             return _merge_rulesync_hooks(
                 block="codexcli",
                 add=[
@@ -1164,10 +1419,11 @@ class CodexAdapter(AgentAdapter):
 
 
 def _enable_codex_hooks_feature(path: Path, *, dry_run: bool) -> list[Path]:
-    """Ensure ``[features] codex_hooks = true`` in ``~/.codex/config.toml``.
+    """Ensure ``[features] hooks = true`` in ``~/.codex/config.toml``.
 
     Codex gates hook execution behind this feature flag; the hook entries in
-    ``hooks.json`` are inert until it is set.
+    ``hooks.json`` are inert until it is set. Older Codex versions used
+    ``codex_hooks``; migrate that deprecated key away when it is present.
     """
     if path.exists():
         try:
@@ -1180,9 +1436,16 @@ def _enable_codex_hooks_feature(path: Path, *, dry_run: bool) -> list[Path]:
     if not isinstance(features, dict):
         features = tomlkit.table()
         doc["features"] = features
-    if features.get("codex_hooks") is True:
+
+    changed = False
+    if features.get("hooks") is not True:
+        features["hooks"] = True
+        changed = True
+    if "codex_hooks" in features:
+        del features["codex_hooks"]
+        changed = True
+    if not changed:
         return []
-    features["codex_hooks"] = True
     if not dry_run:
         _atomic_write(path, tomlkit.dumps(doc))
     return [path]
@@ -1670,9 +1933,19 @@ def _atomic_write(path: Path, text: str) -> None:
 # -----------------------------------------------------------------------------
 
 
+def _package_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("agentperms")
+    except PackageNotFoundError:
+        return "0+unknown"
+
+
 def main(argv: list[str] | None = None) -> int:
     _load_dotenv()
     parser = argparse.ArgumentParser(prog="agentperms")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_package_version()}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     install = sub.add_parser("install", help="wire the bridge into agent hook configs")
@@ -1811,7 +2084,10 @@ def _cmd_check(agent: AgentName, event: str) -> int:
     verdict = coerce_for_permission_mode(verdict, payload)
     verdict, coercion = coerce_for_pane_bypass(verdict, os.environ)
     _trace(agent, event, payload, verdict, None, coercion)
-    adapter.write_verdict(verdict, event)
+    if isinstance(adapter, ClaudeAdapter):
+        adapter.write_verdict(verdict, event, updated_input=_mcp_bypass_input(payload))
+    else:
+        adapter.write_verdict(verdict, event)
     return 0
 
 
@@ -1910,8 +2186,16 @@ def coerce_for_permission_mode(verdict: Verdict, payload: JsonObject) -> Verdict
 
     Claude Code surfaces ``permission_mode`` in the hook payload. Returning ``"ask"`` from a
     PreToolUse hook forces a prompt even in bypass mode, which defeats the user's intent.
+
+    A ``parse_failure`` Ask is the exception: bypass means "skip prompts for commands I've
+    decided are fine", not "auto-allow commands the parser couldn't even analyze" (which may
+    hide a denied one). Those keep prompting.
     """
-    if payload.get("permission_mode") == "bypassPermissions" and verdict.decision is Decision.Ask:
+    if (
+        payload.get("permission_mode") == "bypassPermissions"
+        and verdict.decision is Decision.Ask
+        and not verdict.parse_failure
+    ):
         return Verdict(Decision.Allow, f"bypass mode: {verdict.rationale}")
     return verdict
 
@@ -1976,10 +2260,13 @@ def coerce_for_pane_bypass(
     ``<agentperms_bypass_dir>/<session>/<pane_id>``. Presence = bypass on.
 
     ``NoOpinion`` is coerced too: codex's ``PermissionRequest`` adapter falls
-    through to ``{}`` on ``NoOpinion`` (line 1089), which causes codex to prompt —
+    through to ``{}`` on ``NoOpinion`` in ``CodexAdapter.write_verdict``, which causes codex to prompt —
     so the bypass must cover it for "approve everything I haven't denied" to hold.
+
+    A ``parse_failure`` Ask is never coerced: an un-analyzable command may hide a
+    denied one, so it still warrants a prompt even in a bypassed pane.
     """
-    if verdict.decision not in (Decision.Ask, Decision.NoOpinion):
+    if verdict.decision not in (Decision.Ask, Decision.NoOpinion) or verdict.parse_failure:
         return verdict, None
     pane_id = env.get("ZELLIJ_PANE_ID")
     session = env.get("ZELLIJ_SESSION_NAME")
