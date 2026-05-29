@@ -112,11 +112,6 @@ _STRICTNESS = {Decision.Deny: 3, Decision.Ask: 2, Decision.Allow: 1, Decision.No
 class Verdict:
     decision: Decision
     rationale: str
-    # True when the decision is an ``Ask`` the parser produced because it could
-    # not safely analyze the command (not a deliberate policy Ask). Bypass modes
-    # must NOT coerce these to Allow — an un-analyzable command may hide a denied
-    # one, so it still warrants a prompt.
-    parse_failure: bool = False
 
 
 @dataclass(frozen=True)
@@ -331,11 +326,7 @@ class Policy:
 
     def _decide_shell(self, pipeline: Pipeline) -> Verdict:
         if not pipeline.parseable:
-            return Verdict(
-                Decision.Ask,
-                pipeline.unparseable_reason or "shell syntax not safely parseable",
-                parse_failure=True,
-            )
+            return Verdict(Decision.Ask, pipeline.unparseable_reason or "shell syntax not safely parseable")
         if not pipeline.segments:
             return Verdict(Decision.NoOpinion, "")
         verdicts = [self._decide_segment(seg) for seg in pipeline.segments]
@@ -366,12 +357,12 @@ class Policy:
         # and friends still allow-list. (Cleanly-decomposable forms never reach here —
         # they were already expanded into their inner segments.)
         if _is_opaque_shell_command(segment) or (argv0 in _ALL_EXEC_WRAPPERS):
-            return Verdict(Decision.Ask, f"unanalyzable command wrapper {segment.argv[0]!r}", parse_failure=True)
+            return Verdict(Decision.Ask, f"unanalyzable command wrapper {segment.argv[0]!r}")
         # A command whose *name* is a runtime expansion (``eval "$cmd"``, ``bash -c
         # "$cmd"``, ``$TOOL args``) is unknowable statically. Flag it so bypass
         # prompts rather than allowing whatever the variable resolves to.
         if segment.argv and "$" in segment.argv[0]:
-            return Verdict(Decision.Ask, f"dynamic command name {segment.argv[0]!r}", parse_failure=True)
+            return Verdict(Decision.Ask, f"dynamic command name {segment.argv[0]!r}")
         # Real inert builtins (echo, true, …) are a fallback, not a pre-rule short
         # circuit: an explicit deny/ask rule on one of them must still bite.
         if argv0 in _INERT_COMMAND_NAMES:
@@ -391,25 +382,11 @@ def _format_rule(rule: Rule, decision: Decision) -> str:
 
 def _stricter(left: Verdict, right: Verdict) -> Verdict:
     if _STRICTNESS[left.decision] > _STRICTNESS[right.decision]:
-        winner = left
-    elif _STRICTNESS[right.decision] > _STRICTNESS[left.decision]:
-        winner = right
-    else:
-        # Tie on strictness: prefer the side with an informative rationale.
-        winner = left if left.rationale else right
-    return _carry_parse_failure(winner, left, right)
-
-
-def _carry_parse_failure(winner: Verdict, *contributors: Verdict) -> Verdict:
-    """Preserve ``parse_failure`` onto an ``Ask`` winner if any contributor had it.
-
-    A same-strictness ordinary ``Ask`` (e.g. a redirect "writes to …") must not mask
-    an un-analyzable ``Ask(parse_failure=True)``, or bypass would coerce the combined
-    verdict to Allow and launder the hidden command.
-    """
-    if winner.decision is Decision.Ask and not winner.parse_failure and any(c.parse_failure for c in contributors):
-        return Verdict(Decision.Ask, winner.rationale, parse_failure=True)
-    return winner
+        return left
+    if _STRICTNESS[right.decision] > _STRICTNESS[left.decision]:
+        return right
+    # Tie on strictness: prefer the side with an informative rationale.
+    return left if left.rationale else right
 
 
 def aggregate(verdicts: list[Verdict]) -> Verdict:
@@ -421,7 +398,7 @@ def aggregate(verdicts: list[Verdict]) -> Verdict:
         unknown = next((v for v in verdicts if v.decision is Decision.NoOpinion), None)
         if unknown is not None:
             return Verdict(Decision.Ask, f"compound includes unrecognized segment: {unknown.rationale}")
-    return _carry_parse_failure(strictest, *verdicts)
+    return strictest
 
 
 # -----------------------------------------------------------------------------
@@ -2182,21 +2159,16 @@ def _trace(
 
 
 def coerce_for_permission_mode(verdict: Verdict, payload: JsonObject) -> Verdict:
-    """If the host agent is in bypass-permissions mode, suppress Ask. Only Deny still bites.
+    """Under Claude's ``bypassPermissions`` mode, agentperms defers entirely.
 
-    Claude Code surfaces ``permission_mode`` in the hook payload. Returning ``"ask"`` from a
-    PreToolUse hook forces a prompt even in bypass mode, which defeats the user's intent.
-
-    A ``parse_failure`` Ask is the exception: bypass means "skip prompts for commands I've
-    decided are fine", not "auto-allow commands the parser couldn't even analyze" (which may
-    hide a denied one). Those keep prompting.
+    Claude fires ``PreToolUse`` hooks even in bypass mode, but the user has explicitly opted
+    out of permission checks — so the bridge stays out of the way: it returns ``NoOpinion``
+    (an empty ``{}`` envelope) and lets Claude's native bypass proceed. The Claude write path
+    still attaches any MCP-bypass ``updatedInput`` (so bypass propagates to a downstream Codex
+    MCP tool). Pane bypass and non-bypass modes are unaffected.
     """
-    if (
-        payload.get("permission_mode") == "bypassPermissions"
-        and verdict.decision is Decision.Ask
-        and not verdict.parse_failure
-    ):
-        return Verdict(Decision.Allow, f"bypass mode: {verdict.rationale}")
+    if payload.get("permission_mode") == "bypassPermissions":
+        return Verdict(Decision.NoOpinion, "bypass: deferring to host")
     return verdict
 
 
@@ -2262,11 +2234,8 @@ def coerce_for_pane_bypass(
     ``NoOpinion`` is coerced too: codex's ``PermissionRequest`` adapter falls
     through to ``{}`` on ``NoOpinion`` in ``CodexAdapter.write_verdict``, which causes codex to prompt —
     so the bypass must cover it for "approve everything I haven't denied" to hold.
-
-    A ``parse_failure`` Ask is never coerced: an un-analyzable command may hide a
-    denied one, so it still warrants a prompt even in a bypassed pane.
     """
-    if verdict.decision not in (Decision.Ask, Decision.NoOpinion) or verdict.parse_failure:
+    if verdict.decision not in (Decision.Ask, Decision.NoOpinion):
         return verdict, None
     pane_id = env.get("ZELLIJ_PANE_ID")
     session = env.get("ZELLIJ_SESSION_NAME")

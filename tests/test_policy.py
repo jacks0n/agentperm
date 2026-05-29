@@ -265,43 +265,22 @@ def test_policy_named_tool_lookup():
     assert policy.decide(ToolRequest("Write")).decision is Decision.NoOpinion
 
 
-# ---- Bypass-permissions coercion -----------------------------------------
+# ---- Bypass-permissions: agentperms defers entirely ----------------------
 
 
-def test_bypass_mode_coerces_ask_to_allow():
-    verdict = Verdict(Decision.Ask, "some reason")
-    coerced = coerce_for_permission_mode(verdict, {"permission_mode": "bypassPermissions"})
-    assert coerced.decision is Decision.Allow
-    assert "bypass" in coerced.rationale
+def test_bypass_mode_defers_every_decision():
+    """Under Claude bypass the user opted out of permission checks, so agentperms
+    returns NoOpinion (an empty {} envelope) for everything — Ask, Allow, and even
+    Deny — and lets Claude's native bypass proceed."""
+    for decision in (Decision.Ask, Decision.Allow, Decision.Deny, Decision.NoOpinion):
+        coerced = coerce_for_permission_mode(Verdict(decision, "x"), {"permission_mode": "bypassPermissions"})
+        assert coerced.decision is Decision.NoOpinion
 
 
-def test_bypass_mode_does_not_touch_deny():
-    verdict = Verdict(Decision.Deny, "dangerous")
-    coerced = coerce_for_permission_mode(verdict, {"permission_mode": "bypassPermissions"})
-    assert coerced.decision is Decision.Deny
-
-
-def test_bypass_mode_does_not_coerce_parse_failure_ask():
-    """A command the parser couldn't analyze must keep prompting even in bypass —
-    it may hide a denied command, so it is not a 'skip the prompt' case."""
-    verdict = Verdict(Decision.Ask, "shell syntax not safely parseable", parse_failure=True)
-    coerced = coerce_for_permission_mode(verdict, {"permission_mode": "bypassPermissions"})
-    assert coerced.decision is Decision.Ask
-
-
-def test_unparseable_command_is_not_allowed_under_bypass():
-    """End-to-end: genuinely unparseable shell stays Ask under bypass, not Allow."""
-    verdict = Policy().decide(ShellRequest(parse_pipeline("ls && && rm -rf /")))
-    assert verdict.decision is Decision.Ask
-    assert verdict.parse_failure is True
-    coerced = coerce_for_permission_mode(verdict, {"permission_mode": "bypassPermissions"})
-    assert coerced.decision is Decision.Ask
-
-
-def test_default_mode_keeps_ask():
-    verdict = Verdict(Decision.Ask, "compound")
-    coerced = coerce_for_permission_mode(verdict, {"permission_mode": "default"})
-    assert coerced.decision is Decision.Ask
+def test_default_mode_keeps_verdict_unchanged():
+    for decision in (Decision.Ask, Decision.Allow, Decision.Deny):
+        coerced = coerce_for_permission_mode(Verdict(decision, "x"), {"permission_mode": "default"})
+        assert coerced.decision is decision
 
 
 def test_missing_mode_keeps_ask():
@@ -488,29 +467,28 @@ def test_echo_with_redirect_still_asks():
     assert "out.txt" in verdict.rationale
 
 
+# Decomposition correctness — these assert the raw (normal-mode) decision. Under
+# bypass agentperms defers entirely (see test_bypass_mode_defers_every_decision);
+# the value of decomposition is that a denied inner command is caught in normal mode.
+
+
+def _deny_rm() -> Policy:
+    return Policy(deny=(BashCommand(("rm", "-rf")),))
+
+
 def test_deny_bites_through_redirected_shell_wrapper():
-    """``zsh -lc "rm -rf /" 2>/dev/null`` must not launder a denied command past
-    the wrapper-plus-redirect path — and bypass mode must not rescue it."""
-    policy = Policy(deny=(BashCommand(("rm", "-rf")),))
-    command = 'zsh -lc "rm -rf /" 2>/dev/null'
-    assert _decide(policy, command).decision is Decision.Deny
-    coerced = coerce_for_permission_mode(_decide(policy, command), {"permission_mode": "bypassPermissions"})
-    assert coerced.decision is Decision.Deny
+    """``zsh -lc "rm -rf /" 2>/dev/null`` must not launder a denied command past the
+    wrapper-plus-redirect path."""
+    assert _decide(_deny_rm(), 'zsh -lc "rm -rf /" 2>/dev/null').decision is Decision.Deny
 
 
 def test_deny_bites_through_process_substitution_redirect():
-    """``cat < <(rm -rf /)`` must surface the inner command for a deny rule, rather
-    than degrade to Ask and then get coerced to Allow under bypass."""
-    policy = Policy(deny=(BashCommand(("rm", "-rf")),))
-    command = "cat < <(rm -rf /)"
-    assert _decide(policy, command).decision is Decision.Deny
-    coerced = coerce_for_permission_mode(_decide(policy, command), {"permission_mode": "bypassPermissions"})
-    assert coerced.decision is Decision.Deny
+    """``cat < <(rm -rf /)`` surfaces the inner command for a deny rule."""
+    assert _decide(_deny_rm(), "cat < <(rm -rf /)").decision is Decision.Deny
 
 
 def test_deny_bites_through_write_process_substitution():
-    """``tee > >(rm -rf /)`` — write to a process substitution still extracts and
-    denies the inner command."""
+    """``tee > >(rm -rf /)`` — write to a process substitution still extracts and denies."""
     policy = Policy(deny=(BashCommand(("rm", "-rf")),), allow=(BashCommand(("tee",)),))
     assert _decide(policy, "tee > >(rm -rf /)").decision is Decision.Deny
 
@@ -525,13 +503,8 @@ def test_command_substitution_write_target_asks():
 
 
 def test_deny_bites_through_substitution_nested_in_redirect_target():
-    """``echo hi > out$(rm -rf /)`` — a denied command nested in a redirect target
-    word must not slip past via unparseable→Ask→bypass-Allow."""
-    policy = Policy(deny=(BashCommand(("rm", "-rf")),))
-    command = "echo hi > out$(rm -rf /)"
-    assert _decide(policy, command).decision is Decision.Deny
-    coerced = coerce_for_permission_mode(_decide(policy, command), {"permission_mode": "bypassPermissions"})
-    assert coerced.decision is Decision.Deny
+    """``echo hi > out$(rm -rf /)`` — a denied command nested in a redirect target word."""
+    assert _decide(_deny_rm(), "echo hi > out$(rm -rf /)").decision is Decision.Deny
 
 
 def test_exact_deny_rule_bites_unwrapped_shell_c_with_spillover():
@@ -549,59 +522,43 @@ def test_user_rule_cannot_target_synthetic_predicate_marker():
     assert _decide(policy, "[[ -f x ]]").decision is Decision.Allow
 
 
-def _denied_under_bypass(command: str) -> Decision:
-    policy = Policy(deny=(BashCommand(("rm", "-rf")),))
-    verdict = coerce_for_permission_mode(_decide(policy, command), {"permission_mode": "bypassPermissions"})
-    return verdict.decision
+def test_deny_bites_case_subject_substitution():
+    """``case $(rm -rf /) in …`` — the subject substitution runs; its inner command is policed."""
+    assert _decide(_deny_rm(), "case $(rm -rf /) in *) echo ok;; esac").decision is Decision.Deny
 
 
-def test_deny_bites_case_subject_substitution_under_bypass():
-    """``case $(rm -rf /) in …`` — the subject substitution runs; its inner command
-    must be policed, not laundered via unparseable→Ask→bypass-Allow."""
-    assert _denied_under_bypass("case $(rm -rf /) in *) echo ok;; esac") is Decision.Deny
+def test_deny_bites_exotic_redirect_operators():
+    """`>|`, `&>>`, `<&` redirect operators with a substitution target surface the inner command."""
+    assert _decide(_deny_rm(), "cmd >| out$(rm -rf /)").decision is Decision.Deny
+    assert _decide(_deny_rm(), "cmd &>> out$(rm -rf /)").decision is Decision.Deny
+    assert _decide(_deny_rm(), "cmd <& $(rm -rf /)").decision is Decision.Deny
 
 
-def test_deny_bites_exotic_redirect_operators_under_bypass():
-    """`>|`, `&>>`, `<&` redirect operators with a substitution target must surface
-    the inner command for a deny rule rather than degrade to unparseable."""
-    assert _denied_under_bypass("cmd >| out$(rm -rf /)") is Decision.Deny
-    assert _denied_under_bypass("cmd &>> out$(rm -rf /)") is Decision.Deny
-    assert _denied_under_bypass("cmd <& $(rm -rf /)") is Decision.Deny
-
-
-def test_deny_bites_herestring_substitution_under_bypass():
+def test_deny_bites_herestring_substitution():
     """``cat <<< $(rm -rf /)`` — herestring body substitution runs and must be policed."""
-    assert _denied_under_bypass("cat <<< $(rm -rf /)") is Decision.Deny
+    assert _decide(_deny_rm(), "cat <<< $(rm -rf /)").decision is Decision.Deny
 
 
-def test_deny_bites_split_shell_c_under_bypass():
-    """``bash -l -c "rm -rf /"`` — split no-arg flags before -c are unwrapped so the
-    inner command is policed instead of allowed."""
-    assert _denied_under_bypass('bash -l -c "rm -rf /"') is Decision.Deny
+def test_deny_bites_split_shell_c():
+    """``bash -l -c "rm -rf /"`` — split no-arg flags before -c are unwrapped and policed."""
+    assert _decide(_deny_rm(), 'bash -l -c "rm -rf /"').decision is Decision.Deny
 
 
-def test_unanalyzable_shell_c_wrapper_is_parse_failure():
+def test_unanalyzable_shell_c_wrapper_asks():
     """A shell ``-c`` wrapper we can't safely unwrap (`bash --norc -c "…"`) hides its
-    command, so it's a parse-failure Ask — NoOpinion would be coerced to Allow under
-    bypass, laundering the hidden command."""
-    verdict = _decide(Policy(), 'bash --norc -c "rm -rf /"')
-    assert verdict.decision is Decision.Ask
-    assert verdict.parse_failure is True
-    coerced = coerce_for_permission_mode(verdict, {"permission_mode": "bypassPermissions"})
-    assert coerced.decision is Decision.Ask
+    command, so in normal mode it asks rather than silently passing."""
+    assert _decide(Policy(), 'bash --norc -c "rm -rf /"').decision is Decision.Ask
 
 
 def test_plain_shell_script_invocation_stays_no_opinion():
-    """``bash script.sh`` carries no ``-c`` command flag — it's an ordinary opaque
-    command, not an unanalyzable wrapper, so it stays NoOpinion (no false prompt)."""
-    verdict = _decide(Policy(), "bash deploy.sh --flag")
-    assert verdict.decision is Decision.NoOpinion
-    assert verdict.parse_failure is False
+    """``bash script.sh`` carries no ``-c`` command flag — an ordinary opaque command,
+    not an unanalyzable wrapper, so it stays NoOpinion (no false prompt)."""
+    assert _decide(Policy(), "bash deploy.sh --flag").decision is Decision.NoOpinion
 
 
-def test_deny_bites_through_exec_prefix_wrappers_under_bypass():
+def test_deny_bites_through_exec_prefix_wrappers():
     """``command``/``exec``/``env``/``nice``/``time`` decompose, so a deny rule on the
-    inner command bites even under bypass instead of NoOpinion→Allow."""
+    inner command bites in normal mode."""
     for command in (
         "command rm -rf /",
         "exec rm -rf /",
@@ -610,56 +567,26 @@ def test_deny_bites_through_exec_prefix_wrappers_under_bypass():
         "nice rm -rf /",
         "command nice rm -rf /",
     ):
-        assert _denied_under_bypass(command) is Decision.Deny, command
+        assert _decide(_deny_rm(), command).decision is Decision.Deny, command
 
 
-def test_opaque_exec_wrapper_is_parse_failure_under_bypass():
-    """``timeout``/``sudo``/``nice -n`` aren't decomposable; absent a rule they're a
-    parse-failure Ask so bypass prompts rather than allowing the hidden command."""
+def test_opaque_exec_wrapper_asks():
+    """``timeout``/``sudo``/``nice -n`` aren't decomposable; absent a rule they ask in
+    normal mode rather than silently passing the hidden command."""
     for command in ("timeout 5 rm -rf /", "sudo rm -rf /", "nice -n 10 rm -rf /"):
-        verdict = _decide(Policy(deny=(BashCommand(("rm", "-rf")),)), command)
-        assert verdict.decision is Decision.Ask, command
-        assert verdict.parse_failure is True, command
-        coerced = coerce_for_permission_mode(verdict, {"permission_mode": "bypassPermissions"})
-        assert coerced.decision is Decision.Ask, command
+        assert _decide(_deny_rm(), command).decision is Decision.Ask, command
 
 
 def test_explicit_rule_allow_lists_opaque_wrapper():
-    """An explicit rule on an opaque wrapper still wins over the parse-failure fallback."""
+    """An explicit rule on an opaque wrapper still wins over the ask fallback."""
     policy = Policy(allow=(BashCommand(("timeout",)),))
     assert _decide(policy, "timeout 5 make").decision is Decision.Allow
 
 
 def test_eval_decomposes_literal_command():
     """``eval "rm -rf /"`` joins and re-parses its args, so a deny rule bites."""
-    assert _denied_under_bypass('eval "rm -rf /"') is Decision.Deny
-    assert _denied_under_bypass("eval rm -rf /") is Decision.Deny
-
-
-def test_parse_failure_survives_tied_redirect_ask_under_bypass():
-    """A redirect's ordinary `Ask` ("writes to …") ties the wrapper's parse-failure
-    `Ask`; the combined verdict must stay parse-failure so bypass doesn't allow the
-    hidden command (`sudo rm -rf / > out`)."""
-    for command in (
-        "sudo rm -rf / > out",
-        "timeout 5 rm -rf / > out",
-        'bash --norc -c "rm -rf /" > out',
-    ):
-        verdict = _decide(Policy(deny=(BashCommand(("rm", "-rf")),)), command)
-        assert verdict.decision is Decision.Ask, command
-        assert verdict.parse_failure is True, command
-        coerced = coerce_for_permission_mode(verdict, {"permission_mode": "bypassPermissions"})
-        assert coerced.decision is Decision.Ask, command
-
-
-def test_parse_failure_survives_aggregation_across_segments_under_bypass():
-    """A parse-failure segment in a compound must not be masked by a benign sibling
-    segment's ordinary verdict (`echo hi > out; sudo rm -rf /`)."""
-    verdict = _decide(Policy(deny=(BashCommand(("rm", "-rf")),)), "echo hi > out; sudo rm -rf /")
-    assert verdict.decision is Decision.Ask
-    assert verdict.parse_failure is True
-    coerced = coerce_for_permission_mode(verdict, {"permission_mode": "bypassPermissions"})
-    assert coerced.decision is Decision.Ask
+    assert _decide(_deny_rm(), 'eval "rm -rf /"').decision is Decision.Deny
+    assert _decide(_deny_rm(), "eval rm -rf /").decision is Decision.Deny
 
 
 def test_command_v_lookup_is_not_executed():
@@ -672,15 +599,11 @@ def test_command_v_lookup_is_not_executed():
     assert _decide(policy, "command rm -rf /").decision is Decision.Deny
 
 
-def test_dynamic_command_name_is_parse_failure():
+def test_dynamic_command_name_asks():
     """A command whose name is a runtime expansion (`eval "$cmd"`, `$TOOL …`) is
-    unknowable, so it's a parse-failure Ask that bypass won't coerce to Allow."""
+    unknowable, so in normal mode it asks rather than silently passing."""
     for command in ('eval "$UNKNOWN"', 'bash -c "$CMD"', "$TOOL --flag", "${RUNNER} test"):
-        verdict = _decide(Policy(), command)
-        assert verdict.decision is Decision.Ask, command
-        assert verdict.parse_failure is True, command
-        coerced = coerce_for_permission_mode(verdict, {"permission_mode": "bypassPermissions"})
-        assert coerced.decision is Decision.Ask, command
+        assert _decide(Policy(), command).decision is Decision.Ask, command
 
 
 def test_inert_pipe_to_unknown_escalates_to_ask():

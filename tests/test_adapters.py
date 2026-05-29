@@ -252,6 +252,36 @@ def test_claude_mcp_bypass_skips_non_codex_mcp_tools(tmp_path: Path, monkeypatch
         assert json.loads(buf.getvalue()) == {}
 
 
+def test_claude_bypass_defers_entirely(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Under bypassPermissions agentperms does nothing — emits {} so Claude proceeds —
+    even for a command that would otherwise prompt (regression: it used to return
+    'ask' on unanalyzable wrappers, forcing a prompt in bypass mode)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("AGENTPERMS_TRACE", raising=False)
+    monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    base = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "timeout 30 npm test"},
+        "cwd": str(tmp_path),
+    }
+
+    # bypass → empty {} (defer to Claude)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({**base, "permission_mode": "bypassPermissions"})))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        assert _cmd_check(AgentName.Claude, "PreToolUse") == 0
+    assert json.loads(buf.getvalue()) == {}
+
+    # default mode → still evaluated (the unanalyzable wrapper asks)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({**base, "permission_mode": "default"})))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        assert _cmd_check(AgentName.Claude, "PreToolUse") == 0
+    assert json.loads(buf.getvalue())["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
 # ---- Codex adapter --------------------------------------------------------
 
 

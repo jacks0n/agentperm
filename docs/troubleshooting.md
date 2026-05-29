@@ -45,12 +45,13 @@ Claude Code prompts on any `cd` to a path outside the agent's current working di
 - Launch the agent in the directory you want to work in, or
 - Use absolute paths instead of `cd`-then-relative-paths
 
-### 4. Bypass mode doesn't suppress everything
+### 4. Bypass mode still prompts / still denies
 
-When Claude Code is in `bypassPermissions` mode, the bridge coerces `Ask → Allow`, but:
-- `Deny` still fires (intentional — bypass means "skip prompts", not "skip safety")
-- Claude's built-in cwd guard still fires (see above)
-- If the bridge wasn't called for that command (see check #1), bypass coercion couldn't help
+When Claude Code is in `bypassPermissions` mode, agentperms **defers entirely** — it emits an empty `{}` for every command and lets Claude handle it. It won't prompt and won't deny. If you're still seeing prompts or denials in bypass mode:
+- Claude's built-in cwd guard still fires (see above) — that's Claude, not agentperms
+- Another hook may be running (Claude concatenates hooks across scopes; see [adapters.md](adapters.md#concatenation-not-merging))
+- The installed bridge may be stale — confirm `agentperms --version` matches your checkout
+- If you *want* deny rules to keep biting while suppressing prompts, use [pane bypass](cli.md#pane-bypass) instead of Claude's `bypassPermissions`
 
 ### 5. Compound command escalation
 

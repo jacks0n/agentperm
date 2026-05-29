@@ -69,7 +69,7 @@ A compound like `cat foo 2>&1 | head -60` passes through silently with the polic
 
 ## Bypass mode (zellij)
 
-A per-pane "skip prompts" toggle for users running their agents inside [zellij](https://zellij.dev). Bind a key to flip a flag file for the focused pane; while the flag is on, `agentperms` coerces `Ask` and `NoOpinion` verdicts to `Allow` — but only in that pane, and `Deny` rules still bite. A command the parser can't safely analyze still prompts (it may hide a denied command). The toggle and indicator live in a small WASM plugin shipped at [`zellij-plugin/`](zellij-plugin/README.md).
+A per-pane "skip prompts" toggle for users running their agents inside [zellij](https://zellij.dev). Bind a key to flip a flag file for the focused pane; while the flag is on, `agentperms` coerces `Ask` and `NoOpinion` verdicts to `Allow` — but only in that pane, and `Deny` rules still bite. (Claude's own `bypassPermissions` is different: there agentperms defers entirely and lets Claude handle everything.) The toggle and indicator live in a small WASM plugin shipped at [`zellij-plugin/`](zellij-plugin/README.md).
 
 ## Documentation
 

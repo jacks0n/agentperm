@@ -100,7 +100,7 @@ When the verdict was overridden by [pane bypass](#pane-bypass), the line also ca
 
 A per-zellij-pane "skip prompts" toggle, analogous to Claude Code's `--dangerously-skip-permissions` but scoped to one pane. Implemented by the [`zellij-plugin/`](../zellij-plugin/README.md) WASM plugin, honored by `check`.
 
-When the focused pane has a flag file present, `check` coerces `Decision.Ask` and `Decision.NoOpinion` to `Allow` for that invocation. `Decision.Deny` is unaffected — deny rules still bite. A **parse-failure** `Ask` (a command the parser couldn't safely analyze) is also left alone, so it keeps prompting rather than being allowed — it may hide a denied command. Coercing `NoOpinion` matters because Codex prompts on `NoOpinion` (the empty `{}` envelope falls through to its native flow), so suppressing only `Ask` would leave unknown commands prompting under bypass.
+When the focused pane has a flag file present, `check` coerces `Decision.Ask` and `Decision.NoOpinion` to `Allow` for that invocation. `Decision.Deny` is unaffected — deny rules still bite (unlike Claude's own `bypassPermissions`, where agentperms defers entirely). Coercing `NoOpinion` matters because Codex prompts on `NoOpinion` (the empty `{}` envelope falls through to its native flow), so suppressing only `Ask` would leave unknown commands prompting under bypass.
 
 The pane is identified by the pair `(ZELLIJ_SESSION_NAME, ZELLIJ_PANE_ID)` inherited from the agent's process environment. The flag file lives at:
 

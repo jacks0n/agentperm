@@ -35,11 +35,7 @@ Each agent has its own hook protocol, payload shape, and verdict envelope. The a
 
 ### Bypass mode
 
-Claude Code's `permission_mode == "bypassPermissions"` means the user has opted out of prompts. The bridge respects this:
-
-- `Deny` → still `Deny` (bypass means "skip prompts", not "skip safety")
-- `Ask` → coerced to `Allow` with rationale prefix `"bypass mode: ..."`
-- `Allow` / `NoOpinion` → unchanged (Claude's native bypass takes over for `NoOpinion`)
+Claude Code's `permission_mode == "bypassPermissions"` means the user has turned permission checks off. The bridge defers entirely: it emits `NoOpinion` (an empty `{}`) for **every** decision — `Ask`, `Allow`, and `Deny` alike — and lets Claude's native bypass proceed. agentperms does not second-guess an explicit bypass. (Claude still fires `PreToolUse` hooks in bypass; returning `{}` is how the bridge stays out of the way.) The MCP-bypass `updatedInput` below is still attached on the way out. If you want `deny` rules to keep biting, use pane bypass instead of Claude's bypass.
 
 ### MCP bypass propagation
 
