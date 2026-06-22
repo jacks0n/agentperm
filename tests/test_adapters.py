@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 import tomlkit
 
-import agentperms
-from agentperms import (
+import agentperm
+from agentperm import (
     AgentName,
     BashCommand,
     BashOption,
@@ -209,7 +209,7 @@ def test_claude_mcp_bypass_injects_approval_policy_without_policy_match(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("AGENTPERMS_TRACE", raising=False)
+    monkeypatch.delenv("AGENTPERM_TRACE", raising=False)
     monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
     monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
     payload = _mcp_bypass_payload()
@@ -232,7 +232,7 @@ def test_claude_mcp_bypass_injects_approval_policy_without_policy_match(
 def test_claude_mcp_bypass_skips_non_codex_mcp_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Non-codex MCP tools must not receive approval-policy injection."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("AGENTPERMS_TRACE", raising=False)
+    monkeypatch.delenv("AGENTPERM_TRACE", raising=False)
     monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
     monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
 
@@ -253,11 +253,11 @@ def test_claude_mcp_bypass_skips_non_codex_mcp_tools(tmp_path: Path, monkeypatch
 
 
 def test_claude_bypass_defers_entirely(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Under bypassPermissions agentperms does nothing — emits {} so Claude proceeds —
+    """Under bypassPermissions agentperm does nothing — emits {} so Claude proceeds —
     even for a command that would otherwise prompt (regression: it used to return
     'ask' on unanalyzable wrappers, forcing a prompt in bypass mode)."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("AGENTPERMS_TRACE", raising=False)
+    monkeypatch.delenv("AGENTPERM_TRACE", raising=False)
     monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
     monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
     base = {
@@ -379,8 +379,8 @@ def test_codex_permission_request_under_pane_bypass_allows_unknown_command(
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setenv("ZELLIJ_PANE_ID", "7")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "main")
-    monkeypatch.delenv("AGENTPERMS_TRACE", raising=False)
-    bypass = tmp_path / "cache" / "agentperms" / "bypass"
+    monkeypatch.delenv("AGENTPERM_TRACE", raising=False)
+    bypass = tmp_path / "cache" / "agentperm" / "bypass"
     (bypass / "main").mkdir(parents=True)
     bypass.chmod(0o700)
     (bypass / "main").chmod(0o700)
@@ -514,15 +514,15 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(CodexAdapter, "hooks_path", tmp_path / ".codex/hooks.json")
     monkeypatch.setattr(CodexAdapter, "config_path", tmp_path / ".codex/config.toml")
     monkeypatch.setattr(GeminiAdapter, "settings_path", tmp_path / ".gemini/settings.json")
-    monkeypatch.setattr(OpencodeAdapter, "plugin_path", tmp_path / ".config/opencode/plugins/agentperms.js")
+    monkeypatch.setattr(OpencodeAdapter, "plugin_path", tmp_path / ".config/opencode/plugins/agentperm.js")
     monkeypatch.setattr(
-        agentperms,
+        agentperm,
         "_rulesync_hooks_path",
         lambda: tmp_path / ".rulesync/hooks.json",
     )
 
     def _stub_which(_name: str, *_args: object, **_kwargs: object) -> str:
-        return "/abs/agentperms"
+        return "/abs/agentperm"
 
     monkeypatch.setattr(shutil, "which", _stub_which)
     return tmp_path
@@ -539,7 +539,7 @@ def test_claude_install_direct_writes_pretooluse(fake_home: Path):
     assert len(groups) == 1
     assert groups[0]["matcher"] == "*"
     hook = groups[0]["hooks"][0]
-    assert "agentperms" in hook["command"]
+    assert "agentperm" in hook["command"]
     assert "--agent claude" in hook["command"]
     # Explicit event so the bridge doesn't have to guess from payload shape
     assert "--event PreToolUse" in hook["command"]
@@ -561,14 +561,14 @@ def test_claude_install_direct_preserves_other_hooks(fake_home: Path):
 def test_claude_install_direct_replaces_stale_bridge_entry(fake_home: Path):
     settings = fake_home / ".claude/settings.json"
     settings.parent.mkdir(parents=True)
-    stale_cmd = "/old/path/agentperms check --agent claude --event PreToolUse"
+    stale_cmd = "/old/path/agentperm check --agent claude --event PreToolUse"
     stale = {"matcher": "*", "hooks": [{"type": "command", "command": stale_cmd}]}
     settings.write_text(json.dumps({"hooks": {"PreToolUse": [stale]}}))
     ClaudeAdapter().install(InstallMode.Direct)
     data = json.loads(settings.read_text())
     groups = data["hooks"]["PreToolUse"]
     assert len(groups) == 1
-    assert groups[0]["hooks"][0]["command"] == "/abs/agentperms check --agent claude --event PreToolUse"
+    assert groups[0]["hooks"][0]["command"] == "/abs/agentperm check --agent claude --event PreToolUse"
 
 
 def test_claude_install_direct_strips_spurious_permissionrequest(fake_home: Path):
@@ -584,7 +584,7 @@ def test_claude_install_direct_strips_spurious_permissionrequest(fake_home: Path
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": "/bin/agentperms check --agent claude --event PreToolUse",
+                                    "command": "/bin/agentperm check --agent claude --event PreToolUse",
                                 }
                             ],
                         },
@@ -623,7 +623,7 @@ def test_claude_install_rulesync_strips_spurious_permissionrequest(fake_home: Pa
                         "permissionRequest": [
                             {
                                 "type": "command",
-                                "command": "/bin/agentperms check --agent claude --event PreToolUse",
+                                "command": "/bin/agentperm check --agent claude --event PreToolUse",
                                 "matcher": "*",
                             },
                             {"type": "command", "command": "/bin/beckon enqueue --permission"},
@@ -733,10 +733,10 @@ def test_gemini_install_rulesync_uses_geminicli_block(fake_home: Path):
 
 def test_opencode_install_writes_plugin_with_resolved_path(fake_home: Path):
     paths = OpencodeAdapter().install(InstallMode.Direct)
-    plugin_path = fake_home / ".config/opencode/plugins/agentperms.js"
+    plugin_path = fake_home / ".config/opencode/plugins/agentperm.js"
     assert paths == [plugin_path]
     text = plugin_path.read_text()
-    assert 'const bridge = "/abs/agentperms";' in text
+    assert 'const bridge = "/abs/agentperm";' in text
     assert "AgentBridgePlugin" in text
 
 
@@ -749,7 +749,7 @@ def test_opencode_install_runs_in_rulesync_mode_too(fake_home: Path):
     # OpenCode plugin is always installed directly even when mode is Rulesync,
     # because rulesync has no schema for permission.ask plugins.
     paths = OpencodeAdapter().install(InstallMode.Rulesync)
-    assert paths == [fake_home / ".config/opencode/plugins/agentperms.js"]
+    assert paths == [fake_home / ".config/opencode/plugins/agentperm.js"]
 
 
 # ---- Install: dry-run + mode resolution ----------------------------------
@@ -764,7 +764,7 @@ def test_install_dry_run_writes_nothing(fake_home: Path):
     assert not (fake_home / ".codex/hooks.json").exists()
     assert not (fake_home / ".codex/config.toml").exists()
     assert not (fake_home / ".gemini/settings.json").exists()
-    assert not (fake_home / ".config/opencode/plugins/agentperms.js").exists()
+    assert not (fake_home / ".config/opencode/plugins/agentperm.js").exists()
 
 
 def test_resolve_install_mode_picks_rulesync_when_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -780,7 +780,7 @@ def test_resolve_install_mode_picks_direct_when_no_rulesync(tmp_path: Path, monk
 
 def test_resolve_install_mode_explicit_rulesync_requires_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    with pytest.raises(agentperms.PolicyError):
+    with pytest.raises(agentperm.PolicyError):
         _resolve_install_mode("rulesync")
 
 
@@ -788,20 +788,20 @@ def test_resolve_install_mode_explicit_rulesync_requires_directory(tmp_path: Pat
 
 
 def test_is_bridge_hook_matches_bridge_command():
-    assert _is_bridge_hook({"type": "command", "command": "/abs/agentperms check --agent claude --event PreToolUse"})
+    assert _is_bridge_hook({"type": "command", "command": "/abs/agentperm check --agent claude --event PreToolUse"})
 
 
 def test_is_bridge_hook_rejects_unrelated_wrapper_with_substring():
     """Substring-match would falsely strip a sibling tool whose name contains
-    ``agentperms`` (e.g. ``agentperms-debug``). Strict basename +
+    ``agentperm`` (e.g. ``agentperm-debug``). Strict basename +
     second-arg ``check`` is required to identify our own entries.
     """
-    assert not _is_bridge_hook({"type": "command", "command": "/usr/local/bin/agentperms-debug trace"})
+    assert not _is_bridge_hook({"type": "command", "command": "/usr/local/bin/agentperm-debug trace"})
 
 
 def test_is_bridge_hook_rejects_bridge_with_other_subcommand():
-    """A user's manual ``agentperms edit`` should not be treated as installer-owned."""
-    assert not _is_bridge_hook({"type": "command", "command": "/abs/agentperms edit"})
+    """A user's manual ``agentperm edit`` should not be treated as installer-owned."""
+    assert not _is_bridge_hook({"type": "command", "command": "/abs/agentperm edit"})
 
 
 def test_is_bridge_hook_rejects_non_dict():
@@ -824,19 +824,19 @@ def test_install_quotes_paths_with_spaces(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(ClaudeAdapter, "settings_path", tmp_path / ".claude/settings.json")
 
     def _spaced_which(_name: str, *_args: object, **_kwargs: object) -> str:
-        return "/Users/jane doe/bin/agentperms"
+        return "/Users/jane doe/bin/agentperm"
 
     monkeypatch.setattr(shutil, "which", _spaced_which)
     paths = ClaudeAdapter().install(InstallMode.Direct)
     data = json.loads(paths[0].read_text())
     command = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     # The space-bearing path must be quoted; otherwise the shell sees three argv.
-    assert "'/Users/jane doe/bin/agentperms'" in command
+    assert "'/Users/jane doe/bin/agentperm'" in command
     # And the resulting command round-trips through shlex back to the original argv.
     import shlex as _shlex
 
     parts = _shlex.split(command)
-    assert parts[0] == "/Users/jane doe/bin/agentperms"
+    assert parts[0] == "/Users/jane doe/bin/agentperm"
     assert parts[1] == "check"
 
 
@@ -845,17 +845,17 @@ def test_opencode_plugin_json_escapes_special_path(tmp_path: Path, monkeypatch: 
     correctly handles backslashes and quotes. A path with a backslash must
     survive interpolation as a valid JS literal.
     """
-    monkeypatch.setattr(OpencodeAdapter, "plugin_path", tmp_path / "agentperms.js")
+    monkeypatch.setattr(OpencodeAdapter, "plugin_path", tmp_path / "agentperm.js")
 
     def _windows_which(_name: str, *_args: object, **_kwargs: object) -> str:
-        return "C:\\Program Files\\agentperms"
+        return "C:\\Program Files\\agentperm"
 
     monkeypatch.setattr(shutil, "which", _windows_which)
     paths = OpencodeAdapter().install(InstallMode.Direct)
     text = paths[0].read_text()
     # ``json.dumps`` wraps in double quotes and escapes backslashes; the literal
     # must appear as a valid JS string.
-    assert 'const bridge = "C:\\\\Program Files\\\\agentperms";' in text
+    assert 'const bridge = "C:\\\\Program Files\\\\agentperm";' in text
 
 
 # ---- End-to-end glob matching through Claude PreToolUse ------------------

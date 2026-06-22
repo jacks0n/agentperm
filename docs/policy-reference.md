@@ -273,7 +273,7 @@ Compound shell commands are decomposed into segments and each is evaluated again
 
 ## Importing native rules
 
-`agentperms import` walks every adapter's native config and merges rules into your `.agent-permissions.jsonc`:
+`agentperm import` walks every adapter's native config and merges rules into your `.agent-permissions.jsonc`:
 
 - **Claude Code:** reads `~/.claude/settings.json` and `~/.claude/settings.local.json`, parses `permissions.allow / ask / deny`.
 - **Codex CLI:** reads `~/.codex/rules/*.rules`, extracts `prefix_rule(...)` declarations.

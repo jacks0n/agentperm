@@ -1477,7 +1477,7 @@ export const AgentBridgePlugin = async (input) => ({{
 class OpencodeAdapter(AgentAdapter):
     name = AgentName.Opencode
     config_path: ClassVar[Path] = Path.home() / ".config/opencode/opencode.json"
-    plugin_path: ClassVar[Path] = Path.home() / ".config/opencode/plugins/agentperms.js"
+    plugin_path: ClassVar[Path] = Path.home() / ".config/opencode/plugins/agentperm.js"
 
     def import_native_rules(self) -> Iterator[tuple[Decision, Rule]]:
         for path in (self.config_path, self.config_path.with_suffix(".jsonc")):
@@ -1533,7 +1533,7 @@ class OpencodeAdapter(AgentAdapter):
 
         rulesync has no ``permission.ask`` plugin emitter — there is no schema for
         it — so the plugin is always installed directly. The plugin embeds the
-        absolute path to ``agentperms`` resolved at install time, JSON-quoted
+        absolute path to ``agentperm`` resolved at install time, JSON-quoted
         so paths containing backslashes or quotes survive interpolation into a JS
         string literal.
         """
@@ -1662,7 +1662,7 @@ ADAPTERS: dict[AgentName, AgentAdapter] = {
 # -----------------------------------------------------------------------------
 
 
-BRIDGE_HOOK_MARKER = "agentperms"
+BRIDGE_HOOK_MARKER = "agentperm"
 
 # Per-agent hook timeouts. Claude/Codex use seconds; Gemini uses milliseconds.
 _HOOK_TIMEOUTS: dict[str, int] = {
@@ -1673,7 +1673,7 @@ _HOOK_TIMEOUTS: dict[str, int] = {
 
 
 def _resolve_bridge_command() -> str:
-    """Return the absolute path to ``agentperms`` if findable.
+    """Return the absolute path to ``agentperm`` if findable.
 
     GUI-launched OpenCode (Raycast/Spotlight) inherits a sparse ``PATH``; baking
     the resolved absolute path eliminates a class of silent ``ENOENT`` bugs. Falls
@@ -1731,9 +1731,9 @@ def _is_bridge_hook(hook: JsonValue) -> bool:
     """True iff this entry is one the bridge's installer wrote.
 
     Matches strictly on shape: the command must split into a binary whose
-    basename is ``agentperms`` followed by ``check``. This avoids
+    basename is ``agentperm`` followed by ``check``. This avoids
     false-stripping unrelated wrappers whose paths happen to contain the
-    substring ``agentperms``.
+    substring ``agentperm``.
     """
     if not isinstance(hook, dict):
         return False
@@ -1914,14 +1914,14 @@ def _package_version() -> str:
     from importlib.metadata import PackageNotFoundError, version
 
     try:
-        return version("agentperms")
+        return version("agentperm")
     except PackageNotFoundError:
         return "0+unknown"
 
 
 def main(argv: list[str] | None = None) -> int:
     _load_dotenv()
-    parser = argparse.ArgumentParser(prog="agentperms")
+    parser = argparse.ArgumentParser(prog="agentperm")
     parser.add_argument("--version", action="version", version=f"%(prog)s {_package_version()}")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -2125,14 +2125,14 @@ def _trace(
     note: str | None,
     coercion: Coercion | None = None,
 ) -> None:
-    """Append one JSON line per invocation to ``$AGENTPERMS_TRACE`` if set.
+    """Append one JSON line per invocation to ``$AGENTPERM_TRACE`` if set.
 
     Off by default. Set the env var to a writable path to enable — either in the
     process environment or in ``<repo>/.env`` (loaded by ``_load_dotenv`` from
     ``main``). Used to debug whether the bridge is actually being called for a
     given command.
     """
-    target = os.environ.get("AGENTPERMS_TRACE")
+    target = os.environ.get("AGENTPERM_TRACE")
     if not target:
         return
     record: JsonObject = {
@@ -2159,7 +2159,7 @@ def _trace(
 
 
 def coerce_for_permission_mode(verdict: Verdict, payload: JsonObject) -> Verdict:
-    """Under Claude's ``bypassPermissions`` mode, agentperms defers entirely.
+    """Under Claude's ``bypassPermissions`` mode, agentperm defers entirely.
 
     Claude fires ``PreToolUse`` hooks even in bypass mode, but the user has explicitly opted
     out of permission checks — so the bridge stays out of the way: it returns ``NoOpinion``
@@ -2173,7 +2173,7 @@ def coerce_for_permission_mode(verdict: Verdict, payload: JsonObject) -> Verdict
 
 
 # -----------------------------------------------------------------------------
-# Per-pane bypass (zellij plugin writes the flag file; agentperms reads it)
+# Per-pane bypass (zellij plugin writes the flag file; agentperm reads it)
 # -----------------------------------------------------------------------------
 
 
@@ -2191,14 +2191,14 @@ class Coercion:
     original: Verdict
 
 
-def agentperms_bypass_dir(env: Mapping[str, str]) -> Path:
+def agentperm_bypass_dir(env: Mapping[str, str]) -> Path:
     """Resolve the per-pane bypass cache dir, honoring ``XDG_CACHE_HOME``.
 
-    The plugin (writer) and agentperms (reader) must agree on this path; both
+    The plugin (writer) and agentperm (reader) must agree on this path; both
     derive it through this same helper / the same XDG semantics in the plugin.
     """
     base = env.get("XDG_CACHE_HOME") or str(Path(env.get("HOME", str(Path.home()))) / ".cache")
-    return Path(base) / "agentperms" / "bypass"
+    return Path(base) / "agentperm" / "bypass"
 
 
 def _bypass_dir_is_safe(path: Path) -> bool:
@@ -2229,7 +2229,7 @@ def coerce_for_pane_bypass(
 
     Pane is identified by ``(ZELLIJ_SESSION_NAME, ZELLIJ_PANE_ID)`` — both inherited
     from the zellij pane the agent runs inside. Flag file:
-    ``<agentperms_bypass_dir>/<session>/<pane_id>``. Presence = bypass on.
+    ``<agentperm_bypass_dir>/<session>/<pane_id>``. Presence = bypass on.
 
     ``NoOpinion`` is coerced too: codex's ``PermissionRequest`` adapter falls
     through to ``{}`` on ``NoOpinion`` in ``CodexAdapter.write_verdict``, which causes codex to prompt —
@@ -2243,7 +2243,7 @@ def coerce_for_pane_bypass(
         return verdict, None
     if any(bad in pane_id or bad in session for bad in ("/", "\\", "..", "\0")):
         return verdict, None
-    base = agentperms_bypass_dir(env)
+    base = agentperm_bypass_dir(env)
     if not _bypass_dir_is_safe(base):
         return verdict, None
     if not (base / session / pane_id).exists():

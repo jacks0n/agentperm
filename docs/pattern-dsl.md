@@ -17,7 +17,7 @@ staying a **superset** of the simple Claude Code forms so `import` keeps working
 
 It matches **argv shape, not command intent** (see §8). It is an ergonomics and
 intent-expression layer, *not* a sandbox. Its verdict is still subject to bypass coercion:
-under Claude `bypassPermissions` agentperms defers entirely, and under pane bypass `Ask`/`NoOpinion`
+under Claude `bypassPermissions` agentperm defers entirely, and under pane bypass `Ask`/`NoOpinion`
 become `Allow` while `Deny` still bites (see `architecture.md`).
 
 ## 2. The model in one paragraph
@@ -262,11 +262,11 @@ set difference → use precedence:
   is the permissive trailing default (§4.4).
 - **`Bash(...)` is accepted as a legacy alias** for `Shell(...)` (Claude's keyword), so existing
   policies and pasted Claude rules keep working. `:*` and `**` are likewise legacy aliases.
-- **`import` is one-way faithful (Claude → agentperms).** Claude is exact-by-default and uses the
-  `Bash` keyword, so its `Bash(git status)` is written into the agentperms policy as
+- **`import` is one-way faithful (Claude → agentperm).** Claude is exact-by-default and uses the
+  `Bash` keyword, so its `Bash(git status)` is written into the agentperm policy as
   `Shell(git status !...)`, and its `Bash(git status:*)` becomes `Shell(git status)`. The stored
-  agentperms policy is then unambiguous and canonical — `Shell(x)` always means the permissive
-  default; imported exact rules carry `!...`. The reverse (exporting agentperms patterns back to
+  agentperm policy is then unambiguous and canonical — `Shell(x)` always means the permissive
+  default; imported exact rules carry `!...`. The reverse (exporting agentperm patterns back to
   Claude) is **lossy/unsupported**: flag predicates, sets, negation, value globs, and in-token
   globs have no Claude equivalent.
 - A *dashed* token in a pattern is a flag matched anywhere, not a strict-position token — the one
@@ -274,7 +274,7 @@ set difference → use precedence:
 
 ## 8. Security model & limitations
 
-agentperms matches **argv shape, not command semantics**. The richer DSL improves expressiveness
+agentperm matches **argv shape, not command semantics**. The richer DSL improves expressiveness
 and ergonomics; it is **not** a stronger safety boundary.
 
 - **Negation is convenience, not containment.** `git push !--force` doesn't know every

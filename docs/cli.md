@@ -1,7 +1,7 @@
 # CLI reference
 
 ```sh
-agentperms <command> [args]
+agentperm <command> [args]
 ```
 
 Four subcommands: `install`, `import`, `check`, `edit`. The first three are usually run once at setup time; `check` is what the agent itself runs at decision time.
@@ -11,7 +11,7 @@ Four subcommands: `install`, `import`, `check`, `edit`. The first three are usua
 Wires the bridge into every supported agent's hook config.
 
 ```sh
-agentperms install [--mode auto|rulesync|direct] [--dry-run]
+agentperm install [--mode auto|rulesync|direct] [--dry-run]
 ```
 
 ### Modes
@@ -25,7 +25,7 @@ agentperms install [--mode auto|rulesync|direct] [--dry-run]
 - **Claude Code:** appends a `PreToolUse` hook to `~/.claude/settings.json` (matcher `*`). Strips any spurious bridge entry that ended up in `PermissionRequest` (Claude doesn't fire that event).
 - **Codex CLI:** appends `PreToolUse` (matcher `Bash`) and `PermissionRequest` (matcher `Bash|apply_patch|mcp__.*`) hooks to `~/.codex/hooks.json`, and enables `[features].hooks = true` in `~/.codex/config.toml`.
 - **Gemini CLI:** appends a `BeforeTool` hook to `~/.gemini/settings.json` (matcher `.*`).
-- **OpenCode:** writes `~/.config/opencode/plugins/agentperms.js` — always, regardless of mode.
+- **OpenCode:** writes `~/.config/opencode/plugins/agentperm.js` — always, regardless of mode.
 
 ### Flags
 
@@ -47,7 +47,7 @@ After install, every agent consults `~/.agent-permissions.jsonc` for permission 
 Pulls each agent's existing native rules into `~/.agent-permissions.jsonc`.
 
 ```sh
-agentperms import
+agentperm import
 ```
 
 This reads:
@@ -63,7 +63,7 @@ Rules are merged into the policy file (existing rules kept, new rules appended).
 Runtime decision endpoint. Reads the agent's hook payload from stdin, writes a verdict envelope to stdout. **You don't run this manually** — `install` wires it up.
 
 ```sh
-agentperms check --agent <claude|codex|opencode|gemini> --event <event-name>
+agentperm check --agent <claude|codex|opencode|gemini> --event <event-name>
 ```
 
 Arguments:
@@ -86,10 +86,10 @@ Failure modes (all fail open with empty `{}` so the agent's native flow takes ov
 
 ### Tracing
 
-Set `AGENTPERMS_TRACE` to a writable path to log every invocation:
+Set `AGENTPERM_TRACE` to a writable path to log every invocation:
 
 ```sh
-export AGENTPERMS_TRACE=/tmp/bridge-trace.log
+export AGENTPERM_TRACE=/tmp/bridge-trace.log
 ```
 
 Each invocation appends one JSON line: `{ agent, event, payload, verdict, note }`. Useful when debugging "why did this prompt me?" — see [Troubleshooting](troubleshooting.md).
@@ -100,15 +100,15 @@ When the verdict was overridden by [pane bypass](#pane-bypass), the line also ca
 
 A per-zellij-pane "skip prompts" toggle, analogous to Claude Code's `--dangerously-skip-permissions` but scoped to one pane. Implemented by the [`zellij-plugin/`](../zellij-plugin/README.md) WASM plugin, honored by `check`.
 
-When the focused pane has a flag file present, `check` coerces `Decision.Ask` and `Decision.NoOpinion` to `Allow` for that invocation. `Decision.Deny` is unaffected — deny rules still bite (unlike Claude's own `bypassPermissions`, where agentperms defers entirely). Coercing `NoOpinion` matters because Codex prompts on `NoOpinion` (the empty `{}` envelope falls through to its native flow), so suppressing only `Ask` would leave unknown commands prompting under bypass.
+When the focused pane has a flag file present, `check` coerces `Decision.Ask` and `Decision.NoOpinion` to `Allow` for that invocation. `Decision.Deny` is unaffected — deny rules still bite (unlike Claude's own `bypassPermissions`, where agentperm defers entirely). Coercing `NoOpinion` matters because Codex prompts on `NoOpinion` (the empty `{}` envelope falls through to its native flow), so suppressing only `Ask` would leave unknown commands prompting under bypass.
 
 The pane is identified by the pair `(ZELLIJ_SESSION_NAME, ZELLIJ_PANE_ID)` inherited from the agent's process environment. The flag file lives at:
 
 ```
-$XDG_CACHE_HOME/agentperms/bypass/<session>/<pane_id>
+$XDG_CACHE_HOME/agentperm/bypass/<session>/<pane_id>
 ```
 
-…falling back to `$HOME/.cache/agentperms/bypass/<session>/<pane_id>` when `XDG_CACHE_HOME` is unset. Presence of the file = bypass on; absence = bypass off. The plugin owns all writes; `check` only reads.
+…falling back to `$HOME/.cache/agentperm/bypass/<session>/<pane_id>` when `XDG_CACHE_HOME` is unset. Presence of the file = bypass on; absence = bypass off. The plugin owns all writes; `check` only reads.
 
 Safety checks `check` applies before honoring a flag:
 
@@ -125,7 +125,7 @@ Bypass applies to *future* permission decisions. A command already approved by `
 Opens `~/.agent-permissions.jsonc` in `$EDITOR` (or `$VISUAL`, falling back to `vi`). Creates the file with a sensible default policy if it doesn't exist.
 
 ```sh
-agentperms edit
+agentperm edit
 ```
 
 The default policy ships with read-only commands (cat, ls, grep, etc.) and read-only git commands on the allow list, `sed -i` on the ask list, and `sudo` / `rm -rf /` on the deny list. Edit to taste.

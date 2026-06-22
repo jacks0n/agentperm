@@ -6,7 +6,7 @@ use zellij_tile::prelude::*;
 
 // `std::os::unix::fs::{DirBuilderExt, OpenOptionsExt}` is not available on
 // wasm32-wasip1, so we cannot set mode bits explicitly. Files and directories
-// inherit the user's umask (typically 0755 / 0644). agentperms's safety check
+// inherit the user's umask (typically 0755 / 0644). agentperm's safety check
 // only rejects directories that are group/world-*writable*, which a default
 // umask of 022 prevents — so this is safe under normal configurations.
 
@@ -27,7 +27,7 @@ impl ZellijPlugin for State {
         let xdg_base = std::env::var("XDG_CACHE_HOME").unwrap_or_else(|_| format!("{home}/.cache"));
         let session = std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default();
         self.cache_dir = PathBuf::from(xdg_base)
-            .join("agentperms")
+            .join("agentperm")
             .join("bypass")
             .join(&session);
         request_permission(&[
@@ -103,7 +103,7 @@ impl ZellijPlugin for State {
         if on {
             print!("\u{1b}[41;97;1m BYPASS \u{1b}[0m");
         } else {
-            print!("\u{1b}[2m agentperms \u{1b}[0m");
+            print!("\u{1b}[2m agentperm \u{1b}[0m");
         }
     }
 }

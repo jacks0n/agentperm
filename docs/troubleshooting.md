@@ -9,17 +9,17 @@ Step through these checks in order. Most "still prompting" reports are one of th
 Enable the trace and reproduce:
 
 ```sh
-export AGENTPERMS_TRACE=/tmp/bridge-trace.log
+export AGENTPERM_TRACE=/tmp/bridge-trace.log
 : > /tmp/bridge-trace.log
 # Now reproduce the prompt in your agent.
 cat /tmp/bridge-trace.log
 ```
 
-For the env var to reach the bridge from inside the agent's hook, you need to either (a) set it in your shell **before** launching the agent, or (b) edit the hook command in `~/.claude/settings.json` (or equivalent) to prefix the bridge call with `AGENTPERMS_TRACE=/path/to/log`.
+For the env var to reach the bridge from inside the agent's hook, you need to either (a) set it in your shell **before** launching the agent, or (b) edit the hook command in `~/.claude/settings.json` (or equivalent) to prefix the bridge call with `AGENTPERM_TRACE=/path/to/log`.
 
 If the log is empty after a prompt, **the bridge wasn't called.** That means:
 - The prompt came from the agent's own pre-hook checks (e.g. Claude's "cd outside the working directory" guard), which run before permission hooks and aren't suppressed by bypass mode
-- The agent didn't know to call the bridge — re-run `agentperms install`
+- The agent didn't know to call the bridge — re-run `agentperm install`
 - The hook was overridden by a different config scope (see "Stale entries" below)
 
 If the log shows the call, look at the verdict and rationale. The bridge's reasoning is right there.
@@ -36,7 +36,7 @@ grep -l "agent-bridge" \
   $(find ~/Code -path '*/.rulesync/hooks*' 2>/dev/null)
 ```
 
-Edit the offending files manually and remove the stale entries. Re-running `agentperms install` only writes to the global scope (`~/.claude/settings.json`).
+Edit the offending files manually and remove the stale entries. Re-running `agentperm install` only writes to the global scope (`~/.claude/settings.json`).
 
 ### 3. "cd outside working directory" guard
 
@@ -47,10 +47,10 @@ Claude Code prompts on any `cd` to a path outside the agent's current working di
 
 ### 4. Bypass mode still prompts / still denies
 
-When Claude Code is in `bypassPermissions` mode, agentperms **defers entirely** — it emits an empty `{}` for every command and lets Claude handle it. It won't prompt and won't deny. If you're still seeing prompts or denials in bypass mode:
-- Claude's built-in cwd guard still fires (see above) — that's Claude, not agentperms
+When Claude Code is in `bypassPermissions` mode, agentperm **defers entirely** — it emits an empty `{}` for every command and lets Claude handle it. It won't prompt and won't deny. If you're still seeing prompts or denials in bypass mode:
+- Claude's built-in cwd guard still fires (see above) — that's Claude, not agentperm
 - Another hook may be running (Claude concatenates hooks across scopes; see [adapters.md](adapters.md#concatenation-not-merging))
-- The installed bridge may be stale — confirm `agentperms --version` matches your checkout
+- The installed bridge may be stale — confirm `agentperm --version` matches your checkout
 - If you *want* deny rules to keep biting while suppressing prompts, use [pane bypass](cli.md#pane-bypass) instead of Claude's `bypassPermissions`
 
 ### 5. Compound command escalation
@@ -72,7 +72,7 @@ See [Policy reference: Inert command names](policy-reference.md#inert-command-na
 A parse error in `~/.agent-permissions.jsonc` causes the bridge to emit `Ask` with rationale `"policy load failed: ..."`. The agent surfaces this as a prompt with the parse error message — fix the file and re-run.
 
 ```sh
-agentperms edit
+agentperm edit
 ```
 
 ## "It allowed something it shouldn't have"
@@ -99,12 +99,12 @@ Project-local rules union with global. To narrow at project level, add `deny` ru
 
 ## "Install didn't seem to do anything"
 
-`agentperms install` is idempotent. If the bridge was already installed at the same path, it returns without writing. To force a rewrite:
+`agentperm install` is idempotent. If the bridge was already installed at the same path, it returns without writing. To force a rewrite:
 
 ```sh
 # Edit ~/.claude/settings.json and remove the bridge PreToolUse entry.
 # Then re-run install.
-agentperms install
+agentperm install
 ```
 
 The output of `install` lists each adapter and whether it wrote a file or skipped.
@@ -122,6 +122,6 @@ Include:
 1. The agent and version (`claude --version`, etc.)
 2. The exact command that prompted (or didn't)
 3. Your `.agent-permissions.jsonc` (redact anything sensitive)
-4. A trace log line for the offending invocation (set `AGENTPERMS_TRACE` and reproduce)
+4. A trace log line for the offending invocation (set `AGENTPERM_TRACE` and reproduce)
 
-Issue tracker: <https://github.com/jacks0n/agentperms/issues>
+Issue tracker: <https://github.com/jacks0n/agentperm/issues>

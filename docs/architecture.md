@@ -8,7 +8,7 @@ The bridge replaces "four configs" with "one policy file plus four small adapter
 
 ## Domain model
 
-The whole system is built on three sum types and a small set of value objects, all defined in `src/agentperms/__init__.py`.
+The whole system is built on three sum types and a small set of value objects, all defined in `src/agentperm/__init__.py`.
 
 ### Decision
 
@@ -95,7 +95,7 @@ Redirects are evaluated independently of argv:
 
 This is hard-coded — file writes always surface a prompt regardless of the surrounding rule. The earlier regex parser misread `2>&1` as a write to a file called `1`; the Tree-sitter Bash AST gets it right.
 
-### Bypass — agentperms defers (Claude-specific)
+### Bypass — agentperm defers (Claude-specific)
 
 Claude Code's hook payload includes `permission_mode`. When the user is in `bypassPermissions` mode they've explicitly turned permission checks off — so the bridge gets out of the way entirely:
 
@@ -106,7 +106,7 @@ def coerce_for_permission_mode(verdict, payload):
     return verdict
 ```
 
-Claude fires `PreToolUse` hooks even in bypass mode, but the bridge returns `NoOpinion` (an empty `{}` envelope) for *everything* — `Ask`, `Allow`, even `Deny` — and lets Claude's native bypass proceed. agentperms does not second-guess a user who has explicitly chosen "skip all permissions." (The Claude write path still attaches any MCP-bypass `updatedInput`, so bypass still propagates to a downstream Codex MCP tool — see below.) If you want `deny` rules to keep biting, don't enable Claude's bypass; use [pane bypass](#pane-bypass-zellij), which *does* preserve `Deny`.
+Claude fires `PreToolUse` hooks even in bypass mode, but the bridge returns `NoOpinion` (an empty `{}` envelope) for *everything* — `Ask`, `Allow`, even `Deny` — and lets Claude's native bypass proceed. agentperm does not second-guess a user who has explicitly chosen "skip all permissions." (The Claude write path still attaches any MCP-bypass `updatedInput`, so bypass still propagates to a downstream Codex MCP tool — see below.) If you want `deny` rules to keep biting, don't enable Claude's bypass; use [pane bypass](#pane-bypass-zellij), which *does* preserve `Deny`.
 
 Codex / OpenCode / Gemini don't ship a bypass mode in the hook payload, so this is a no-op there. They get an out-of-band equivalent via [pane bypass](#pane-bypass-zellij) below or [MCP bypass propagation](#mcp-bypass-propagation) when running as a Claude Code MCP server.
 
@@ -133,7 +133,7 @@ This requires no configuration — it activates automatically when the hook dete
 
 ### Pane bypass (zellij)
 
-For users running an agent inside a [zellij](https://zellij.dev) pane, a separate coercion suppresses prompts on a per-pane basis — independent of the host agent's own bypass flag (if any). The toggle lives in a [WASM plugin](../zellij-plugin/README.md); `agentperms` only reads the flag.
+For users running an agent inside a [zellij](https://zellij.dev) pane, a separate coercion suppresses prompts on a per-pane basis — independent of the host agent's own bypass flag (if any). The toggle lives in a [WASM plugin](../zellij-plugin/README.md); `agentperm` only reads the flag.
 
 ```python
 def coerce_for_pane_bypass(verdict, env):
@@ -144,7 +144,7 @@ def coerce_for_pane_bypass(verdict, env):
     if not pane_id or not session:
         return verdict, None
     # ...path-traversal sanitization, dir-safety check elided...
-    if not (agentperms_bypass_dir(env) / session / pane_id).exists():
+    if not (agentperm_bypass_dir(env) / session / pane_id).exists():
         return verdict, None
     coerced = Verdict(Decision.Allow, f"pane bypass: {verdict.rationale}")
     return coerced, Coercion(by="zellij_pane_bypass", ...)
@@ -152,9 +152,9 @@ def coerce_for_pane_bypass(verdict, env):
 
 Differences from Claude bypass:
 
-- **`Deny` still bites.** Pane bypass is agentperms' own "skip prompts for this pane" toggle, so it suppresses `Ask`/`NoOpinion` but still enforces your deny list — unlike Claude's bypass, where agentperms defers entirely.
+- **`Deny` still bites.** Pane bypass is agentperm' own "skip prompts for this pane" toggle, so it suppresses `Ask`/`NoOpinion` but still enforces your deny list — unlike Claude's bypass, where agentperm defers entirely.
 - Coerces both `Ask` *and* `NoOpinion`. Codex falls through to its native prompt on the empty `{}` envelope that `NoOpinion` produces, so leaving it alone would defeat bypass for any unknown command.
-- Returns a structured `Coercion` record alongside the verdict, recorded in `$AGENTPERMS_TRACE` as a top-level `coercion` field. The original verdict is recoverable.
+- Returns a structured `Coercion` record alongside the verdict, recorded in `$AGENTPERM_TRACE` as a top-level `coercion` field. The original verdict is recoverable.
 - Reads from the process environment (`os.environ`) rather than the hook payload — works for any adapter, not just Claude.
 - Refuses to honor the flag if the bypass directory is group/world-writable or not owned by the current uid, and sanitizes pane id / session against path traversal.
 
@@ -228,7 +228,7 @@ Tree-sitter Bash is a maintained Bash grammar. It eliminates the regex parser's 
 ## Module layout
 
 ```
-src/agentperms/__init__.py
+src/agentperm/__init__.py
 ├── JSON value model (system-boundary types)
 ├── Domain (Decision, Verdict, Rule, Request, Policy)
 ├── Aggregation (_stricter, aggregate)

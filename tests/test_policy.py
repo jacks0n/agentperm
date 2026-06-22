@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agentperms import (
+from agentperm import (
     BashCommand,
     BashOption,
     Decision,
@@ -14,7 +14,7 @@ from agentperms import (
     ShellRequest,
     ToolRequest,
     Verdict,
-    agentperms_bypass_dir,
+    agentperm_bypass_dir,
     aggregate,
     coerce_for_pane_bypass,
     coerce_for_permission_mode,
@@ -265,11 +265,11 @@ def test_policy_named_tool_lookup():
     assert policy.decide(ToolRequest("Write")).decision is Decision.NoOpinion
 
 
-# ---- Bypass-permissions: agentperms defers entirely ----------------------
+# ---- Bypass-permissions: agentperm defers entirely ----------------------
 
 
 def test_bypass_mode_defers_every_decision():
-    """Under Claude bypass the user opted out of permission checks, so agentperms
+    """Under Claude bypass the user opted out of permission checks, so agentperm
     returns NoOpinion (an empty {} envelope) for everything — Ask, Allow, and even
     Deny — and lets Claude's native bypass proceed."""
     for decision in (Decision.Ask, Decision.Allow, Decision.Deny, Decision.NoOpinion):
@@ -302,9 +302,9 @@ def _bypass_env(tmp_path: Path, *, session: str = "main", pane_id: str = "42") -
 
 def _touch_flag(tmp_path: Path, session: str, pane_id: str) -> Path:
     """Create the bypass dir at 0700 and an empty flag file at 0600."""
-    base = tmp_path / "agentperms" / "bypass" / session
+    base = tmp_path / "agentperm" / "bypass" / session
     base.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "agentperms" / "bypass").chmod(0o700)
+    (tmp_path / "agentperm" / "bypass").chmod(0o700)
     base.chmod(0o700)
     flag = base / pane_id
     flag.touch(mode=0o600)
@@ -370,7 +370,7 @@ def test_pane_bypass_no_pane_id_keeps_verdict(tmp_path: Path):
 def test_pane_bypass_path_traversal_pane_id_rejected(tmp_path: Path):
     """Even if a flag exists at the resolved path, ../-bearing pane ids must be refused."""
     # Place a flag where "../escape" would resolve to, to prove the check rejects before hitting fs.
-    base = tmp_path / "agentperms" / "bypass" / "main"
+    base = tmp_path / "agentperm" / "bypass" / "main"
     base.mkdir(parents=True)
     (base.parent).chmod(0o700)
     base.chmod(0o700)
@@ -390,7 +390,7 @@ def test_pane_bypass_path_traversal_session_rejected(tmp_path: Path):
 
 def test_pane_bypass_world_writable_dir_rejected(tmp_path: Path):
     _touch_flag(tmp_path, "main", "42")
-    (tmp_path / "agentperms" / "bypass").chmod(0o777)
+    (tmp_path / "agentperm" / "bypass").chmod(0o777)
     verdict, coercion = coerce_for_pane_bypass(Verdict(Decision.Ask, "x"), _bypass_env(tmp_path))
     assert verdict.decision is Decision.Ask
     assert coercion is None
@@ -403,14 +403,14 @@ def test_pane_bypass_missing_dir_is_safe_noop(tmp_path: Path):
     assert coercion is None
 
 
-def test_agentperms_bypass_dir_honors_xdg(tmp_path: Path):
+def test_agentperm_bypass_dir_honors_xdg(tmp_path: Path):
     env = {"XDG_CACHE_HOME": str(tmp_path / "x")}
-    assert agentperms_bypass_dir(env) == tmp_path / "x" / "agentperms" / "bypass"
+    assert agentperm_bypass_dir(env) == tmp_path / "x" / "agentperm" / "bypass"
 
 
-def test_agentperms_bypass_dir_falls_back_to_home():
+def test_agentperm_bypass_dir_falls_back_to_home():
     env = {"HOME": "/var/empty"}
-    assert agentperms_bypass_dir(env) == Path("/var/empty") / ".cache" / "agentperms" / "bypass"
+    assert agentperm_bypass_dir(env) == Path("/var/empty") / ".cache" / "agentperm" / "bypass"
 
 
 # ---- Policy merging -------------------------------------------------------
@@ -468,7 +468,7 @@ def test_echo_with_redirect_still_asks():
 
 
 # Decomposition correctness — these assert the raw (normal-mode) decision. Under
-# bypass agentperms defers entirely (see test_bypass_mode_defers_every_decision);
+# bypass agentperm defers entirely (see test_bypass_mode_defers_every_decision);
 # the value of decomposition is that a denied inner command is caught in normal mode.
 
 

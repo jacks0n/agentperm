@@ -1,6 +1,6 @@
 # Adapter notes
 
-Each agent has its own hook protocol, payload shape, and verdict envelope. The adapters in `src/agentperms/__init__.py` translate between them and the bridge's uniform `Request` / `Verdict` types.
+Each agent has its own hook protocol, payload shape, and verdict envelope. The adapters in `src/agentperm/__init__.py` translate between them and the bridge's uniform `Request` / `Verdict` types.
 
 ## Claude Code
 
@@ -35,11 +35,11 @@ Each agent has its own hook protocol, payload shape, and verdict envelope. The a
 
 ### Bypass mode
 
-Claude Code's `permission_mode == "bypassPermissions"` means the user has turned permission checks off. The bridge defers entirely: it emits `NoOpinion` (an empty `{}`) for **every** decision — `Ask`, `Allow`, and `Deny` alike — and lets Claude's native bypass proceed. agentperms does not second-guess an explicit bypass. (Claude still fires `PreToolUse` hooks in bypass; returning `{}` is how the bridge stays out of the way.) The MCP-bypass `updatedInput` below is still attached on the way out. If you want `deny` rules to keep biting, use pane bypass instead of Claude's bypass.
+Claude Code's `permission_mode == "bypassPermissions"` means the user has turned permission checks off. The bridge defers entirely: it emits `NoOpinion` (an empty `{}`) for **every** decision — `Ask`, `Allow`, and `Deny` alike — and lets Claude's native bypass proceed. agentperm does not second-guess an explicit bypass. (Claude still fires `PreToolUse` hooks in bypass; returning `{}` is how the bridge stays out of the way.) The MCP-bypass `updatedInput` below is still attached on the way out. If you want `deny` rules to keep biting, use pane bypass instead of Claude's bypass.
 
 ### MCP bypass propagation
 
-When Claude Code calls an MCP tool (e.g. `mcp__codex__codex`) in bypass mode, the bridge uses `updatedInput` to inject `"approval-policy": "never"` into the tool input. This causes the downstream agent (Codex) to run in full-auto mode — its `PermissionRequest` hooks don't fire, so agentperms doesn't prompt. `PreToolUse` hooks still fire, so Deny rules still apply. See [architecture — MCP bypass propagation](architecture.md#mcp-bypass-propagation).
+When Claude Code calls an MCP tool (e.g. `mcp__codex__codex`) in bypass mode, the bridge uses `updatedInput` to inject `"approval-policy": "never"` into the tool input. This causes the downstream agent (Codex) to run in full-auto mode — its `PermissionRequest` hooks don't fire, so agentperm doesn't prompt. `PreToolUse` hooks still fire, so Deny rules still apply. See [architecture — MCP bypass propagation](architecture.md#mcp-bypass-propagation).
 
 ### Concatenation, not merging
 
@@ -91,7 +91,7 @@ Codex's allow-list lives in `.rules` files using a `prefix_rule(pattern=[...], d
 
 ## OpenCode
 
-**Plugin:** `~/.config/opencode/plugins/agentperms.js`. OpenCode runs JavaScript plugins; the bridge ships a tiny shim that shells out to the Python binary. The plugin is always installed directly regardless of mode — rulesync has no schema for `permission.ask` plugins. The shim's `const bridge = "..."` is filled in with the absolute path to `agentperms` resolved at install time, so GUI launches with sparse `PATH` still find it.
+**Plugin:** `~/.config/opencode/plugins/agentperm.js`. OpenCode runs JavaScript plugins; the bridge ships a tiny shim that shells out to the Python binary. The plugin is always installed directly regardless of mode — rulesync has no schema for `permission.ask` plugins. The shim's `const bridge = "..."` is filled in with the absolute path to `agentperm` resolved at install time, so GUI launches with sparse `PATH` still find it.
 
 **Plugin event:** `permission.ask`.
 

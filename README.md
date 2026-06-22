@@ -1,4 +1,4 @@
-# agentperms
+# agentperm
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
@@ -14,20 +14,20 @@ It also gives you one source of truth instead of four, plus a richer rule gramma
 ## Install
 
 ```sh
-pipx install agentperms
+pipx install agentperm
 # or
-uv tool install agentperms
+uv tool install agentperm
 ```
 
 Then:
 
 ```sh
-agentperms import    # pulls existing native rules into ~/.agent-permissions.jsonc
-agentperms install   # wires the bridge into Claude Code, Codex, OpenCode, and Gemini hooks
-agentperms edit      # opens the policy in $EDITOR (creates a default if missing)
+agentperm import    # pulls existing native rules into ~/.agent-permissions.jsonc
+agentperm install   # wires the bridge into Claude Code, Codex, OpenCode, and Gemini hooks
+agentperm edit      # opens the policy in $EDITOR (creates a default if missing)
 ```
 
-`install` auto-detects whether you use [Rulesync](https://github.com/dyoshikawa/rulesync) — if `~/.rulesync/` exists, it merges hook entries into `~/.rulesync/hooks.json` and you re-run `rulesync` to materialise per-tool configs. Otherwise it writes per-tool configs (`~/.claude/settings.json`, `~/.codex/hooks.json`+`config.toml`, `~/.gemini/settings.json`) directly. The OpenCode plugin shim is always installed at `~/.config/opencode/plugins/agentperms.js` because rulesync has no schema for `permission.ask` plugins. Pass `--mode rulesync|direct` to override detection or `--dry-run` to preview.
+`install` auto-detects whether you use [Rulesync](https://github.com/dyoshikawa/rulesync) — if `~/.rulesync/` exists, it merges hook entries into `~/.rulesync/hooks.json` and you re-run `rulesync` to materialise per-tool configs. Otherwise it writes per-tool configs (`~/.claude/settings.json`, `~/.codex/hooks.json`+`config.toml`, `~/.gemini/settings.json`) directly. The OpenCode plugin shim is always installed at `~/.config/opencode/plugins/agentperm.js` because rulesync has no schema for `permission.ask` plugins. Pass `--mode rulesync|direct` to override detection or `--dry-run` to preview.
 
 Per-project overrides live in `<project>/.agent-permissions.jsonc` — both files merge at decision time, deny wins.
 
@@ -69,7 +69,7 @@ A compound like `cat foo 2>&1 | head -60` passes through silently with the polic
 
 ## Bypass mode (zellij)
 
-A per-pane "skip prompts" toggle for users running their agents inside [zellij](https://zellij.dev). Bind a key to flip a flag file for the focused pane; while the flag is on, `agentperms` coerces `Ask` and `NoOpinion` verdicts to `Allow` — but only in that pane, and `Deny` rules still bite. (Claude's own `bypassPermissions` is different: there agentperms defers entirely and lets Claude handle everything.) The toggle and indicator live in a small WASM plugin shipped at [`zellij-plugin/`](zellij-plugin/README.md).
+A per-pane "skip prompts" toggle for users running their agents inside [zellij](https://zellij.dev). Bind a key to flip a flag file for the focused pane; while the flag is on, `agentperm` coerces `Ask` and `NoOpinion` verdicts to `Allow` — but only in that pane, and `Deny` rules still bite. (Claude's own `bypassPermissions` is different: there agentperm defers entirely and lets Claude handle everything.) The toggle and indicator live in a small WASM plugin shipped at [`zellij-plugin/`](zellij-plugin/README.md).
 
 ## Documentation
 

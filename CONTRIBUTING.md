@@ -7,8 +7,8 @@ Thanks for considering a contribution. The bridge is small and focused on purpos
 Requires Python 3.12+.
 
 ```sh
-git clone https://github.com/jacks0n/agentperms.git
-cd agentperms
+git clone https://github.com/jacks0n/agentperm.git
+cd agentperm
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
 ```

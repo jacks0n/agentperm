@@ -8,13 +8,13 @@ labels: bug
 e.g. Claude Code 1.x, Codex CLI 0.x — output of `<agent> --version`.
 
 **Bridge version**
-`agentperms --version` or `pip show agentperms | grep Version`.
+`agentperm --version` or `pip show agentperm | grep Version`.
 
 **What happened**
 The exact command, the prompt (or absence of prompt) you got, and what you expected.
 
 **Trace**
-Run with `AGENTPERMS_TRACE=/tmp/agentperms-trace.log` and paste the relevant line(s). See [docs/troubleshooting.md](../../docs/troubleshooting.md#1-is-the-bridge-actually-being-called).
+Run with `AGENTPERM_TRACE=/tmp/agentperm-trace.log` and paste the relevant line(s). See [docs/troubleshooting.md](../../docs/troubleshooting.md#1-is-the-bridge-actually-being-called).
 
 ```
 {"agent": "claude", "event": "PreToolUse", "payload": {...}, "verdict": {...}}

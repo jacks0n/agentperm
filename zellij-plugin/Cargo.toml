@@ -1,8 +1,8 @@
 [package]
-name = "agentperms-indicator"
+name = "agentperm-indicator"
 version = "0.1.0"
 edition = "2021"
-description = "Per-pane bypass-permissions toggle/indicator for the agentperms permission mediator."
+description = "Per-pane bypass-permissions toggle/indicator for the agentperm permission mediator."
 license = "MIT"
 publish = false
 
