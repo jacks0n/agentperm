@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Named-tool rules accept an argument specifier that scopes by the tool's input, generically for any tool: `WebFetch(domain:github.com)` matches a URL field on that host or a subdomain, and any other specifier (`Read(/etc/**)`, `Edit(src/*)`) is a path glob (`*` within a path segment, `**` across `/`) against the tool's path fields. A bare name or `(*)` matches any input. Matching is keyed by field name, so a specifier only checks the authoritative field (a `github.com` URL in a `prompt` won't satisfy `WebFetch(domain:github.com)`). Adapters thread tool-input values (URLs, file paths, …) through to matching; extraction is breadth-first and bounded against deep payloads.
+
+### Fixed
+
+- Parenthesised named-tool rules (`Read(*)`, `WebFetch(domain:…)`, `Glob(*)`, …) were previously inert — they matched nothing because only the literal string was compared to the tool name. They now match as documented.
+
 ## [0.2.0] — 2026-06-26
 
 ### Added
@@ -70,5 +80,6 @@ Initial public release — one permission policy for Claude Code, Codex CLI, Ope
 - Gemini import is not implemented (regex DSL is hard to round-trip safely).
 - POSIX `--` argument terminator is not tracked by `BashOption.matches` — flags after `--` may match. Conservative direction is `Ask`, which is correct for a permission policy.
 
+[Unreleased]: https://github.com/jacks0n/agentperm/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.1.0

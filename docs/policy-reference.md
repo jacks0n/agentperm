@@ -84,9 +84,22 @@ Matches a non-Bash tool by name.
 "mcp__memory__*" // prefix glob — matches mcp__memory__lookup, mcp__memory__store, etc.
 ```
 
-#### `"WebFetch(domain:<host>)"` — currently a named-tool match
+#### `"<ToolName>(<specifier>)"` — named tool scoped by its input
 
-Parsed as `WebFetch(domain:github.com)` and matched against tool name. Future versions may add per-domain matching at the request level; today it's accepted for native-config import compatibility.
+An optional specifier in parentheses scopes the rule by the tool's input values (URLs, file paths, etc.). The name part still matches as above (exact / `*` / prefix glob); the specifier is then checked against the arguments. This works for any tool, not a fixed list.
+
+```jsonc
+"WebFetch(domain:github.com)" // host is github.com or a subdomain (api.github.com)
+"Read(/etc/**)"               // a file-path argument matches the glob /etc/**
+"Edit(src/*)"                 // same mechanism, any tool
+"Read(*)"                     // explicit "any input" — identical to bare "Read"
+```
+
+- **`domain:<host>`** — matches when a **URL field** of the tool input (`url`, `uri`, `href`) has a host equal to `<host>` or a subdomain of it (`github.com` matches `api.github.com`). Host comparison is case-, trailing-dot-, and IDNA-insensitive (Unicode and punycode forms are equivalent); malformed URLs simply don't match.
+- **any other specifier** — a glob matched against the tool's **path fields** (`path`, `file_path`, `paths`, `notebook_path`, `absolute_path`, …). `*` matches within a single path segment; `**` matches across `/` (`Read(/etc/**)` matches `/etc/ssl/cert.pem`, `Edit(src/*)` does not match `src/sub/x`).
+- **`*` or empty** — matches the tool regardless of input (so `Read(*)` and `Read` are equivalent).
+
+Matching is **keyed by field name**, so a specifier only ever checks the authoritative field — `WebFetch(domain:github.com)` will not be satisfied by a `github.com` URL that happens to appear in a `prompt`, and `Edit(src/**)` will not be satisfied by path-like text in `old_string`. Adapters that don't surface those fields only match the name-only forms.
 
 ### Dict rules
 

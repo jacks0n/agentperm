@@ -17,13 +17,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -135,6 +138,12 @@ class Pipeline:
     unparseable_reason: str = ""
 
 
+# A tool request's input flattened to (field-name, value) pairs, e.g.
+# (("url", "https://github.com/x"), ("prompt", "…")). Keeping field identity lets a scoped
+# rule match only the authoritative field, never a look-alike value in another field.
+ToolArguments = tuple[tuple[str, str], ...]
+
+
 class Request:
     """Marker base for ShellRequest / ToolRequest. Sum-typed via isinstance dispatch."""
 
@@ -147,6 +156,7 @@ class ShellRequest(Request):
 @dataclass(frozen=True)
 class ToolRequest(Request):
     tool: str
+    arguments: ToolArguments = ()
 
 
 # Permission rules are a sum type. Each rule knows how to match its kind of request.
@@ -232,21 +242,132 @@ class BashOption(Rule):
         }
 
 
+_URL_ARG_KEYS = frozenset({"url", "uri", "href"})
+_PATH_ARG_KEYS = frozenset(
+    {"path", "file_path", "filepath", "paths", "file_paths", "notebook_path", "absolute_path"}
+)
+_MAX_ARG_NODES = 1000
+
+
 @dataclass(frozen=True)
 class NamedTool(Rule):
-    """Tool name pattern: exact (``Read``), wildcard (``*``), or prefix (``mcp__memory__*``)."""
+    """Non-shell tool rule: a name plus an optional argument specifier.
 
-    pattern: str
+    Name matches exactly (``Read``), as a prefix glob (``mcp__memory__*``), or as ``*``.
+    The optional specifier scopes by the tool's input, keyed by conventional field names so
+    the same syntax works for any tool without hard-coding tool names:
 
-    def matches(self, name: str) -> bool:
-        if self.pattern in ("*", name):
+    - ``WebFetch(domain:github.com)`` — a URL field (``url`` / ``uri`` / ``href``) whose
+      host is ``github.com`` or a subdomain.
+    - ``Read(/etc/**)`` / ``Edit(src/*)`` — a path field (``path`` / ``file_path`` / …)
+      matching the glob: ``*`` within one segment, ``**`` across ``/``.
+    - bare name / ``(*)`` / ``()`` — matches the tool regardless of input.
+    """
+
+    name: str
+    specifier: str | None = None
+
+    def matches(self, name: str, arguments: ToolArguments = ()) -> bool:
+        if not self._name_matches(name):
+            return False
+        if self.specifier is None or self.specifier == "*":
             return True
-        if self.pattern.endswith("*"):
-            return name.startswith(self.pattern[:-1])
-        return False
+        return self._specifier_matches(arguments)
+
+    def _name_matches(self, name: str) -> bool:
+        if self.name in ("*", name):
+            return True
+        return self.name.endswith("*") and name.startswith(self.name[:-1])
+
+    def _specifier_matches(self, arguments: ToolArguments) -> bool:
+        spec = self.specifier
+        if spec is None:
+            return True
+        if spec.startswith("domain:"):
+            host = spec[len("domain:") :]
+            return any(_url_host_matches(value, host) for key, value in arguments if key.lower() in _URL_ARG_KEYS)
+        return any(_path_glob_matches(spec, value) for key, value in arguments if key.lower() in _PATH_ARG_KEYS)
 
     def serialize(self) -> str:
-        return self.pattern
+        return self.name if self.specifier is None else f"{self.name}({self.specifier})"
+
+
+def _url_host_matches(value: str, host: str) -> bool:
+    """True if ``value`` is a URL whose host equals ``host`` or is a subdomain of it."""
+    target = _idna_host(host)
+    if not target:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(value if "//" in value else f"//{value}")
+        actual = _idna_host(parsed.hostname or "")
+    except ValueError:
+        return False
+    return bool(actual) and (actual == target or actual.endswith(f".{target}"))
+
+
+def _idna_host(host: str) -> str:
+    """Canonicalize a host for comparison: lowercase, no trailing root dot, IDNA/ASCII form."""
+    host = host.rstrip(".").lower()
+    if not host:
+        return ""
+    try:
+        return host.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        return host
+
+
+def _path_glob_matches(pattern: str, value: str) -> bool:
+    """Glob match where ``*`` stays within one path segment and ``**`` crosses ``/``.
+
+    The value's ``.``/``..`` segments are normalized first, so a scope can't be escaped via
+    traversal (``/repo/src/../secrets`` is matched as ``/repo/secrets``).
+    """
+    return re.fullmatch(_glob_to_regex(pattern), posixpath.normpath(value)) is not None
+
+
+def _glob_to_regex(pattern: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return "".join(out)
+
+
+def _tool_arguments(value: object) -> ToolArguments:
+    """Flatten a tool-input payload to (field-name, string-value) pairs for scoping.
+
+    Breadth-first and bounded by ``_MAX_ARG_NODES`` so a deep or huge payload can't cause
+    ``RecursionError`` or unbounded work; shallow (authoritative) fields are kept first.
+    List items inherit their containing field's name.
+    """
+    out: list[tuple[str, str]] = []
+    queue: deque[tuple[str, object]] = deque([("", value)])
+    seen = 0
+    while queue and seen < _MAX_ARG_NODES:
+        key, node = queue.popleft()
+        seen += 1
+        if isinstance(node, str):
+            out.append((key, node))
+        elif isinstance(node, dict):
+            for sub_key, sub_value in node.items():
+                if isinstance(sub_key, str) and len(queue) < _MAX_ARG_NODES:
+                    queue.append((sub_key, sub_value))
+        elif isinstance(node, list):
+            for item in node:
+                if len(queue) < _MAX_ARG_NODES:
+                    queue.append((key, item))
+    return tuple(out)
 
 
 def _basename(arg: str) -> str:
@@ -299,7 +420,7 @@ class Policy:
         if isinstance(request, ShellRequest):
             return self._decide_shell(request.pipeline)
         if isinstance(request, ToolRequest):
-            return self._decide_tool(request.tool)
+            return self._decide_tool(request.tool, request.arguments)
         return Verdict(Decision.NoOpinion, "unrecognized request")
 
     def all_rules(self) -> Iterator[tuple[Decision, Rule]]:
@@ -369,9 +490,9 @@ class Policy:
             return Verdict(Decision.Allow, "inert shell builtin")
         return Verdict(Decision.NoOpinion, f"no rule matched {segment.argv[0] if segment.argv else '<empty>'!r}")
 
-    def _decide_tool(self, name: str) -> Verdict:
+    def _decide_tool(self, name: str, arguments: ToolArguments) -> Verdict:
         for decision, rule in self.all_rules():
-            if isinstance(rule, NamedTool) and rule.matches(name):
+            if isinstance(rule, NamedTool) and rule.matches(name, arguments):
                 return Verdict(decision, _format_rule(rule, decision))
         return Verdict(Decision.NoOpinion, f"no rule matched {name!r}")
 
@@ -1011,6 +1132,10 @@ def _parse_string_rule(text: str) -> Rule | None:
     bash_exact = re.fullmatch(r"Bash\((.+)\)", text)
     if bash_exact:
         return BashCommand(tuple(bash_exact.group(1).split()), trailing_wildcard=False)
+    named = re.fullmatch(r"(.+?)\((.*)\)", text)
+    if named:
+        spec = named.group(2)
+        return NamedTool(named.group(1), None if spec in ("", "*") else spec)
     if text:
         return NamedTool(text)
     return None
@@ -1250,7 +1375,7 @@ class ClaudeAdapter(AgentAdapter):
             tool_input = payload.get("tool_input")
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
-        return ToolRequest(tool_name)
+        return ToolRequest(tool_name, _tool_arguments(payload.get("tool_input")))
 
     def write_verdict(
         self,
@@ -1346,7 +1471,7 @@ class CodexAdapter(AgentAdapter):
                     command = metadata.get("command") if isinstance(metadata, dict) else None
                     return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
                 if isinstance(permission_type, str):
-                    return ToolRequest(permission_type)
+                    return ToolRequest(permission_type, _tool_arguments(metadata))
                 return None
         return ClaudeAdapter().parse_event(payload, event_name)
 
@@ -1518,7 +1643,7 @@ class OpencodeAdapter(AgentAdapter):
             command = metadata.get("command")
             return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
         if isinstance(permission_type, str):
-            return ToolRequest(permission_type)
+            return ToolRequest(_opencode_tool_name(permission_type), _tool_arguments(metadata))
         return None
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> None:
@@ -1550,19 +1675,25 @@ def _opencode_rule(tool: str, pattern: str) -> Rule | None:
         if pattern == "*":
             return None
         return BashCommand(tuple(pattern.split()))
-    return NamedTool(
-        {
-            "read": "Read",
-            "grep": "Grep",
-            "glob": "Glob",
-            "edit": "Edit",
-            "write": "Write",
-            "webfetch": "WebFetch",
-            "websearch": "WebSearch",
-            "task": "Task",
-            "skill": "Skill",
-        }.get(tool, tool)
-    )
+    return NamedTool(_opencode_tool_name(tool))
+
+
+_OPENCODE_TOOL_NAMES = {
+    "read": "Read",
+    "grep": "Grep",
+    "glob": "Glob",
+    "edit": "Edit",
+    "write": "Write",
+    "webfetch": "WebFetch",
+    "websearch": "WebSearch",
+    "task": "Task",
+    "skill": "Skill",
+}
+
+
+def _opencode_tool_name(tool: str) -> str:
+    """Canonicalize an OpenCode tool key (``webfetch``) to the policy name (``WebFetch``)."""
+    return _OPENCODE_TOOL_NAMES.get(tool, tool)
 
 
 def _opencode_decision(action: str) -> Decision | None:
@@ -1584,7 +1715,7 @@ class GeminiAdapter(AgentAdapter):
         if tool_name == "run_shell_command":
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
-        return ToolRequest(_gemini_tool_name(tool_name))
+        return ToolRequest(_gemini_tool_name(tool_name), _tool_arguments(tool_input))
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> None:
         if verdict.decision is Decision.NoOpinion:

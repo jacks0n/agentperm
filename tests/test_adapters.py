@@ -106,6 +106,7 @@ def test_claude_parse_non_bash_tool_event():
     request = adapter.parse_event({"tool_name": "Read", "tool_input": {"file_path": "/tmp/x"}}, "PreToolUse")
     assert isinstance(request, ToolRequest)
     assert request.tool == "Read"
+    assert ("file_path", "/tmp/x") in request.arguments  # input threaded through for scoping
 
 
 def test_claude_write_verdict_no_opinion_emits_empty():
@@ -321,11 +322,12 @@ def test_codex_parse_permission_request_bash_modern_envelope():
 def test_codex_parse_permission_request_other_tool():
     adapter = CodexAdapter()
     request = adapter.parse_event(
-        {"permission": {"type": "apply_patch"}},
+        {"permission": {"type": "apply_patch", "metadata": {"file_path": "/tmp/x"}}},
         "PermissionRequest",
     )
     assert isinstance(request, ToolRequest)
     assert request.tool == "apply_patch"
+    assert ("file_path", "/tmp/x") in request.arguments  # metadata threaded through for scoping
 
 
 def test_codex_pretooluse_passes_allow_through():
@@ -417,6 +419,17 @@ def test_opencode_parse_bash_event():
     assert request.pipeline.segments[0].argv == ("rm", "-rf", "/")
 
 
+def test_opencode_parse_non_bash_event_threads_arguments():
+    adapter = OpencodeAdapter()
+    request = adapter.parse_event(
+        {"permission": {"type": "webfetch", "metadata": {"url": "https://github.com/x"}}},
+        "permission.ask",
+    )
+    assert isinstance(request, ToolRequest)
+    assert request.tool == "WebFetch"  # canonicalized to match imported/written rule names
+    assert ("url", "https://github.com/x") in request.arguments  # metadata threaded through
+
+
 def test_opencode_write_verdict_emits_status():
     adapter = OpencodeAdapter()
     buf = io.StringIO()
@@ -456,6 +469,7 @@ def test_gemini_parse_read_tool_event():
     )
     assert isinstance(request, ToolRequest)
     assert request.tool == "Read"
+    assert ("absolute_path", "/tmp/x") in request.arguments  # input threaded through for scoping
 
 
 def test_gemini_ask_blocks_because_beforetool_cannot_prompt():

@@ -19,6 +19,7 @@ from agentperm import (
     coerce_for_pane_bypass,
     coerce_for_permission_mode,
     parse_pipeline,
+    parse_rule,
 )
 
 # ---- Rule matching --------------------------------------------------------
@@ -126,6 +127,88 @@ def test_named_tool_wildcard_matches_anything():
 def test_named_tool_prefix_glob():
     assert NamedTool("mcp__memory__*").matches("mcp__memory__lookup") is True
     assert NamedTool("mcp__memory__*").matches("mcp__other__x") is False
+
+
+def test_named_tool_no_specifier_ignores_arguments():
+    # Bare name (and the `*` specifier) match the tool regardless of input.
+    assert NamedTool("Read").matches("Read", (("file_path", "/etc/passwd"),)) is True
+    assert NamedTool("Read", "*").matches("Read", (("file_path", "/anything"),)) is True
+
+
+def test_named_tool_domain_specifier_matches_url_field():
+    rule = NamedTool("WebFetch", "domain:github.com")
+    assert rule.matches("WebFetch", (("url", "https://github.com/a/b"),)) is True
+    assert rule.matches("WebFetch", (("url", "https://api.github.com/x"),)) is True  # subdomain
+    assert rule.matches("WebFetch", (("url", "https://github.com./x"),)) is True  # trailing root dot
+    assert rule.matches("WebFetch", (("url", "https://evil.com/x"),)) is False
+    assert rule.matches("WebFetch", (("url", "https://notgithub.com/x"),)) is False  # not a suffix
+    assert rule.matches("WebFetch", ()) is False  # no URL to check
+
+
+def test_named_tool_domain_ignores_url_in_non_url_field():
+    # A github.com URL sitting in a non-URL field (e.g. prompt) must NOT satisfy the rule.
+    rule = NamedTool("WebFetch", "domain:github.com")
+    args = (("url", "https://evil.example/x"), ("prompt", "compare with https://github.com/x"))
+    assert rule.matches("WebFetch", args) is False
+
+
+def test_named_tool_domain_does_not_crash_on_malformed_url():
+    rule = NamedTool("WebFetch", "domain:github.com")
+    assert rule.matches("WebFetch", (("url", "http://[::1"),)) is False  # no exception
+
+
+def test_named_tool_domain_idna_normalizes_host():
+    # Unicode and punycode forms of the same host are equivalent in both directions.
+    assert NamedTool("WebFetch", "domain:bücher.example").matches(
+        "WebFetch", (("url", "https://xn--bcher-kva.example/x"),)
+    ) is True
+    assert NamedTool("WebFetch", "domain:xn--bcher-kva.example").matches(
+        "WebFetch", (("url", "https://bücher.example/x"),)
+    ) is True
+
+
+def test_named_tool_glob_specifier_matches_path_field():
+    rule = NamedTool("Read", "/etc/**")
+    assert rule.matches("Read", (("file_path", "/etc/passwd"),)) is True
+    assert rule.matches("Read", (("file_path", "/etc/ssl/cert.pem"),)) is True  # ** crosses /
+    assert rule.matches("Read", (("file_path", "/home/user/x"),)) is False
+    # `*` stays within one segment; the same mechanism scopes any tool, not just Read
+    assert NamedTool("Edit", "src/*").matches("Edit", (("file_path", "src/main.py"),)) is True
+    assert NamedTool("Edit", "src/*").matches("Edit", (("file_path", "src/sub/secret"),)) is False
+
+
+def test_named_tool_glob_normalizes_path_traversal():
+    # `..` is collapsed before matching, so a scope can't be escaped via traversal.
+    assert NamedTool("Read", "/repo/src/**").matches(
+        "Read", (("file_path", "/repo/src/../secrets/token"),)
+    ) is False
+    assert NamedTool("Read", "/repo/secrets/**").matches(
+        "Read", (("file_path", "/repo/src/../secrets/token"),)
+    ) is True
+
+
+def test_named_tool_glob_ignores_path_in_non_path_field():
+    # Path-like text in a non-path field (e.g. an edit's old_string) must NOT match.
+    rule = NamedTool("Edit", "src/**")
+    args = (("file_path", "/etc/passwd"), ("old_string", "import src.app"))
+    assert rule.matches("Edit", args) is False
+
+
+def test_named_tool_specifier_requires_name_match():
+    # specifier only applies once the name matches
+    assert NamedTool("Read", "/etc/**").matches("Write", (("file_path", "/etc/passwd"),)) is False
+
+
+def test_parse_round_trips_scoped_named_tool():
+    rule = parse_rule("WebFetch(domain:github.com)")
+    assert isinstance(rule, NamedTool)
+    assert (rule.name, rule.specifier) == ("WebFetch", "domain:github.com")
+    assert rule.serialize() == "WebFetch(domain:github.com)"
+    # `Name(*)` and `Name()` normalize to the bare name (no dead rules)
+    read_star = parse_rule("Read(*)")
+    read_bare = parse_rule("Read")
+    assert isinstance(read_star, NamedTool) and read_star.serialize() == "Read"
+    assert isinstance(read_bare, NamedTool) and read_bare.serialize() == "Read"
 
 
 # ---- Strictness aggregation ----------------------------------------------
