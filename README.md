@@ -58,7 +58,7 @@ After `install`, each agent calls agentperm before running a tool. Your native s
 Rules go in `allow`, `ask`, or `deny`. Three forms:
 
 - **`"Bash(git status:*)"`** — match a shell command by prefix (`git status` and anything after it). Drop the `:*` for an exact match, or use glob tokens: `*` matches one argument, `**` matches zero or more (e.g. `Bash(pnpm --dir * build:*)`).
-- **`"Read"`, `"WebFetch(domain:github.com)"`** — match a named, non-shell tool, optionally scoped.
+- **`"Read"`, `"WebFetch(domain:github.com)"`** — match a non-shell tool by name (`Read`, `mcp__memory__*`, `*`). An optional specifier scopes by the tool's input fields: `WebFetch(domain:github.com)` matches a URL field on that host or a subdomain; any other specifier is a path glob (`*` within a segment, `**` across) on the tool's path fields (`Read(/etc/**)`, `Edit(src/*)`). Bare name (or `(*)`) matches any input.
 - **Object form** — match on flags: `{ "tool": "Bash", "command": ["sed"], "when": { "hasOption": ["-i"] }, "reason": "..." }`.
 
 In a compound command the strictest segment decides — one unrecognized command turns the whole line into an `ask`, and **deny always wins**. Full grammar: [policy reference](docs/policy-reference.md).
@@ -103,6 +103,14 @@ Working inside `~/work/payments`, an agent sees both at once:
 So you allow a tool broadly once, and a single repo can both add its own commands and clamp down on the dangerous variants — without touching the global file.
 
 Create or edit the project file with `agentperm edit --local` (it writes to your git repo root). `import` and `install` always act on the global file and your agents' global hooks.
+
+## Examples
+
+Ready-to-crib policies in [`examples/`](examples/):
+
+- [`starter.agent-permissions.jsonc`](examples/starter.agent-permissions.jsonc) — a minimal global policy to begin from: read-only shell and tools allowed, `sed -i` asks, `sudo` / `rm -rf` denied.
+- [`global.agent-permissions.jsonc`](examples/global.agent-permissions.jsonc) — a fuller real-world global policy: a large allow-list of read-only AWS and CLI commands, the `sed -i` ask rule, a deny list, and shell-redirection defaults.
+- [`project.agent-permissions.jsonc`](examples/project.agent-permissions.jsonc) — this repo's own per-project file, allowing just its dev-tooling commands on top of whatever your global policy permits.
 
 ## Commands
 

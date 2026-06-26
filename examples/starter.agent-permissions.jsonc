@@ -1,0 +1,40 @@
+// A minimal starting policy. `agentperm edit` creates an empty one; grow it from here.
+// Global file: ~/.agent-permissions.jsonc  ·  per-repo: <repo>/.agent-permissions.jsonc (deny wins across both).
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      // read-only shell
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(rg:*)",
+      "Bash(grep:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      // non-shell tools
+      "Read",
+      "Grep",
+      "WebFetch(domain:github.com)"
+    ],
+    "ask": [
+      {
+        "tool": "Bash",
+        "command": ["sed", "gsed"],
+        "when": { "hasOption": ["-i", "--in-place"] },
+        "reason": "sed in-place editing changes files"
+      }
+    ],
+    "deny": [
+      "Bash(sudo:*)",
+      "Bash(rm -rf:*)"
+    ]
+  },
+  "shell": {
+    "redirection": {
+      "stderrToDevNull": "allow",
+      "stdoutToFile": "ask",
+      "appendToFile": "ask"
+    }
+  }
+}

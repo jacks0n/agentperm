@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      "Bash(uv run ruff check:*)",
+      "Bash(just check:*)",
+      "Bash(.venv/bin/pytest:*)",
+      "Bash(.venv/bin/ruff:*)",
+      "Bash(.venv/bin/basedpyright:*)"
+    ]
+  }
+}
