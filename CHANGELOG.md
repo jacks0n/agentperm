@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] — 2026-06-26
 
 ### Added
 
@@ -70,5 +70,5 @@ Initial public release — one permission policy for Claude Code, Codex CLI, Ope
 - Gemini import is not implemented (regex DSL is hard to round-trip safely).
 - POSIX `--` argument terminator is not tracked by `BashOption.matches` — flags after `--` may match. Conservative direction is `Ask`, which is correct for a permission policy.
 
-[Unreleased]: https://github.com/jacks0n/agentperm/compare/v0.1.0...HEAD
+[0.2.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.1.0
