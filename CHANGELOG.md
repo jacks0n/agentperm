@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `agentperm edit --local` / `--global` choose which policy file to open. `--global` (default) edits `~/.agent-permissions.jsonc`; `--local` edits the current git repo's root `.agent-permissions.jsonc` — the same project file `check` merges at decision time — creating it with the default policy if missing. `--local` exits non-zero when not inside a git worktree rather than writing a stray file to the current directory. `import` and `install` remain global-only.
+
+### Changed
+
+- `check` now resolves the project-local policy strictly from the git repository root (consistent with `edit --local`). A `.agent-permissions.jsonc` in a non-git working directory is no longer read as a project policy.
+
+### Fixed
+
+- The `edit` editor invocation is split with `shlex`, so `$VISUAL` / `$EDITOR` values that include arguments (e.g. `code --wait`) launch correctly instead of failing to find an executable.
+
 ## [0.1.0] — 2026-06-22
 
 Initial public release — one permission policy for Claude Code, Codex CLI, OpenCode, and Gemini CLI.
@@ -56,4 +70,5 @@ Initial public release — one permission policy for Claude Code, Codex CLI, Ope
 - Gemini import is not implemented (regex DSL is hard to round-trip safely).
 - POSIX `--` argument terminator is not tracked by `BashOption.matches` — flags after `--` may match. Conservative direction is `Ask`, which is correct for a permission policy.
 
+[Unreleased]: https://github.com/jacks0n/agentperm/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.1.0

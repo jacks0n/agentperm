@@ -1122,7 +1122,8 @@ def merged_policy(local_root: Path | None) -> Policy:
     return policy
 
 
-def project_root(cwd: Path) -> Path:
+def _git_toplevel(cwd: Path) -> Path | None:
+    """The git worktree root containing ``cwd``, or ``None`` if there isn't one."""
     try:
         output = subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"],
@@ -1130,11 +1131,9 @@ def project_root(cwd: Path) -> Path:
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
-        if output:
-            return Path(output)
     except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-    return cwd
+        return None
+    return Path(output) if output else None
 
 
 def write_default_policy(path: Path) -> None:
@@ -1944,7 +1943,24 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--agent", required=True, choices=[a.value for a in AgentName])
     check.add_argument("--event", required=True)
 
-    sub.add_parser("edit", help="open the policy file in $EDITOR (creates a default if missing)")
+    edit = sub.add_parser(
+        "edit",
+        help="open the policy file in $VISUAL/$EDITOR (creates a default if missing)",
+    )
+    edit_scope = edit.add_mutually_exclusive_group()
+    edit_scope.add_argument(
+        "--global",
+        dest="edit_local",
+        action="store_false",
+        help="edit the global policy at ~/.agent-permissions.jsonc (default)",
+    )
+    edit_scope.add_argument(
+        "--local",
+        dest="edit_local",
+        action="store_true",
+        help="edit this repo's policy at <repo root>/.agent-permissions.jsonc",
+    )
+    edit.set_defaults(edit_local=False)
 
     args = parser.parse_args(argv)
 
@@ -1955,7 +1971,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "check":
         return _cmd_check(AgentName(args.agent), args.event)
     if args.command == "edit":
-        return _cmd_edit()
+        return _cmd_edit(local=args.edit_local)
     parser.error(f"unknown command {args.command}")
     return 2
 
@@ -2051,7 +2067,7 @@ def _cmd_check(agent: AgentName, event: str) -> int:
     cwd_value = payload.get("cwd")
     cwd = Path(cwd_value) if isinstance(cwd_value, str) else Path(os.getcwd())
     try:
-        policy = merged_policy(local_root=project_root(cwd))
+        policy = merged_policy(local_root=_git_toplevel(cwd))
     except PolicyError as error:
         # Fail closed: prompt rather than auto-allow when the policy file is broken.
         _trace(agent, event, payload, None, f"policy load failed: {error}")
@@ -2257,12 +2273,22 @@ def coerce_for_pane_bypass(
     )
 
 
-def _cmd_edit() -> int:
-    path = Path.home() / POLICY_FILENAME
+def _cmd_edit(*, local: bool = False) -> int:
+    if local:
+        # --local targets the project policy `check` reads at the git repo root.
+        # Require a worktree so we never create a stray file in an unrelated cwd.
+        root = _git_toplevel(Path.cwd())
+        if root is None:
+            print("edit --local: not inside a git repository", file=sys.stderr)
+            return 2
+        path = root / POLICY_FILENAME
+    else:
+        path = Path.home() / POLICY_FILENAME
     if not path.exists():
         write_default_policy(path)
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or _default_editor()
-    return subprocess.call([editor, str(path)])
+    # shlex.split so $VISUAL/$EDITOR values with arguments (e.g. "code --wait") work.
+    return subprocess.call([*shlex.split(editor), str(path)])
 
 
 def _default_editor() -> str:
