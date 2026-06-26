@@ -122,19 +122,22 @@ Bypass applies to *future* permission decisions. A command already approved by `
 
 ## `edit`
 
-Opens `~/.agent-permissions.jsonc` in `$EDITOR` (or `$VISUAL`, falling back to `vi`). Creates the file with a sensible default policy if it doesn't exist.
+Opens the policy file in your editor — `$VISUAL`, then `$EDITOR`, falling back to the first installed of `nvim` / `vim` / `vi` / `nano`. Creates the file with an empty default policy (`allow` / `ask` / `deny` all empty) if it doesn't exist.
 
 ```sh
-agentperm edit
+agentperm edit [--global | --local]
 ```
 
-The default policy ships with read-only commands (cat, ls, grep, etc.) and read-only git commands on the allow list, `sed -i` on the ask list, and `sudo` / `rm -rf /` on the deny list. Edit to taste.
+- `--global` (default) edits `~/.agent-permissions.jsonc`.
+- `--local` edits the current git repository's root `.agent-permissions.jsonc` — the project-local file that `check` merges at decision time. Exits non-zero if you are not inside a git worktree, rather than creating a stray file in an unrelated directory.
+
+The created file has no rules; add your own (see the [policy reference](policy-reference.md)). The exit code is the editor's own exit code.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | Normal — the bridge ran to completion. For `check`, this is independent of the verdict; the verdict itself is on stdout. |
-| `2` | Argument parsing error. |
+| `2` | Usage or configuration error — argument parse failure, or `edit --local` run outside a git worktree. |
 
 The bridge does not signal "deny" via exit code; it always emits its decision via the stdout envelope. This matches every adapter's expectation that a non-zero exit means "the hook itself failed", not "policy denied."
