@@ -22,6 +22,7 @@ from agentperm import (
     GeminiAdapter,
     InstallMode,
     JsonObject,
+    NamedTool,
     OpencodeAdapter,
     Policy,
     ShellRequest,
@@ -446,6 +447,36 @@ def test_opencode_no_opinion_emits_empty():
     with redirect_stdout(buf):
         adapter.write_verdict(Verdict(Decision.NoOpinion, ""), "permission.ask")
     assert json.loads(buf.getvalue()) == {}
+
+
+def test_opencode_import_preserves_scoped_non_bash_patterns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    config = tmp_path / "opencode.json"
+    config.write_text(
+        json.dumps(
+            {
+                "permission": {
+                    "read": {"src/**": "allow"},
+                    "webfetch": {"domain:github.com": "ask"},
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(OpencodeAdapter, "config_path", config)
+
+    rules = list(OpencodeAdapter().import_native_rules())
+
+    assert rules == [
+        (Decision.Allow, NamedTool("Read", "src/**")),
+        (Decision.Ask, NamedTool("WebFetch", "domain:github.com")),
+    ]
+    policy = Policy(allow=(rules[0][1],), ask=(rules[1][1],))
+    assert policy.decide(ToolRequest("Read", (("file_path", "src/main.py"),))).decision is Decision.Allow
+    assert policy.decide(ToolRequest("Read", (("file_path", "README.md"),))).decision is Decision.NoOpinion
+    assert (
+        policy.decide(ToolRequest("WebFetch", (("url", "https://github.com/jacks0n/agentperm"),))).decision
+        is Decision.Ask
+    )
+    assert policy.decide(ToolRequest("WebFetch", (("url", "https://example.com"),))).decision is Decision.NoOpinion
 
 
 # ---- Gemini adapter -------------------------------------------------------
