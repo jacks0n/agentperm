@@ -7,7 +7,7 @@ layout {
     default_tab_template {
         // 1-row borderless slot at the top of every tab, owned by the plugin.
         pane size=1 borderless=true {
-            plugin location="file:~/.config/zellij/plugins/agentperm_indicator.wasm"
+            plugin location="file:~/.config/zellij/plugins/agentperm-indicator.wasm"
         }
         children
     }
@@ -16,7 +16,7 @@ layout {
 keybinds {
     shared {
         bind "Ctrl Shift b" {
-            MessagePlugin "file:~/.config/zellij/plugins/agentperm_indicator.wasm" {
+            MessagePlugin "file:~/.config/zellij/plugins/agentperm-indicator.wasm" {
                 name "toggle"
             }
         }

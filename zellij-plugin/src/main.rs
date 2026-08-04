@@ -26,6 +26,15 @@ impl ZellijPlugin for State {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
         let xdg_base = std::env::var("XDG_CACHE_HOME").unwrap_or_else(|_| format!("{home}/.cache"));
         let session = std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default();
+        if session.is_empty()
+            || session.contains('/')
+            || session.contains('\\')
+            || session.contains('\0')
+            || session.contains("..")
+        {
+            eprintln!("agentperm: refusing ZELLIJ_SESSION_NAME with path traversal characters");
+            return;
+        }
         self.cache_dir = PathBuf::from(xdg_base)
             .join("agentperm")
             .join("bypass")

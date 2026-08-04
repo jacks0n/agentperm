@@ -19,6 +19,34 @@ def test_single_command_argv():
     assert pipeline.segments[0].redirects == ()
 
 
+def test_quoted_heredoc_preserves_literal_stdin_source():
+    pipeline = parse_pipeline("python - <<'PY'\nprint('ok')\nPY\n")
+    [segment] = pipeline.segments
+    assert segment.argv == ("python", "-")
+    assert segment.stdin_source == "print('ok')\n"
+    assert segment.stdin_dynamic is False
+
+
+def test_unquoted_expanding_heredoc_marks_stdin_dynamic():
+    pipeline = parse_pipeline("python - <<PY\nprint('$VALUE')\nPY\n")
+    [segment] = pipeline.segments
+    assert segment.stdin_source == "print('$VALUE')\n"
+    assert segment.stdin_dynamic is True
+
+
+def test_backslash_quoted_heredoc_is_literal():
+    pipeline = parse_pipeline("python - <<\\PY\nprint('ok')\nPY\n")
+    [segment] = pipeline.segments
+    assert segment.stdin_source == "print('ok')\n"
+    assert segment.stdin_dynamic is False
+
+
+def test_double_quoted_multiline_argument_preserves_newlines_and_unescapes_quotes():
+    pipeline = parse_pipeline('python -c "\nprint(\\"ok\\")\n"')
+    [segment] = pipeline.segments
+    assert segment.argv == ("python", "-c", '\nprint("ok")\n')
+
+
 def test_fd_dup_2_to_1_is_not_a_file_write():
     """The original bug: regex parsed `2>&1` as a file write to '1'."""
     pipeline = parse_pipeline("cat foo 2>&1")
@@ -154,6 +182,42 @@ def test_basename_match_for_command_path():
     [segment] = pipeline.segments
     rule = BashCommand(("ls",))
     assert rule.matches(segment) is True
+
+
+def test_backslash_escaped_command_name_unescapes_to_literal():
+    """``\\rm`` is the standard alias-bypass idiom — outside quotes, bash removes
+    the backslash and takes ``r`` literally, so argv[0] must be ``rm``, not
+    ``\\rm``, or a deny rule keyed on ``rm`` is silently defeated."""
+    pipeline = parse_pipeline("\\rm -rf /")
+    [segment] = pipeline.segments
+    assert segment.argv == ("rm", "-rf", "/")
+
+
+def test_backslash_escaped_flag_unescapes_to_literal():
+    pipeline = parse_pipeline("git push --f\\orce origin")
+    [segment] = pipeline.segments
+    assert segment.argv == ("git", "push", "--force", "origin")
+
+
+def test_backslash_escaped_space_stays_one_argv_token():
+    """``\\ `` inside a word escapes the space itself — it's still one token,
+    just with a literal space in it, not a separator."""
+    pipeline = parse_pipeline("rm\\ -rf /")
+    [segment] = pipeline.segments
+    assert segment.argv == ("rm -rf", "/")
+
+
+def test_single_quoted_command_name_unquotes():
+    """``'rm' -rf /`` — quoting the command name is another alias-bypass idiom."""
+    pipeline = parse_pipeline("'rm' -rf /")
+    [segment] = pipeline.segments
+    assert segment.argv == ("rm", "-rf", "/")
+
+
+def test_double_quoted_command_name_unquotes():
+    pipeline = parse_pipeline('"rm" -rf /')
+    [segment] = pipeline.segments
+    assert segment.argv == ("rm", "-rf", "/")
 
 
 def test_shell_c_unwraps_quoted_command():
@@ -345,6 +409,23 @@ def test_unparseable_returns_unparseable_reason():
     assert pipeline.unparseable_reason
 
 
+def test_comments_are_inert_in_compound_commands():
+    pipeline = parse_pipeline(
+        "# Inspect imports\n"
+        'echo "=== domain.py imports ==="\n'
+        "grep -E '^(from|import) ' src/agentperm/domain.py | head -20\n"
+        "# Continue with the next module\n"
+        "grep -E '^(from|import) ' src/agentperm/errors.py"
+    )
+    assert pipeline.parseable
+    assert [segment.argv for segment in pipeline.segments] == [
+        ("echo", "=== domain.py imports ==="),
+        ("grep", "-E", "^(from|import) ", "src/agentperm/domain.py"),
+        ("head", "-20"),
+        ("grep", "-E", "^(from|import) ", "src/agentperm/errors.py"),
+    ]
+
+
 def test_simple_expansion_kept_as_opaque_arg():
     """``echo $HOME`` — variable expansion is opaque source text, not a fail."""
     pipeline = parse_pipeline("echo $HOME")
@@ -502,6 +583,39 @@ def test_declaration_with_substitution_extracts_inner():
     assert [s.argv for s in pipeline.segments] == [("export",), ("curl", "evil")]
 
 
+def test_bare_variable_assignment_is_parseable():
+    """``SP=/tmp/x`` with no command on the same statement parses as its own
+    ``variable_assignment`` node (distinct from a ``command``'s assignment child in
+    ``FOO=bar cmd``), and previously hit ``unsupported shell node``."""
+    pipeline = parse_pipeline("SP=/tmp/scratch")
+    assert pipeline.parseable
+    assert pipeline.segments == ()
+
+
+def test_bare_variable_assignment_then_command_both_parse():
+    """The common ``SP=/tmp/x\\ncmd --uses "$SP"`` shape: the assignment statement
+    contributes no segment of its own, but the following command still parses."""
+    pipeline = parse_pipeline('SP=/tmp/scratch\necho "$SP/out.txt"')
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("echo", "$SP/out.txt")]
+
+
+def test_multiple_bare_assignments_on_one_line_are_parseable():
+    """``FOO=bar BAZ=qux`` with no command wraps in a ``variable_assignments``
+    (plural) node — must not hit ``unsupported shell node`` either."""
+    pipeline = parse_pipeline("FOO=bar BAZ=qux")
+    assert pipeline.parseable
+    assert pipeline.segments == ()
+
+
+def test_bare_variable_assignment_with_substitution_extracts_inner():
+    """``SP=$(rm -rf /)`` — a bare assignment's value can still execute a
+    substitution; the inner command must be extracted for policy evaluation."""
+    pipeline = parse_pipeline("SP=$(rm -rf /)")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("rm", "-rf", "/")]
+
+
 def test_heredoc_command_passes_through():
     pipeline = parse_pipeline("cat <<EOF\nhi\nEOF\n")
     assert pipeline.parseable
@@ -629,6 +743,33 @@ def test_substitution_nested_in_redirect_target_word_extracts_inner_command():
         pipeline = parse_pipeline(command)
         assert pipeline.parseable, command
         assert ("rm", "-rf", "/") in [s.argv for s in pipeline.segments], command
+
+
+def test_quoted_redirect_target_is_parseable():
+    """``cmd > "out.txt"`` — a plain quoted target (no expansion) previously hit
+    ``redirect target unparseable`` because only bare ``word``/``number`` were accepted."""
+    pipeline = parse_pipeline('echo hi > "out.txt"')
+    assert pipeline.parseable
+    [segment] = pipeline.segments
+    [redirect] = segment.redirects
+    assert redirect.target == "out.txt"
+
+
+def test_variable_expansion_redirect_target_is_parseable():
+    """``cmd > $SP/out.txt`` — the common ``$VAR``-relative redirect target shape.
+    A variable expansion isn't a substitution (no subprocess runs), so the redirect
+    is just an opaque write target, same as a literal path."""
+    for command, expected_target in (
+        ("echo hi > $SP/out.txt", "$SP/out.txt"),
+        ("echo hi > ${SP}/out.txt", "${SP}/out.txt"),
+        ("echo hi > $SP", "$SP"),
+        ('echo hi > "$SP/out.txt"', "$SP/out.txt"),
+    ):
+        pipeline = parse_pipeline(command)
+        assert pipeline.parseable, command
+        [segment] = pipeline.segments
+        [redirect] = segment.redirects
+        assert redirect.target == expected_target, command
 
 
 def test_redirected_shell_c_spillover_not_appended_to_inner_command():

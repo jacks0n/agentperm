@@ -2489,15 +2489,6 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
-version = "0.52.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
 version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
@@ -2760,9 +2751,9 @@ dependencies = [
 
 [[package]]
 name = "zellij-tile"
-version = "0.44.2"
+version = "0.44.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f5d8a3bb094f49b152493e9a2be94e2a988e36c7a0b83e125865e6b3c6f7131"
+checksum = "117cdb1e488beee0a34aa11e108142b082b0c13a7fca165dc624a9ffb808db42"
 dependencies = [
  "clap",
  "prost",
@@ -2775,9 +2766,9 @@ dependencies = [
 
 [[package]]
 name = "zellij-utils"
-version = "0.44.2"
+version = "0.44.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd3b8f962e5ffbfc3c378bbaf63893f469a652b57cbc1d95adc74f167aa023eb"
+checksum = "0b823df41cf824f6b9db45f50c3b2bc02cc66d9dd4db223392f19b02cff4a876"
 dependencies = [
  "anyhow",
  "backtrace",
@@ -2822,7 +2813,7 @@ dependencies = [
  "url",
  "uuid",
  "winapi",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

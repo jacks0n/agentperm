@@ -219,3 +219,29 @@ def test_check_ignores_local_policy_outside_git_repo(
     monkeypatch.chdir(neutral)
 
     assert _decision(_run_check(monkeypatch, capsys, "rm foo", cwd=loose)) != "deny"
+
+
+def test_check_applies_python_readonly_ast_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / POLICY_FILENAME).write_text(
+        '{"version":1,"permissions":{"allow":["Python(readonly)"]}}'
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    readonly = _run_check(
+        monkeypatch,
+        capsys,
+        'python -c "import agentperm; print(len(agentperm.__all__))"',
+        cwd=tmp_path,
+    )
+    mutation = _run_check(
+        monkeypatch,
+        capsys,
+        'python -c "open(\'out\', \'w\')"',
+        cwd=tmp_path,
+    )
+    assert _decision(readonly) == "allow"
+    assert _decision(mutation) == "ask"

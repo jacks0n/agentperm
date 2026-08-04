@@ -12,6 +12,7 @@ import pytest
 import tomlkit
 
 import agentperm
+import agentperm.adapters.base
 from agentperm import (
     AgentName,
     BashCommand,
@@ -22,18 +23,21 @@ from agentperm import (
     GeminiAdapter,
     InstallMode,
     JsonObject,
+    JsonValue,
+    KiroAdapter,
+    NamedTool,
     OpencodeAdapter,
     Policy,
+    Segment,
     ShellRequest,
     ToolRequest,
     Verdict,
-    _cmd_check,  # pyright: ignore[reportPrivateUsage]
-    _effective_event,  # pyright: ignore[reportPrivateUsage]
-    _is_bridge_hook,  # pyright: ignore[reportPrivateUsage]
-    _resolve_install_mode,  # pyright: ignore[reportPrivateUsage]
-    _select_adapter,  # pyright: ignore[reportPrivateUsage]
     parse_rule,
 )
+from agentperm.adapters import select_adapter
+from agentperm.adapters.base import is_bridge_hook
+from agentperm.adapters.kiro import kiro_tool_name
+from agentperm.cli import cmd_check, effective_event, resolve_install_mode
 
 # ---- Rule round-trip ------------------------------------------------------
 
@@ -146,6 +150,21 @@ def test_claude_permission_request_emits_allow_behavior():
     assert payload["hookSpecificOutput"]["decision"]["behavior"] == "allow"
 
 
+def test_claude_import_native_rules_skips_bare_bash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "permissions": {
+            "allow": ["Bash", "Read"],
+            "deny": ["Bash"],
+        }
+    }))
+    monkeypatch.setattr(ClaudeAdapter, "settings_path", settings)
+    rules = list(ClaudeAdapter().import_native_rules())
+    names = [(d.value, r.serialize()) for d, r in rules]
+    assert ("allow", "Read") in names
+    assert not any(s == "Bash" for _, s in names)
+
+
 # ---- Claude MCP bypass (updatedInput injection) --------------------------
 
 
@@ -219,7 +238,7 @@ def test_claude_mcp_bypass_injects_approval_policy_without_policy_match(
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     buf = io.StringIO()
     with redirect_stdout(buf):
-        rc = _cmd_check(AgentName.Claude, "PreToolUse")
+        rc = cmd_check(AgentName.Claude, "PreToolUse")
     assert rc == 0
     output = json.loads(buf.getvalue())
     hook_output = output["hookSpecificOutput"]
@@ -248,7 +267,7 @@ def test_claude_mcp_bypass_skips_non_codex_mcp_tools(tmp_path: Path, monkeypatch
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = _cmd_check(AgentName.Claude, "PreToolUse")
+            rc = cmd_check(AgentName.Claude, "PreToolUse")
         assert rc == 0
         assert json.loads(buf.getvalue()) == {}
 
@@ -272,14 +291,14 @@ def test_claude_bypass_defers_entirely(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({**base, "permission_mode": "bypassPermissions"})))
     buf = io.StringIO()
     with redirect_stdout(buf):
-        assert _cmd_check(AgentName.Claude, "PreToolUse") == 0
+        assert cmd_check(AgentName.Claude, "PreToolUse") == 0
     assert json.loads(buf.getvalue()) == {}
 
     # default mode → still evaluated (the unanalyzable wrapper asks)
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({**base, "permission_mode": "default"})))
     buf = io.StringIO()
     with redirect_stdout(buf):
-        assert _cmd_check(AgentName.Claude, "PreToolUse") == 0
+        assert cmd_check(AgentName.Claude, "PreToolUse") == 0
     assert json.loads(buf.getvalue())["hookSpecificOutput"]["permissionDecision"] == "ask"
 
 
@@ -397,7 +416,7 @@ def test_codex_permission_request_under_pane_bypass_allows_unknown_command(
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     buf = io.StringIO()
     with redirect_stdout(buf):
-        rc = _cmd_check(AgentName.Codex, "PermissionRequest")
+        rc = cmd_check(AgentName.Codex, "PermissionRequest")
     assert rc == 0
     out = json.loads(buf.getvalue())
     # Codex's PermissionRequest Allow envelope intentionally omits a message;
@@ -448,6 +467,21 @@ def test_opencode_no_opinion_emits_empty():
     assert json.loads(buf.getvalue()) == {}
 
 
+@pytest.mark.parametrize("action,expected", [("deny", Decision.Deny), ("ask", Decision.Ask), ("allow", Decision.Allow)])
+def test_opencode_import_blanket_bash(
+    action: str, expected: Decision, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    config = tmp_path / "opencode.json"
+    config.write_text(json.dumps({"permission": {"bash": action}}))
+    monkeypatch.setattr(OpencodeAdapter, "config_path", config)
+    rules = list(OpencodeAdapter().import_native_rules())
+    assert len(rules) == 1
+    decision, rule = rules[0]
+    assert decision is expected
+    assert isinstance(rule, BashCommand)
+    assert rule.matches(Segment(argv=("rm", "-rf", "/"), redirects=()))
+
+
 # ---- Gemini adapter -------------------------------------------------------
 
 
@@ -488,8 +522,8 @@ def test_auto_adapter_selects_gemini_from_beforetool_event():
         "tool_name": "run_shell_command",
         "tool_input": {"command": "ls"},
     }
-    event = _effective_event("auto", payload)
-    adapter = _select_adapter(AgentName.Auto, event, payload)
+    event = effective_event("auto", payload)
+    adapter = select_adapter(AgentName.Auto, event, payload)
     assert isinstance(adapter, GeminiAdapter)
 
 
@@ -499,8 +533,8 @@ def test_auto_adapter_selects_claude_permission_request_from_claude_payload():
         "tool_name": "Bash",
         "tool_input": {"command": "ls"},
     }
-    event = _effective_event("auto", payload)
-    adapter = _select_adapter(AgentName.Auto, event, payload)
+    event = effective_event("auto", payload)
+    adapter = select_adapter(AgentName.Auto, event, payload)
     assert isinstance(adapter, ClaudeAdapter)
 
 
@@ -509,8 +543,8 @@ def test_auto_adapter_selects_codex_permission_request_from_codex_payload():
         "hook_event_name": "PermissionRequest",
         "permission": {"type": "Bash", "metadata": {"command": "ls"}},
     }
-    event = _effective_event("auto", payload)
-    adapter = _select_adapter(AgentName.Auto, event, payload)
+    event = effective_event("auto", payload)
+    adapter = select_adapter(AgentName.Auto, event, payload)
     assert isinstance(adapter, CodexAdapter)
 
 
@@ -529,8 +563,11 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(CodexAdapter, "config_path", tmp_path / ".codex/config.toml")
     monkeypatch.setattr(GeminiAdapter, "settings_path", tmp_path / ".gemini/settings.json")
     monkeypatch.setattr(OpencodeAdapter, "plugin_path", tmp_path / ".config/opencode/plugins/agentperm.js")
+    monkeypatch.setattr(KiroAdapter, "hooks_path", tmp_path / ".kiro/hooks/agentperm.json")
+    monkeypatch.setattr(KiroAdapter, "agents_path", tmp_path / ".kiro/agents")
+    monkeypatch.setattr(KiroAdapter, "workspace_root", tmp_path / "workspace")
     monkeypatch.setattr(
-        agentperm,
+        agentperm.adapters.base,
         "_rulesync_hooks_path",
         lambda: tmp_path / ".rulesync/hooks.json",
     )
@@ -784,25 +821,25 @@ def test_install_dry_run_writes_nothing(fake_home: Path):
 def test_resolve_install_mode_picks_rulesync_when_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / ".rulesync").mkdir()
-    assert _resolve_install_mode("auto") is InstallMode.Rulesync
+    assert resolve_install_mode("auto") is InstallMode.Rulesync
 
 
 def test_resolve_install_mode_picks_direct_when_no_rulesync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert _resolve_install_mode("auto") is InstallMode.Direct
+    assert resolve_install_mode("auto") is InstallMode.Direct
 
 
 def test_resolve_install_mode_explicit_rulesync_requires_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     with pytest.raises(agentperm.PolicyError):
-        _resolve_install_mode("rulesync")
+        resolve_install_mode("rulesync")
 
 
-# ---- _is_bridge_hook ownership ------------------------------------------
+# ---- is_bridge_hook ownership ------------------------------------------
 
 
 def test_is_bridge_hook_matches_bridge_command():
-    assert _is_bridge_hook({"type": "command", "command": "/abs/agentperm check --agent claude --event PreToolUse"})
+    assert is_bridge_hook({"type": "command", "command": "/abs/agentperm check --agent claude --event PreToolUse"})
 
 
 def test_is_bridge_hook_rejects_unrelated_wrapper_with_substring():
@@ -810,21 +847,21 @@ def test_is_bridge_hook_rejects_unrelated_wrapper_with_substring():
     ``agentperm`` (e.g. ``agentperm-debug``). Strict basename +
     second-arg ``check`` is required to identify our own entries.
     """
-    assert not _is_bridge_hook({"type": "command", "command": "/usr/local/bin/agentperm-debug trace"})
+    assert not is_bridge_hook({"type": "command", "command": "/usr/local/bin/agentperm-debug trace"})
 
 
 def test_is_bridge_hook_rejects_bridge_with_other_subcommand():
     """A user's manual ``agentperm edit`` should not be treated as installer-owned."""
-    assert not _is_bridge_hook({"type": "command", "command": "/abs/agentperm edit"})
+    assert not is_bridge_hook({"type": "command", "command": "/abs/agentperm edit"})
 
 
 def test_is_bridge_hook_rejects_non_dict():
-    assert not _is_bridge_hook("not a dict")
-    assert not _is_bridge_hook(None)
+    assert not is_bridge_hook("not a dict")
+    assert not is_bridge_hook(None)
 
 
 def test_is_bridge_hook_rejects_empty_command():
-    assert not _is_bridge_hook({"type": "command", "command": "   "})
+    assert not is_bridge_hook({"type": "command", "command": "   "})
 
 
 # ---- shell-safe path embedding -------------------------------------------
@@ -897,3 +934,432 @@ def test_claude_pretooluse_no_match_when_subcommand_differs():
     )
     assert isinstance(request, ShellRequest)
     assert policy.decide(request).decision is Decision.NoOpinion
+
+
+# ---- Kiro adapter ---------------------------------------------------------
+
+
+def test_kiro_parse_shell_event():
+    adapter = KiroAdapter()
+    request = adapter.parse_event(
+        {"tool_name": "shell", "tool_input": {"command": "ls -la"}},
+        "preToolUse",
+    )
+    assert isinstance(request, ShellRequest)
+    assert request.pipeline.segments[0].argv == ("ls", "-la")
+
+
+def test_kiro_parse_execute_bash_alias():
+    adapter = KiroAdapter()
+    request = adapter.parse_event(
+        {"tool_name": "execute_bash", "tool_input": {"command": "git status"}},
+        "preToolUse",
+    )
+    assert isinstance(request, ShellRequest)
+    assert request.pipeline.segments[0].argv == ("git", "status")
+
+
+def test_kiro_parse_execute_cmd_alias():
+    adapter = KiroAdapter()
+    request = adapter.parse_event(
+        {"tool_name": "execute_cmd", "tool_input": {"command": "npm test"}},
+        "preToolUse",
+    )
+    assert isinstance(request, ShellRequest)
+    assert request.pipeline.segments[0].argv == ("npm", "test")
+
+
+def test_kiro_parse_read_tool():
+    adapter = KiroAdapter()
+    request = adapter.parse_event(
+        {"tool_name": "read", "tool_input": {"operations": [{"mode": "Line", "path": "/tmp/x"}]}},
+        "preToolUse",
+    )
+    assert isinstance(request, ToolRequest)
+    assert request.tool == "Read"
+    assert ("path", "/tmp/x") in request.arguments
+
+
+def test_kiro_parse_grep_tool():
+    adapter = KiroAdapter()
+    request = adapter.parse_event(
+        {"tool_name": "grep", "tool_input": {"pattern": "TODO", "path": "/src"}},
+        "preToolUse",
+    )
+    assert isinstance(request, ToolRequest)
+    assert request.tool == "Grep"
+
+
+def test_kiro_parse_web_fetch_tool():
+    adapter = KiroAdapter()
+    request = adapter.parse_event(
+        {"tool_name": "web_fetch", "tool_input": {"url": "https://example.com"}},
+        "preToolUse",
+    )
+    assert isinstance(request, ToolRequest)
+    assert request.tool == "WebFetch"
+    assert ("url", "https://example.com") in request.arguments
+
+
+def test_kiro_parse_mcp_tool_passthrough():
+    adapter = KiroAdapter()
+    request = adapter.parse_event(
+        {"tool_name": "@git/git_status", "tool_input": {}},
+        "preToolUse",
+    )
+    assert isinstance(request, ToolRequest)
+    assert request.tool == "@git/git_status"
+
+
+def test_kiro_parse_missing_tool_name():
+    adapter = KiroAdapter()
+    assert adapter.parse_event({"tool_input": {"command": "ls"}}, "preToolUse") is None
+
+
+@pytest.mark.parametrize("tool_input", [
+    None,
+    "not a dict",
+    {"other_key": "value"},
+    {"command": ""},
+    {"command": 42},
+])
+def test_kiro_shell_with_missing_or_bad_command_is_unparseable(tool_input: JsonValue):
+    adapter = KiroAdapter()
+    request = adapter.parse_event({"tool_name": "shell", "tool_input": tool_input}, "preToolUse")
+    assert isinstance(request, ShellRequest)
+    assert not request.pipeline.parseable
+
+
+def test_kiro_write_verdict_allow(capsys: pytest.CaptureFixture[str]):
+    adapter = KiroAdapter()
+    rc = adapter.write_verdict(Verdict(Decision.Allow, "allowed by rule"), "preToolUse")
+    assert rc == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_kiro_write_verdict_no_opinion(capsys: pytest.CaptureFixture[str]):
+    adapter = KiroAdapter()
+    rc = adapter.write_verdict(Verdict(Decision.NoOpinion, ""), "preToolUse")
+    assert rc == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_kiro_write_verdict_deny(capsys: pytest.CaptureFixture[str]):
+    adapter = KiroAdapter()
+    rc = adapter.write_verdict(Verdict(Decision.Deny, "deny by rule 'Bash(rm -rf:*)'"), "preToolUse")
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err.startswith("denied:")
+    assert "deny by rule" in err
+
+
+def test_kiro_write_verdict_ask(capsys: pytest.CaptureFixture[str]):
+    adapter = KiroAdapter()
+    rc = adapter.write_verdict(Verdict(Decision.Ask, "needs approval"), "preToolUse")
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err.startswith("blocked:")
+    assert "needs approval" in err
+
+
+def test_kiro_tool_name_mapping():
+    assert kiro_tool_name("shell") == "Bash"
+    assert kiro_tool_name("execute_bash") == "Bash"
+    assert kiro_tool_name("execute_cmd") == "Bash"
+    assert kiro_tool_name("read") == "Read"
+    assert kiro_tool_name("fs_read") == "Read"
+    assert kiro_tool_name("fsRead") == "Read"
+    assert kiro_tool_name("write") == "Write"
+    assert kiro_tool_name("fs_write") == "Write"
+    assert kiro_tool_name("fsWrite") == "Write"
+    assert kiro_tool_name("glob") == "Glob"
+    assert kiro_tool_name("grep") == "Grep"
+    assert kiro_tool_name("web_search") == "WebSearch"
+    assert kiro_tool_name("web_fetch") == "WebFetch"
+    assert kiro_tool_name("aws") == "AWS"
+    assert kiro_tool_name("use_aws") == "AWS"
+    assert kiro_tool_name("code") == "Code"
+    assert kiro_tool_name("knowledge") == "Knowledge"
+    assert kiro_tool_name("delegate") == "Delegate"
+    assert kiro_tool_name("subagent") == "Subagent"
+    assert kiro_tool_name("use_subagent") == "Subagent"
+    assert kiro_tool_name("@git/status") == "@git/status"  # MCP passthrough
+    assert kiro_tool_name("unknown_tool") == "unknown_tool"  # unknown passthrough
+
+
+def test_auto_adapter_selects_kiro_from_kiro_tool_names():
+    payload: JsonObject = {
+        "hook_event_name": "preToolUse",
+        "tool_name": "shell",
+        "tool_input": {"command": "ls"},
+    }
+    event = effective_event("auto", payload)
+    adapter = select_adapter(AgentName.Auto, event, payload)
+    assert isinstance(adapter, KiroAdapter)
+
+
+def test_auto_adapter_selects_kiro_for_read_tool():
+    payload: JsonObject = {
+        "hook_event_name": "preToolUse",
+        "tool_name": "read",
+        "tool_input": {"path": "/tmp/x"},
+    }
+    event = effective_event("auto", payload)
+    adapter = select_adapter(AgentName.Auto, event, payload)
+    assert isinstance(adapter, KiroAdapter)
+
+
+@pytest.mark.parametrize("tool_name", ["glob", "web_fetch"])
+def test_auto_adapter_prefers_kiro_event_for_shared_tool_names(tool_name: str):
+    payload: JsonObject = {
+        "hook_event_name": "preToolUse",
+        "tool_name": tool_name,
+        "tool_input": {},
+    }
+    event = effective_event("auto", payload)
+    adapter = select_adapter(AgentName.Auto, event, payload)
+    assert isinstance(adapter, KiroAdapter)
+
+
+# ---- Install: Kiro --------------------------------------------------------
+
+
+def test_kiro_install_writes_hook_file(fake_home: Path):
+    paths = KiroAdapter().install(InstallMode.Direct)
+    hook_path = fake_home / ".kiro/hooks/agentperm.json"
+    assert paths == [hook_path]
+    assert not (fake_home / ".kiro/agents/kiro_default.json").exists()
+    # v3/IDE standalone hook file
+    data = json.loads(hook_path.read_text())
+    assert data["version"] == "v1"
+    assert len(data["hooks"]) == 1
+    hook = data["hooks"][0]
+    assert hook["name"] == "agentperm"
+    assert hook["trigger"] == "PreToolUse"
+    assert hook["matcher"] == ".*"
+    assert "--agent kiro" in hook["action"]["command"]
+    assert "--event preToolUse" in hook["action"]["command"]
+    assert hook["timeout"] == 30
+    assert hook["enabled"] is True
+
+
+def test_kiro_install_idempotent(fake_home: Path):
+    assert KiroAdapter().install(InstallMode.Direct) != []
+    assert KiroAdapter().install(InstallMode.Direct) == []
+
+
+def test_kiro_install_updates_all_existing_v2_agents(fake_home: Path):
+    agents_dir = fake_home / ".kiro/agents"
+    agents_dir.mkdir(parents=True)
+    custom = agents_dir / "reviewer.json"
+    custom.write_text(json.dumps({"name": "reviewer", "description": "Review agent"}))
+
+    paths = KiroAdapter().install(InstallMode.Direct)
+
+    assert custom in paths
+    data = json.loads(custom.read_text())
+    [hook] = data["hooks"]["preToolUse"]
+    assert hook["matcher"] == "*"
+    assert "--agent kiro" in hook["command"]
+
+
+def test_kiro_install_updates_current_workspace_agents(fake_home: Path):
+    workspace_agent = fake_home / "workspace/.kiro/agents/reviewer.json"
+    workspace_agent.parent.mkdir(parents=True)
+    workspace_agent.write_text(json.dumps({"name": "reviewer"}))
+
+    paths = KiroAdapter().install(InstallMode.Direct)
+
+    assert workspace_agent in paths
+    [hook] = json.loads(workspace_agent.read_text())["hooks"]["preToolUse"]
+    assert hook["matcher"] == "*"
+    assert "--agent kiro" in hook["command"]
+
+
+def test_kiro_install_does_not_create_reserved_builtin_agent(fake_home: Path):
+    KiroAdapter().install(InstallMode.Direct)
+    assert not (fake_home / ".kiro/agents/kiro_default.json").exists()
+
+
+def test_kiro_install_and_import_honor_kiro_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    kiro_home = tmp_path / "profile"
+    monkeypatch.setenv("KIRO_HOME", str(kiro_home))
+    monkeypatch.setattr(KiroAdapter, "hooks_path", None)
+    monkeypatch.setattr(KiroAdapter, "agents_path", None)
+    agents_dir = kiro_home / "agents"
+    agents_dir.mkdir(parents=True)
+    agent_path = agents_dir / "custom.json"
+    agent_path.write_text(json.dumps({"allowedTools": ["read"]}))
+
+    paths = KiroAdapter().install(InstallMode.Direct)
+    rules = list(KiroAdapter().import_native_rules())
+
+    assert kiro_home / "hooks/agentperm.json" in paths
+    assert agent_path in paths
+    assert any(isinstance(rule, NamedTool) and rule.name == "Read" for _, rule in rules)
+
+
+def test_kiro_install_works_in_rulesync_mode(fake_home: Path):
+    # Kiro always installs directly (no rulesync schema), same as OpenCode.
+    paths = KiroAdapter().install(InstallMode.Rulesync)
+    assert (fake_home / ".kiro/hooks/agentperm.json") in paths
+
+
+def test_kiro_install_dry_run_writes_nothing(fake_home: Path):
+    KiroAdapter().install(InstallMode.Direct, dry_run=True)
+    assert not (fake_home / ".kiro/hooks/agentperm.json").exists()
+    assert not (fake_home / ".kiro/agents/kiro_default.json").exists()
+
+
+# ---- Import: Kiro ---------------------------------------------------------
+
+
+def test_kiro_import_allowed_tools(fake_home: Path):
+    agents_dir = fake_home / ".kiro/agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "default.json").write_text(
+        json.dumps({"allowedTools": ["read", "grep", "@git/git_status"]})
+    )
+    rules = list(KiroAdapter().import_native_rules())
+    decisions = {(d.value, r.name) for d, r in rules if isinstance(r, NamedTool)}
+    assert ("allow", "Read") in decisions
+    assert ("allow", "Grep") in decisions
+    assert ("allow", "@git/git_status") in decisions
+
+
+def test_kiro_import_skips_shell_in_allowed_tools(fake_home: Path):
+    agents_dir = fake_home / ".kiro/agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "default.json").write_text(
+        json.dumps({"allowedTools": ["shell", "execute_bash", "read"]})
+    )
+    rules = list(KiroAdapter().import_native_rules())
+    # shell/execute_bash should be skipped (too broad)
+    tools = [r.name for _, r in rules if isinstance(r, NamedTool)]
+    assert "Bash" not in tools
+    assert "Read" in tools
+
+
+def test_kiro_import_skips_unrepresentable_allowed_tool_wildcards(fake_home: Path):
+    agents_dir = fake_home / ".kiro/agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "default.json").write_text(
+        json.dumps({"allowedTools": ["code_*", "*_bash", "?ead", "@git/read_*"]})
+    )
+    tools = [r.name for _, r in KiroAdapter().import_native_rules() if isinstance(r, NamedTool)]
+    assert tools == ["code_*", "@git/read_*"]
+
+
+def test_kiro_import_expands_known_wildcard_aliases(fake_home: Path):
+    agents_dir = fake_home / ".kiro/agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "default.json").write_text(
+        json.dumps({"allowedTools": ["fs_*"]})
+    )
+    rules = list(KiroAdapter().import_native_rules())
+    tools = sorted(r.name for _, r in rules if isinstance(r, NamedTool))
+    assert tools == ["Read", "Write"]
+
+
+def test_kiro_import_shell_commands(fake_home: Path):
+    agents_dir = fake_home / ".kiro/agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "default.json").write_text(
+        json.dumps(
+            {
+                "toolsSettings": {
+                    "shell": {
+                        "allowedCommands": ["git status", "git fetch"],
+                        "deniedCommands": ["git push.*"],
+                    }
+                }
+            }
+        )
+    )
+    rules = list(KiroAdapter().import_native_rules())
+    allow_rules = [(d, r) for d, r in rules if d is Decision.Allow]
+    deny_rules = [(d, r) for d, r in rules if d is Decision.Deny]
+    assert len(allow_rules) == 2
+    assert all(isinstance(r, BashCommand) for _, r in allow_rules)
+    assert len(deny_rules) == 1
+    assert isinstance(deny_rules[0][1], BashCommand)
+    assert deny_rules[0][1].prefix == ("git", "push")
+    assert deny_rules[0][1].trailing_wildcard is True
+
+
+def test_kiro_import_keeps_single_command_regex_exact(fake_home: Path):
+    agents_dir = fake_home / ".kiro/agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "default.json").write_text(
+        json.dumps({"toolsSettings": {"shell": {"allowedCommands": ["pytest"]}}})
+    )
+    [(_, rule)] = list(KiroAdapter().import_native_rules())
+    assert isinstance(rule, BashCommand)
+    assert rule.prefix == ("pytest",)
+    assert rule.trailing_wildcard is False
+
+
+def test_kiro_import_skips_complex_regex(fake_home: Path):
+    agents_dir = fake_home / ".kiro/agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "default.json").write_text(
+        json.dumps(
+            {
+                "toolsSettings": {
+                    "shell": {
+                        "allowedCommands": ["git (commit|push).*"],
+                    }
+                }
+            }
+        )
+    )
+    rules = list(KiroAdapter().import_native_rules())
+    assert rules == []
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"\Agit\s+push.*\z", "git status.?", r"rm\s+-rf.*", "git [a-z]+.*"],
+)
+def test_kiro_import_skips_complex_regex_that_is_valid_shell_syntax(
+    fake_home: Path,
+    pattern: str,
+):
+    agents_dir = fake_home / ".kiro/agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "default.json").write_text(
+        json.dumps({"toolsSettings": {"shell": {"deniedCommands": [pattern]}}})
+    )
+    assert list(KiroAdapter().import_native_rules()) == []
+
+
+# ---- End-to-end: Kiro check with exit codes ------------------------------
+
+
+def test_kiro_check_deny_returns_exit_code_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """agentperm check --agent kiro returns exit code 2 for denied commands."""
+    policy_path = tmp_path / ".agent-permissions.jsonc"
+    policy_path.write_text(json.dumps({"version": 1, "permissions": {"deny": ["Bash(rm -rf:*)"]}}))
+    monkeypatch.setattr(agentperm, "POLICY_FILENAME", ".agent-permissions.jsonc")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Patch Path.home() for merged_policy
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+
+    payload = json.dumps({"tool_name": "shell", "tool_input": {"command": "rm -rf /"}})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    rc = cmd_check(AgentName.Kiro, "preToolUse")
+    assert rc == 2
+
+
+def test_kiro_check_allow_returns_exit_code_0(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """agentperm check --agent kiro returns exit code 0 for allowed commands."""
+    policy_path = tmp_path / ".agent-permissions.jsonc"
+    policy_path.write_text(json.dumps({"version": 1, "permissions": {"allow": ["Bash(cat:*)"]}}))
+    monkeypatch.setattr(agentperm, "POLICY_FILENAME", ".agent-permissions.jsonc")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+
+    payload = json.dumps({"tool_name": "shell", "tool_input": {"command": "cat foo.txt"}})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    rc = cmd_check(AgentName.Kiro, "preToolUse")
+    assert rc == 0

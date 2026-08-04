@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentperm"
-version = "0.2.1"
-description = "Permission policy mediator for Claude Code, Codex, OpenCode, and Gemini CLI."
+version = "0.3.0"
+description = "Permission policy mediator for Claude Code, Codex, OpenCode, Gemini CLI, and Kiro."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
@@ -33,6 +33,7 @@ keywords = [
     "gemini",
     "gemini-cli",
     "hooks",
+    "kiro",
     "llm",
     "llm-agent",
     "llm-tools",

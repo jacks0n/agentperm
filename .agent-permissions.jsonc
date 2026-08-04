@@ -2,11 +2,21 @@
   "version": 1,
   "permissions": {
     "allow": [
-      "Bash(uv run ruff check:*)",
-      "Bash(just check:*)",
-      "Bash(.venv/bin/pytest:*)",
-      "Bash(.venv/bin/ruff:*)",
-      "Bash(.venv/bin/basedpyright:*)"
+      "Shell(uv run ruff check)",
+      "Shell(ruff check)",
+      "Shell(uv run python -m pytest)",
+      "Shell(uv run pytest)",
+      "Shell(pytest)",
+      "Shell(uv run basedpyright)",
+      "Shell(basedpyright)",
+      "Shell(python -m pytest)",
+      "Shell(kiro-cli agent validate)",
+      "Shell(just check)",
+      "Shell(cargo check)",
+      "Shell(cargo test)",
+      "Shell(cargo build)",
+      "Shell(rustup which)",
+      "Shell(.venv/bin/{pytest,ruff,basedpyright})"
     ]
   }
 }

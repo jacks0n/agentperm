@@ -6,11 +6,8 @@ description = "Per-pane bypass-permissions toggle/indicator for the agentperm pe
 license = "MIT"
 publish = false
 
-[lib]
-crate-type = ["cdylib"]
-
 [dependencies]
-zellij-tile = "0.44"
+zellij-tile = "0.44.3"
 
 [profile.release]
 opt-level = "z"

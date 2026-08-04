@@ -2,13 +2,13 @@
 
 ## Premise
 
-Every coding agent (Claude Code, Codex, OpenCode, Gemini) has its own permission system. They all do roughly the same job — match a tool call against an allow / ask / deny list — but their grammars differ, none of them parse compound shell commands well, and you end up maintaining four configs that drift out of sync.
+Every coding agent (Claude Code, Codex, OpenCode, Gemini CLI, Kiro) has its own permission system. They all do roughly the same job — match a tool call against an allow / ask / deny list — but their grammars differ, none of them parse compound shell commands well, and you end up maintaining separate configs that drift out of sync.
 
-The bridge replaces "four configs" with "one policy file plus four small adapters." Each adapter knows how to install a hook into its agent and how to parse the agent's hook payload into a uniform `Request`. Decision-making and shell parsing live in one place.
+The bridge replaces those configs with one policy file plus a small adapter per agent. Each adapter knows how to install a hook into its agent and how to parse the agent's hook payload into a uniform `Request`. Decision-making and shell parsing live in one place.
 
 ## Domain model
 
-The whole system is built on three sum types and a small set of value objects, all defined in `src/agentperm/__init__.py`.
+The whole system is built on three sum types and a small set of value objects, defined in `src/agentperm/domain.py` and re-exported from `agentperm`.
 
 ### Decision
 
@@ -40,10 +40,15 @@ Every adapter parses its native hook payload into one of these two types. `Shell
 class Rule(ABC): ...
 @dataclass(frozen=True) class BashCommand(Rule): prefix: tuple[str, ...]
 @dataclass(frozen=True) class BashOption(Rule): commands, options, rationale
+@dataclass(frozen=True) class ShellPattern(Rule): raw, path, flags, value_flags, ...
 @dataclass(frozen=True) class NamedTool(Rule): pattern: str
 ```
 
-`BashCommand("git status:*")` matches a shell segment whose argv starts with `("git", "status")`. `BashOption(commands={"sed"}, options={"-i"})` matches `sed` invoked with `-i` (or `-iE`, or `--in-place=true`). `NamedTool` matches by tool name with optional `*` wildcard or `mcp__memory__*` prefix.
+`ShellPattern` is the recommended matcher for new shell rules: it matches an ordered operand path
+and normalizes flags independently of their position. `BashCommand` remains the legacy positional
+matcher used by existing policies and several native import adapters. `BashOption` matches a shell
+command invoked with a selected option. `NamedTool` matches by tool name with optional `*`
+wildcard or `mcp__memory__*` prefix.
 
 ### Policy
 
@@ -86,14 +91,14 @@ For a compound like `cat foo | head -60`, the bridge produces a `Verdict` per se
 
 Redirects are evaluated independently of argv:
 
-| Redirect form | Verdict |
+| Redirect form | Default verdict |
 |---|---|
 | `2>&1`, `1>&2` (fd duplication) | `NoOpinion` |
-| `2>/dev/null`, `2>>/dev/null` | `NoOpinion` |
-| `>file`, `>>file`, `&>file` | `Ask` ("writes to '<file>'") |
+| `2>/dev/null`, `2>>/dev/null` | `NoOpinion` (configurable) |
+| `>file`, `>>file`, `&>file` | `Ask` (configurable) |
 | `<file` | `NoOpinion` |
 
-This is hard-coded — file writes always surface a prompt regardless of the surrounding rule. The earlier regex parser misread `2>&1` as a write to a file called `1`; the Tree-sitter Bash AST gets it right.
+File-write verdicts are configurable via `shell.redirection` (`stdoutToFile`, `appendToFile`). `allowPaths` adds directory-level exceptions: if a redirect target resolves (through symlinks) to a path under an `allowPaths` entry, the redirect evaluates as `allow` regardless of the configured default. Paths are set globally on `shell.redirection.allowPaths` and per-rule via the rule-as-key dict form (`{"Shell(cmd)": {"allowPaths": [...]}}`). When evaluating, `allowPaths` from all matching allow rules are combined with the global list.
 
 ### Bypass — agentperm defers (Claude-specific)
 
@@ -207,12 +212,14 @@ It refuses to parse:
 
 ## Limitations
 
-The bridge analyzes shell *command structure*. It cannot see commands that exist only at runtime or inside another language:
+The bridge primarily analyzes shell *command structure*. `Python(readonly)` adds deliberately shallow
+AST inspection for literal `python -c` and Python heredoc source, but it does not prove the behavior of
+called functions or inspect other interpreted languages:
 
-- **Interpreters running inline code:** `python -c "…"`, `perl -e "…"`, `ruby -e`, `node -e`, `awk 'prog'`, etc. The code is a string in another language, not shell — the bridge sees only the interpreter invocation (`python`), which returns `NoOpinion` unless you write a rule for it.
+- **Other interpreters and unsupported Python forms:** `perl -e "…"`, `ruby -e`, `node -e`, `awk 'prog'`, `python -m`, scripts, and interactive stdin remain argv-only. Inline Python is inspected only when an allow-side `Python(readonly)` rule is present.
 - **Unrecognized executor prefixes:** the decomposed/​recognized wrapper lists (`command`, `env`, `timeout`, …) are not exhaustive. An executor not on either list (`busybox rm …`, `find . -exec rm …`) is treated as an ordinary command and returns `NoOpinion`.
 
-`NoOpinion` defers to the host agent. Under any **bypass** the bridge defers entirely anyway (Claude bypass → `{}`; pane bypass → `Allow`), so commands the parser can't fully decompose are **not** caught under bypass — bypass means "I accept the risk." In normal mode, an unrecognized executor returns `NoOpinion` (host decides) while a *recognized-but-undecomposable* wrapper returns `Ask`. Treat the matcher as **argv shape, not command intent**: write explicit `deny`/`ask` rules for the interpreters and executors you care about (`Bash(python:*)`, `find` via `BashOption` on `-exec`/`-delete`), and don't rely on bypass as a security boundary against a command crafted to evade analysis.
+`NoOpinion` defers to the host agent. Under any **bypass** the bridge defers entirely anyway (Claude bypass → `{}`; pane bypass → `Allow`), so commands the parser can't fully decompose are **not** caught under bypass — bypass means "I accept the risk." In normal mode, an unrecognized executor returns `NoOpinion` (host decides) while a *recognized-but-undecomposable* wrapper returns `Ask`. Treat shell rules and `Python(readonly)` as intent classification, not a security sandbox, and don't rely on bypass as a boundary against a command crafted to evade analysis.
 
 ## Why Tree-sitter Bash
 
@@ -228,20 +235,26 @@ Tree-sitter Bash is a maintained Bash grammar. It eliminates the regex parser's 
 ## Module layout
 
 ```
-src/agentperm/__init__.py
-├── JSON value model (system-boundary types)
-├── Domain (Decision, Verdict, Rule, Request, Policy)
-├── Aggregation (_stricter, aggregate)
-├── Redirect policy (_evaluate_redirect)
-├── Shell parser (parse_pipeline + Tree-sitter Bash boundary helpers)
-├── Rule I/O (parse_rule, _parse_string_rule, _parse_dict_rule)
-├── Policy I/O (load_policy_file, save_policy_file, merged_policy)
-├── Agent adapters (Claude, Codex, OpenCode, Gemini)
-├── Hook config helpers
-└── CLI (install, import, check, edit)
+src/agentperm/
+├── __init__.py           Re-export shim — all public names importable from `agentperm`
+├── domain.py             Decision, Verdict, Rule types, Policy engine, Request types
+├── shell.py              Tree-sitter Bash → Pipeline (parse_pipeline, segment extraction)
+├── shellpattern.py       Shell(...) DSL parser + matcher
+├── pythoncode.py         Shallow AST analysis for inline Python (Python(readonly))
+├── rules.py              Rule parsing: string/dict → Rule objects
+├── policy.py             Policy file I/O (load, save, merge)
+├── cli.py                CLI entry point (install, import, check, edit)
+├── errors.py             PolicyError exception
+├── fileio.py             read_json, atomic_write
+└── adapters/
+    ├── __init__.py       Adapter registry + select_adapter dispatch
+    ├── base.py           AgentAdapter ABC + shared hook-config helpers
+    ├── claude.py          Claude Code adapter
+    ├── codex.py           Codex CLI adapter
+    ├── opencode.py        OpenCode adapter
+    ├── gemini.py          Gemini CLI adapter
+    └── kiro.py            Kiro CLI / IDE adapter
 ```
-
-The whole package is a single module on purpose — it's small enough that splitting it into files would obscure the data flow more than it would reveal structure.
 
 ## Type safety
 

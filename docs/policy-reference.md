@@ -16,23 +16,113 @@ Both are loaded; rules union, deny wins. Project-root is detected via `git rev-p
     "allow": [ /* rules */ ],
     "ask":   [ /* rules */ ],
     "deny":  [ /* rules */ ]
+  },
+  "shell": {
+    "redirection": { /* optional — see Shell redirects */ }
+  },
+  "python": {
+    "calls": { /* optional — see Inline Python analysis */ }
   }
 }
 ```
 
-`version` is reserved for future schema migrations. Currently only `1` is valid.
+agentperm currently writes schema `version: 1`; `Shell(...)` does not introduce version 2 and
+there is no automatic Bash-to-Shell schema migration. The loader currently treats `version` as
+reserved metadata rather than selecting different rule semantics from it.
 
 The three lists are evaluated in order **deny → ask → allow** for any single rule lookup; the first match wins. (Aggregation across compound segments is separate — see [Architecture](architecture.md#aggregation).)
 
 ## Rule forms
 
-A rule is either a **string** (compact form, matches Claude Code's existing syntax) or a **dict** (structured form, more expressive).
+A rule is either a **string** or a **dict**. `Shell(...)` is recommended for new shell rules;
+legacy `Bash(...)` and structured Bash option rules remain supported. Both syntaxes use policy
+schema version `1`.
 
 ### String rules
 
-#### `"Bash(<command>:*)"` — bash command prefix
+#### `"Python(readonly)"` — shallow inline-Python analysis
 
-Matches a shell segment whose argv matches the whitespace-separated token pattern.
+`Python(readonly)` is valid only in `permissions.allow`. It recognizes `python`/`python3`
+(including path-qualified interpreters) and `uv run python` using `-c` or literal heredoc input:
+
+```jsonc
+"Python(readonly)"
+```
+
+```sh
+python -c "import inspect; print(inspect.signature(len))"
+uv run python - <<'PY'
+import agentperm
+print(type(agentperm), len(agentperm.__all__))
+PY
+```
+
+The source is parsed with Python's standard-library AST without being executed. Imports, local
+variables, ordinary calls, printing, and inspection are allowed. Recognized filesystem, process,
+network, database, environment, attribute, or subscript mutation asks. Syntax errors, dynamic call
+targets, shell-expanded heredocs, and unavailable stdin also ask.
+
+This is deliberately shallow and assumes a non-adversarial caller. It tracks direct import aliases,
+but does not inspect function bodies or follow assignment aliases such as `f = os.remove`. Hidden
+effects inside an otherwise ordinary function call are outside the v1 model. `python -m`, script
+files, and interactive Python are unaffected.
+
+Call decisions can be customized by exact qualified name:
+
+```jsonc
+{
+  "python": {
+    "calls": {
+      "allow": ["project.intentional_mutation"],
+      "ask": ["library.ambiguous_operation"],
+      "deny": ["dangerous.module.call"]
+    }
+  }
+}
+```
+
+Precedence is configured `deny` → `ask` → `allow`, then the built-in catalogue, then the ordinary-call
+default. An explicit configured allow can override a built-in unsafe classification. Global and
+project call lists union, so a project deny still beats a global allow. Structural operations such as
+attribute assignment are not call targets and cannot be overridden through `python.calls`.
+
+Once enabled, the Python result is combined with ordinary shell rules by strictness. This means an
+AST Ask cannot be bypassed by a broad `Shell(python -c)` allow, while explicit shell and configured
+call denies still win. Redirects and shell substitutions remain independently evaluated.
+
+#### `"Shell(<pattern>)"` — order-independent shell pattern
+
+`Shell` separates the ordered command path from flags, which may appear anywhere. Trailing
+operands and unspecified flags are allowed by default:
+
+```jsonc
+"Shell(git {status,log,diff,show})"
+"Shell(git push !--force)"
+"Shell(git stash only(--keep-index, -p))"
+"Shell(git status --short !... !-*)"
+```
+
+Options using `--flag=value` are recognized automatically. Space-separated option values must be
+declared so they can be consumed before matching a later subcommand; undeclared values remain
+operands and fail closed for allow rules. Deny and ask rules conservatively explore both possible
+interpretations so global options cannot hide a dangerous command path:
+
+```jsonc
+"Shell(aws values(--region, --profile) ec2 describe-*)"
+{"Shell(aws ec2 describe-*)": {"values": ["--region", "--profile"]}}
+```
+
+The two `values` forms have the same matching semantics and only teach normalization which flags
+consume the following token; they do not require, permit, or forbid those flags. agentperm does not
+need a command-specific option catalogue.
+
+The compact syntax supports positional globs and sets, required/forbidden/permitted flags,
+`only(...)`, exact matching, and mid-path gaps. See the complete [Shell pattern DSL](pattern-dsl.md).
+
+#### `"Bash(<command>:*)"` — legacy positional shell matcher
+
+Matches a shell segment whose argv matches the whitespace-separated token pattern. This form is
+retained for existing policies and imported native rules; it is not automatically migrated.
 
 ```jsonc
 "Bash(ls:*)"          // ls -la, /usr/bin/ls, ls foo bar
@@ -103,7 +193,21 @@ Matching is **keyed by field name**, so a specifier only ever checks the authori
 
 ### Dict rules
 
-For anything more expressive than a prefix, use the dict form.
+#### Rule-as-key dict — per-rule options
+
+A Shell rule can carry additional options (`values`, `allowPaths`) by using the rule string as the
+key and a dict of options as the value:
+
+```jsonc
+{"Shell(aws ec2 describe-*)": {"values": ["--region", "--profile"]}}
+{"Shell(mise exec just synth-env)": {"allowPaths": ["/tmp"]}}
+{"Shell(git status)": {"values": ["-C"], "allowPaths": ["/var/log"]}}
+```
+
+- `values` — declares which flags consume the next token (same as inline `values(...)`).
+- `allowPaths` — directories where file redirects are allowed when this rule matches. See [Redirect allowlisting](#redirect-allowlisting).
+
+The older `{"rule": "Shell(...)", "values": [...]}` form is still parsed but no longer written on save.
 
 #### `BashOption` — bash command + flag
 
@@ -166,10 +270,8 @@ See [Architecture: Inert command names](architecture.md#inert-command-names) for
   "version": 1,
   "permissions": {
     "allow": [
-      "Bash(cat:*)", "Bash(echo:*)", "Bash(grep:*)", "Bash(head:*)",
-      "Bash(ls:*)", "Bash(pwd)", "Bash(rg:*)", "Bash(tail:*)",
-      "Bash(test -f:*)", "Bash(wc:*)", "Bash(which:*)",
-      "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
+      "Shell({cat,echo,grep,head,ls,rg,tail,wc,which})",
+      "Shell(git {status,diff,log,show})",
       "Read", "Glob", "Grep"
     ]
   }
@@ -209,46 +311,29 @@ See [Architecture: Inert command names](architecture.md#inert-command-names) for
 
 `ask` is checked before `allow`, so `sed -i` hits the ask rule and `sed -n 1,10p foo` hits the allow rule.
 
-### Workspace build commands (using globs)
-
-Whitelist build/test commands across a monorepo without enumerating every package or flag combination:
+### Workspace build commands
 
 ```jsonc
 {
   "version": 1,
   "permissions": {
     "allow": [
-      // pnpm workspace operations — agent picks the package via --dir or --filter
-      "Bash(pnpm --dir * build:*)",
-      "Bash(pnpm --dir * test:*)",
-      "Bash(pnpm --dir * lint:*)",
-      "Bash(pnpm --filter * build:*)",
-      "Bash(pnpm --filter * test:*)",
-
-      // any pnpm invocation that ends in `build` or `test` (more permissive)
-      "Bash(pnpm ** build:*)",
-      "Bash(pnpm ** test:*)",
-
-      // cargo release builds across any workspace shape
-      "Bash(cargo ** --release:*)",
-
-      // docker compose subcommands with arbitrary flags
-      "Bash(docker compose ** up:*)",
-      "Bash(docker compose ** down:*)",
-      "Bash(docker compose ** logs:*)"
+      "Shell(pnpm run {build,test,lint})",
+      "Shell(pnpm {exec,list,why})",
+      "Shell(docker compose {build,up,down,logs})",
+      "Shell(cargo build)",
+      "Shell(cargo test)"
     ],
     "ask": [
-      // package-manager mutations escalate even though they'd otherwise match `pnpm **`
-      // (`ask` is checked before `allow`, so these win for `pnpm install`, `pnpm add x`, etc.)
-      "Bash(pnpm install:*)", "Bash(pnpm add:*)", "Bash(pnpm remove:*)", "Bash(pnpm update:*)",
-      "Bash(npm install:*)",  "Bash(npm i:*)",   "Bash(npm uninstall:*)",
-      "Bash(yarn add:*)",     "Bash(yarn remove:*)"
+      "Shell(pnpm {install,add,remove,update})",
+      "Shell(npm {install,uninstall})",
+      "Shell(yarn {add,remove})"
     ]
   }
 }
 ```
 
-`hasOption` (the dict form's `when`) only matches arguments starting with `-`. To gate a *subcommand* like `install`, use a string rule with a literal token instead — as shown above.
+`ask` is checked before `allow`, so `pnpm install` hits the ask rule even though `pnpm` commands are broadly allowed.
 
 ### Hard deny
 
@@ -257,18 +342,17 @@ Whitelist build/test commands across a monorepo without enumerating every packag
   "version": 1,
   "permissions": {
     "deny": [
-      "Bash(sudo:*)",
-      "Bash(su:*)",
-      "Bash(rm -rf /*)",
-      "Bash(chmod:*)",
-      "Bash(chown:*)"
+      "Shell(sudo)",
+      "Shell(su)",
+      "Shell(rm -r -f /*)",
+      "Shell(chmod)",
+      "Shell(chown)"
     ]
   }
 }
 ```
 
-Deny beats every other list. Even an explicit `allow` for `Bash(rm:*)` cannot override `deny: Bash(rm -rf /*)`.
-
+Deny beats every other list. An explicit allow cannot override a deny.
 ## Compound command behavior
 
 Compound shell commands are decomposed into segments and each is evaluated against the policy. The result aggregates per the rules in [Architecture: Aggregation](architecture.md#aggregation):
@@ -284,6 +368,79 @@ Compound shell commands are decomposed into segments and each is evaluated again
 | `rm $(cat allowed)` (both `rm` and `cat` allowed) | `[Allow, Allow]` | Allow |
 | `rm $(curl evil)` (`curl` not allowed) | `[Allow, NoOpinion]` | **Ask** (escalation) |
 
+## Shell redirects
+
+A redirect's *shape* (which fd, which operator, whether the target is `/dev/null`) is fixed, but the decision each shape produces is configurable via `shell.redirection`:
+
+```jsonc
+{
+  "version": 1,
+  "permissions": { /* ... */ },
+  "shell": {
+    "redirection": {
+      "stderrToDevNull": "allow",
+      "stdoutToDevNull": "allow",
+      "stdoutToFile": "ask",
+      "appendToFile": "ask",
+      "allowPaths": ["/tmp", "/private/tmp/claude-*"]
+    }
+  }
+}
+```
+
+| Key | Matches | Default |
+|---|---|---|
+| `stderrToDevNull` | Any write op targeting `/dev/null` with an explicit fd of `2` (`2>/dev/null`, `2>>/dev/null`, …) | `allow` |
+| `stdoutToDevNull` | Any write op targeting `/dev/null` *without* an explicit fd `2` — bare `>`/`>>` (defaults to stdout), explicit `1>`, and `&>`/`&>>` (both streams, which has no explicit fd) | `allow` |
+| `stdoutToFile` | Truncating writes to anything else: `>`, `&>`, `>\|` | `ask` |
+| `appendToFile` | Appending writes to anything else: `>>`, `&>>` | `ask` |
+
+Discarding output is inert no matter which stream or operator carries it, so both devnull keys default to `allow` — including the common `cmd > /dev/null 2>&1` idiom (a `stdoutToDevNull` write plus a no-op fd-dup).
+
+Each value is one of:
+
+- **`allow`** — this redirect shape carries no independent opinion; the segment's own command rule decides (same as if the redirect weren't there at all). This does **not** grant permission by itself — an unmatched or denied command still asks or is denied.
+- **`ask`** — force an Ask for any segment with this redirect shape, even if the command itself is allow-listed. This is the default for file writes, since a redirect target can be any path on disk regardless of how safe the command is.
+- **`deny`** — force a Deny for any segment with this redirect shape, regardless of the command rule. Useful if you never want an agent writing to files under any circumstances.
+
+Two shapes are **not** configurable, because they never touch the filesystem: fd-duplication (`2>&1`, `1>&2`, …) and input redirection (`<`) always evaluate to no-opinion.
+
+A local (`<project-root>/.agent-permissions.jsonc`) `shell.redirection` block only overrides the keys it sets — an unset key keeps whatever the global file configured.
+
+### Redirect allowlisting
+
+`allowPaths` lets you keep `stdoutToFile: ask` as the safe default while auto-allowing redirects to specific directories:
+
+```jsonc
+"shell": {
+  "redirection": {
+    "stdoutToFile": "ask",
+    "allowPaths": ["/tmp", "/private/tmp/claude-*"]
+  }
+}
+```
+
+When a redirect target (`>`, `>>`, `&>`, etc.) resolves to a path under an `allowPaths` entry, the redirect evaluates as `allow` instead of the configured `stdoutToFile`/`appendToFile` decision.
+
+Path matching:
+
+- Both the target and pattern are resolved through symlinks (`os.path.realpath`), so `/tmp` on macOS covers `/private/tmp`.
+- Each path component is matched individually with `fnmatch`, so `/private/tmp/claude-*` matches `/private/tmp/claude-502/scratchpad/out.txt`.
+- Relative redirect targets are resolved against the working directory from the hook payload.
+
+**Per-rule `allowPaths`** scope path allowlisting to specific commands via the rule-as-key dict form:
+
+```jsonc
+"allow": [
+  {"Shell(mise exec just synth-env)": {"allowPaths": ["/tmp"]}},
+  "Shell(echo)"
+]
+```
+
+Here `mise exec -- just synth-env > /tmp/out.txt` is allowed, but `echo hi > /tmp/out.txt` still asks (unless `/tmp` is also in the global `allowPaths`). Per-rule paths combine with global paths — if both are set, the union applies when that command matches.
+
+When multiple allow rules match the same command (e.g. a broad `Shell({echo,ls})` and a narrow `Shell(echo)` with `allowPaths`), the `allowPaths` from all matching allow rules are collected. A broader rule matching first doesn't shadow a narrower rule's paths.
+
 ## Importing native rules
 
 `agentperm import` walks every adapter's native config and merges rules into your `.agent-permissions.jsonc`:
@@ -292,5 +449,8 @@ Compound shell commands are decomposed into segments and each is evaluated again
 - **Codex CLI:** reads `~/.codex/rules/*.rules`, extracts `prefix_rule(...)` declarations.
 - **OpenCode:** reads `~/.config/opencode/opencode.json` (or `.jsonc`), parses `permission` blocks.
 - **Gemini CLI:** no import yet — Gemini's policy DSL is regex-only and round-tripping safely needs more work.
+- **Kiro:** reads `~/.kiro/agents/*.json`, importing named tools and simple shell command patterns.
 
-Imports are additive: existing rules in the policy file are kept, new rules are appended. Run `import` then `edit` to deduplicate or reorganize.
+Imports are additive: existing rules in the policy file are kept, new rules are appended in the
+form produced by the native adapter. Import does not migrate existing `Bash(...)` rules to
+`Shell(...)`. Run `import` then `edit` to deduplicate or reorganize.

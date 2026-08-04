@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-08-04
+
+### Added
+
+- `Shell(...)` pattern DSL for matching shell commands by operand path and normalized flags. Supports alternation (`{a,b}`), required/forbidden/permitted flags, `only(...)` whitelists, `values(...)` arity hints, value constraints (`--flag=*.json`), and exact matching (`!...`, `!-*`). See `docs/pattern-dsl.md` for the full specification. `Bash(...)` rules remain supported for compatibility.
+- Kiro adapter — `install` wires PreToolUse hooks into Kiro CLI custom agents and standalone hook files; `import` reads `allowedTools`, `allowedCommands`, and `deniedCommands` from agent configurations. See `docs/adapters.md § Kiro`.
+- `Python(readonly)` shallowly analyses literal `python -c` and Python heredoc source with the standard-library AST. Known mutation and unclassifiable code ask, while ordinary imports, calls, printing, and inspection can run without a prompt. Exact qualified call decisions can be customized through `python.calls.allow`, `ask`, and `deny`.
+- `allowPaths` on `shell.redirection` — allowlist directories for file redirects while keeping `stdoutToFile: ask` as the default. Paths resolve through symlinks and support globs per component. Relative targets resolve against the working directory from the hook payload.
+- Per-rule `allowPaths` via the rule-as-key dict form: `{"Shell(mise exec just synth-env)": {"allowPaths": ["/tmp"]}}`. Applies only when that command matches. Per-rule paths combine with global `allowPaths` — a broader rule without `allowPaths` matching first doesn't shadow a narrower rule's paths.
+- Rule-as-key dict syntax for Shell rules: `{"Shell(cmd)": {"values": [...], "allowPaths": [...]}}`. Replaces the `{"rule": "Shell(...)", "values": [...]}` form for new rules. Both are accepted on parse.
+
+### Changed
+
+- Monolithic `src/agentperm/__init__.py` split into focused modules: `domain`, `shell`, `shellpattern`, `pythoncode`, `rules`, `policy`, `cli`, `errors`, `fileio`, and per-adapter modules under `adapters/`. All public names remain importable from `agentperm`.
+- Shell rules with `values` or `allowPaths` serialize to the rule-as-key dict form (`{"Shell(...)": {...}}`). The older `{"rule": "Shell(...)", "values": [...]}` form is still parsed but not written.
+
 ## [0.2.1] — 2026-06-27
 
 ### Added
@@ -80,6 +96,7 @@ Initial public release — one permission policy for Claude Code, Codex CLI, Ope
 - Gemini import is not implemented (regex DSL is hard to round-trip safely).
 - POSIX `--` argument terminator is not tracked by `BashOption.matches` — flags after `--` may match. Conservative direction is `Ask`, which is correct for a permission policy.
 
+[0.3.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.3.0
 [0.2.1]: https://github.com/jacks0n/agentperm/releases/tag/v0.2.1
 [0.2.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.1.0

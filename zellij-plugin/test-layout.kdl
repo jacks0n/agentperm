@@ -1,0 +1,26 @@
+// Test layout for agentperm-indicator plugin development.
+// Launch with: zellij --layout ./zellij-plugin/test-layout.kdl --session test-agentperm
+// Kill with:  zellij kill-session test-agentperm
+
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="file:zellij-plugin/target/wasm32-wasip1/release/agentperm-indicator.wasm"
+        }
+        children
+    }
+
+    tab name="test" {
+        pane
+    }
+}
+
+keybinds {
+    shared {
+        bind "Ctrl Shift b" {
+            MessagePlugin "file:zellij-plugin/target/wasm32-wasip1/release/agentperm-indicator.wasm" {
+                name "toggle"
+            }
+        }
+    }
+}

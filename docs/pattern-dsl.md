@@ -1,207 +1,442 @@
 # Shell pattern DSL — specification
 
-> **Status:** design spec (pending implementation). Defines the grammar, semantics, and
-> matching algorithm for the pattern inside `Shell(...)` rules. Supersedes the positional-only
-> matcher in `policy-reference.md`, which is rewritten to match once this lands.
->
-> **Keyword:** the rule keyword is `Shell`. `Bash` is accepted as a **legacy alias** (Claude
-> Code's keyword is `Bash`, so its rules paste and `import` unchanged); both parse to the same
-> `ShellPattern`, and the canonical serialized form is `Shell(...)`.
+> **Status:** implemented. Defines the grammar, semantics, and matching algorithm for the
+> pattern inside `Shell(...)` rules. `Shell` is the recommended syntax for new rules; the
+> positional `Bash(...)` matcher remains supported for compatibility with existing policies
+> and native agent configuration.
 
-## 1. Goals & scope
+## 1. Overview
 
 The string inside `Shell(<pattern>)` is a compact pattern language for matching a shell
 command. It should read like the command it matches, cover the common cases without noise,
-and express alternation, required/forbidden/whitelisted flags, and value constraints — while
-staying a **superset** of the simple Claude Code forms so `import` keeps working.
+and express alternation, required/forbidden flags, flag whitelisting, and value constraints.
 
-It matches **argv shape, not command intent** (see §8). It is an ergonomics and
-intent-expression layer, *not* a sandbox. Its verdict is still subject to bypass coercion:
-under Claude `bypassPermissions` agentperm defers entirely, and under pane bypass `Ask`/`NoOpinion`
-become `Allow` while `Deny` still bites (see `architecture.md`).
+It matches **argv shape, not command intent** (see §6). It is an ergonomics and
+intent-expression layer, *not* a sandbox.
 
-## 2. The model in one paragraph
+## 2. Quick start
+
+```jsonc
+// allow these git subcommands with operands but no semantic-changing flags
+"Shell(git {status,log,diff,show,branch} !-*)"
+
+// allow git push, but deny if --force is present
+"Shell(git push !--force)"
+
+// only these flags permitted on git stash — nothing else
+"Shell(git stash only(--keep-index, -p))"
+
+// require --output with a .json value
+"Shell(curl --output=*.json)"
+
+// optionally pin value-bearing flags when exact arity matters
+"Shell(aws values(--region, --profile, --output) ec2 describe-*)"
+
+// exact: only bare `git stash` — no operands, no flags
+"Shell(git stash !... !-*)"
+```
+
+## 3. Cookbook
+
+### Read-only git
+
+```jsonc
+// any of these subcommands, trailing operands allowed, flags closed
+"Shell(git {status,log,diff,show,branch,tag,remote} !-*)"
+```
+
+### Read-only GitHub API
+
+Use one rule for the default GET form and one per explicit GET spelling. Payload and custom
+header flags are forbidden because they can change request semantics:
+
+```jsonc
+"Shell(gh api !{graphql} !{-X,--method,-f,--raw-field,-F,--field,--input,-H,--header})"
+"Shell(gh api -X=GET !{-f,--raw-field,-F,--field,--input,-H,--header})"
+"Shell(gh api --method=GET !{-f,--raw-field,-F,--field,--input,-H,--header})"
+```
+
+The `-X=GET` constraint accepts `-X GET`, `-XGET`, and `-X=GET`. Any repeated method occurrence
+must be GET. The default-method rule excludes `graphql`, whose normal transport is not the REST
+GET behavior this policy is intended to whitelist.
+
+### Branch-scoped checkout
+
+```jsonc
+// only switch onto namespaced branches (in-token glob)
+"Shell(git {checkout,switch} {feature,fix}/*)"
+```
+
+### Forbid dangerous flags
+
+```jsonc
+// deny: any force-push flag, any position
+"Shell(git push {--force,--force-with-lease,-f})"
+
+// deny: recursive force rm (both required; clustered -rf normalizes to -r,-f)
+"Shell(rm -r -f)"
+
+// allow sed, but never with in-place editing
+"Shell(sed !{-i,--in-place})"
+```
+
+### Require a flag, forbid another
+
+```jsonc
+// require --set-upstream, forbid --force, everything else open
+"Shell(git push --set-upstream !--force)"
+```
+
+### Whitelist safe flags
+
+Both forms are equivalent — use whichever reads better.
+
+```jsonc
+// Sugar form: only these flags, nothing else (operands still open)
+"Shell(git stash only(--keep-index, -p))"
+
+// Primitive form: same thing, spelled out
+"Shell(git stash ?--keep-index ?-p !-*)"
+```
+
+### Exact commands
+
+```jsonc
+// ONLY bare `git stash` — no extra operands
+"Shell(git stash !...)"
+
+// no extra operands AND no flags
+"Shell(git stash !... !-*)"
+
+// exactly `git status --short` (any flag order, nothing else)
+"Shell(git status --short !... !-*)"
+
+// rm with no flags: `rm f` yes, `rm -rf f` no (operands still open)
+"Shell(rm !-*)"
+```
+
+### Value constraints
+
+```jsonc
+// matches --output=x.json and --output x.json
+"Shell(curl --output=*.json)"
+```
+
+### Value-bearing flags (arity hints)
+
+Space-separated option values must be declared before they can be removed from the operand
+path. This fail-closed rule prevents an undeclared semantic-changing option from hiding an
+arbitrary value before an otherwise allowed subcommand. Use `values(...)` to declare arity:
+
+```jsonc
+// explicitly says that --region, --profile, and --output consume the next token
+"Shell(aws values(--region, --profile, --output) ec2 describe-*)"
+```
+
+All of these match:
+- `aws ec2 describe-instances`
+- `aws --region us-east-1 ec2 describe-instances`
+- `aws ec2 describe-instances --region us-east-1`
+- `aws ec2 describe-instances --region=us-east-1`
+
+`values(...)` does not constrain flag *presence* — the flags are not required, forbidden, or
+permitted. It only teaches the normalizer about arity. It composes freely with `only(...)`,
+flag constraints, and all other terms.
+
+For longer lists of value-bearing flags, the dict form keeps the pattern readable:
+
+```jsonc
+{"rule": "Shell(aws ec2 describe-*)", "values": ["--region", "--profile", "--output", "--endpoint-url"]}
+```
+
+Dict `values` merge with any inline `values(...)` in the pattern. Both forms produce the same
+matching result — use whichever is cleaner for the number of flags. The dict form is preserved
+as a dict when agentperm saves the policy; inline `values(...)` remains a string rule.
+
+`values(...)` is deliberately declarative rather than command-aware. agentperm does not carry a
+catalogue of every CLI's option arity, so `Shell(gh values(--repo) pr view)` is required to match
+`gh --repo owner/repo pr view`. `--flag=value` never needs an arity declaration.
+
+### Collapsing verbose allow-lists
+
+Before (160+ lines of old syntax):
+```jsonc
+"Bash(aws ec2 describe-instances:*)",
+"Bash(aws ec2 describe-vpcs:*)",
+"Bash(aws s3 ls:*)",
+"Bash(aws s3api list-buckets:*)",
+// ... 150 more
+```
+
+After:
+```jsonc
+"Shell(aws {ec2,s3,s3api,iam,lambda,logs,rds,cloudformation,ssm,sts} {describe-*,get-*,list-*,head-*})"
+```
+
+### Allow vs deny precedence
+
+**Allow `git stash list`, not `git stash`** — one rule; the longer path excludes the shorter:
+```jsonc
+"allow": ["Shell(git stash list)"]
+```
+
+**Allow `git stash`, not `git stash list`** — a longer command than you allow is a set
+difference → use precedence:
+```jsonc
+"allow": ["Shell(git stash)"],
+"deny":  ["Shell(git stash list)"]
+```
+
+## 4. Pattern syntax
+
+A pattern is whitespace-separated **terms**. Terms are classified into **positional terms**
+(which match the operand sequence left-to-right) and **flag terms** (which match flags in any
+position).
+
+### 4.1 Positional terms
+
+| Syntax | Meaning |
+|---|---|
+| `git`, `commit`, `*.py`, `feature/*` | Word: literal or `*`-glob matching one operand |
+| `{a,b,c}` | Alternation: operand matches any member |
+| `.venv/bin/{pytest,ruff}` | Embedded alternation within one operand |
+| `!{a,b,c}` | Negated set: operand exists and matches none |
+| `...` | Gap: any number of operands (mid-pattern) |
+| `!...` | Exact: pattern must consume all operands |
+
+- **`*`** — glob *within one argument* (`fnmatch`). `*.json`, `feature/*`, `--out=*`. A bare
+  `*` is just "any one operand." This is the wildcard you normally write.
+- **`...`** — *any number of further arguments*. Trailing args are already allowed by default,
+  so `...` is only meaningful **mid-pattern** as a gap (`docker ... up`). You rarely write it.
+- **`!...`** — asserts that the pattern consumes **every** operand. Without it, extra trailing
+  operands are silently allowed (the default). `!...` controls operand exactness only — flags
+  are controlled independently by `!-*` and `only(...)` (see §4.2).
+
+### 4.2 Flag terms
+
+| Syntax | Meaning |
+|---|---|
+| `--flag`, `-x` | Required: flag must be present (anywhere in argv) |
+| `!--flag`, `!-x` | Forbidden: flag must be absent |
+| `--flag=<glob>` | Required with value: flag present, value matches glob |
+| `{--a,--b}` | Any-of: at least one must be present |
+| `!{--a,--b}` | None-of: none may be present |
+| `only(--a, -b)` | Whitelist (sugar): these flags permitted, nothing else |
+| `values(--a, -b)` | Arity hint: these flags consume the next token as a value |
+| `?--flag` | Permitted: flag allowed but not required (for whitelists) |
+| `!-*` | Closed: no flags beyond required/permitted ones |
+| `-*` | Open: any flag allowed (the default; rarely needed) |
+
+#### Flag whitelisting
+
+The most common advanced pattern: allow a command with only specific flags.
+
+**`only(...)` is the recommended form.** It marks each member as permitted and closes the
+flag set in one term:
+
+```jsonc
+// git stash with only --keep-index and -p; any operands
+"Shell(git stash only(--keep-index, -p))"
+```
+
+Required flags elsewhere in the pattern are automatically in the permitted set:
+
+```jsonc
+// require --message, also permit --keep-index, nothing else
+"Shell(git stash push --message only(--keep-index))"
+// permitted set = {--message, --keep-index}
+```
+
+**The primitive form** uses `?` (permitted) and `!-*` (closed) separately. These compose with
+`only(...)` — both contribute to the permitted set:
+
+```jsonc
+// equivalent to: only(--keep-index, -p)
+"Shell(git stash ?--keep-index ?-p !-*)"
+```
+
+`?` on its own (without `!-*` or `only(...)`) is a no-op — it only matters when the flag set
+is closed. `only(...)` may appear at most once per pattern.
+
+#### Value-bearing flags
+
+Some flags take a space-separated value (`--region us-east-1`). Their arity must be declared
+with `values(...)`; otherwise the following token remains an operand and cannot be skipped to
+reach a later command path:
+
+```jsonc
+"Shell(aws values(--region, --profile) ec2 describe-*)"
+```
+
+`values(...)` only affects arity — it adds atoms to the internal `value_flags` set without
+emitting any flag constraint. The declared flags are not required, forbidden, or permitted by
+`values(...)` alone. This is orthogonal to all other flag terms:
+
+```jsonc
+// arity hint + required constraint + whitelist — all compose
+"Shell(curl values(--output) --output=*.json only(--silent, --location))"
+```
+
+A flag declared in `values(...)` that also has a `--flag=<glob>` constraint elsewhere in the
+pattern is valid — the `=<glob>` form already implies value-flag arity, so the `values(...)`
+entry is redundant but harmless.
+
+`values(...)` may appear at most once per pattern. Leading `!` or `?` sigils are invalid.
+
+**Note:** `--flag=value` is always unambiguous. `values(...)` is required only for the
+space-separated form.
+
+#### Flag sets
+
+Sets share a disposition across all members:
+
+```jsonc
+{--a,--b}     // any-of required (at least one present)
+!{--a,--b}    // none-of (none may be present)
+```
+
+### 4.3 Escaping
+
+`\` escapes the next character to a literal: `\*` `\{` `\}` `\,` `\!` `\?` `\-` `\\` (and
+`\ ` for a literal space inside a token). `\-` at the start of a term forces it to be read as
+a positional operand rather than a flag. Because rules live in JSON strings, the backslash is
+doubled in the file: `"Shell(echo \\*)"` matches a literal `*`.
+
+### 4.4 Classification rules
+
+A term is classified before anything else:
+
+1. Strip a leading disposition sigil `!` or `?` (only one; `?` is valid only before a flag or
+   inside `only(...)`).
+2. If the remainder is `...` → **exact** (with `!`) or **rest/gap** term.
+3. If the remainder is `-*` → **flag wildcard**.
+4. If the remainder is `values(...)` → **arity hint** term. Members are split on `,` and
+   trimmed; all must be flags.
+5. If the remainder is `only(...)` → **whitelist** term. Members are split on `,` and trimmed.
+6. If the remainder starts with `-` **and is longer than one character** (`-x`, `--foo`) →
+   **flag** term. A bare `-` (exactly one dash) is a literal **operand** (stdin to many tools).
+7. If the remainder is `{ … }` → a **set**. Members are split on `,` and trimmed. The set is a
+   **flag set** if *every* member is a flag (per rule 6), a **positional set** if *no* member
+   is a flag, and **invalid** if members are mixed.
+8. Otherwise → a **positional word**. Embedded `{a,b}` groups expand alternatives within that
+   single operand, as in `.venv/bin/{pytest,ruff}` or `{foo,bar}/check`.
+
+`?` is only valid as a flag disposition (`?--foo`, `?{--a,--b}`) or inside `only(...)`. `?`
+before a non-flag, `values(...)`, or a bare `?` term, is invalid (§10).
+
+### 4.5 Lexical grammar
+
+- **word** = a non-empty sequence of literal characters, `*` globs, escapes, and embedded
+  `{alternative,groups}`. Commas are valid only inside alternation; reserved characters must
+  otherwise be escaped.
+- **glob** = a word used in a value or operand position; `*` is the only metacharacter
+  (`fnmatch`). `?` is **not** a glob char — it is a literal in words/values (it is special
+  only as a leading flag disposition). An empty value glob (`--out=`) matches only an empty
+  value.
+- **flag name** = `-` or `--` followed by one or more of `[A-Za-z0-9_-]`.
+
+## 5. Matching semantics
+
+### 5.1 The model in one paragraph
 
 A command's `argv` is split into **operands** (the positional command path) and **flags**
 (which float, matched in any position). The pattern's positional terms match the operand
 sequence left-to-right; the pattern's flag terms constrain the flag set anywhere. Trailing
-arguments are **allowed by default**; you opt into exactness with `!...`. Flags are **open by
-default**; you opt into forbidding (`!`) or whitelisting (`?…` + `!-*`).
+operands are **allowed by default**; you opt into exactness with `!...`. Flags are **open by
+default**; you opt into closing with `!-*` or `only(...)`.
 
-## 3. Lexical structure
-
-A pattern is whitespace-separated **terms**. There are exactly two wildcards, with distinct
-jobs:
-
-- **`*`** — glob *within one argument* (`fnmatch`: any run of characters). `*.json`,
-  `feature/*`, `--out=*`. A bare `*` term is just `*` globbing a whole argument, i.e. "any one
-  operand." This is the wildcard you normally write.
-- **`...`** — *any number of further arguments*. Trailing args are already allowed by default,
-  so `...` is only meaningful **mid-pattern** as a gap (`docker ... up`). You rarely write it.
-
-A term is one of:
-
-| Surface | Kind |
-|---|---|
-| `git`, `commit`, `*.py`, `feature/*` | positional word (literal + `*` glob) |
-| `{a,b,c}` | positional alternation (any one) |
-| `!{a,b,c}` | negated positional set (operand exists and is none) |
-| `...` | mid-pattern gap: any number of operands |
-| `!...` | **nothing else**: exact operands + closed flag set (§4.4) |
-| `--flag`, `-x` | required flag (present anywhere) |
-| `?--flag` | permitted flag (optional; for whitelists) |
-| `!--flag` | forbidden flag (absent) |
-| `--flag=<glob>` | required flag whose value matches `<glob>` |
-| `{--a,--b}`, `!{--a,--b}`, `?{--a,--b}` | flag set (any-of present / none / all permitted) |
-| `-*` | flag wildcard ("any flag"); `!-*` = no unpermitted flags |
-
-### 3.1 Classification
-
-A term is classified before anything else:
-
-1. Strip a leading disposition sigil `!` or `?` (only one; `?` is valid only before a flag).
-2. If the remainder is `...` → **rest/exact** term.
-3. If the remainder is `-*` → **flag wildcard**.
-4. If the remainder starts with `-` **and is longer than one character** (`-x`, `--foo`) → **flag** term.
-   A bare `-` (exactly one dash) is a literal **operand** (it is stdin to many tools).
-5. If the remainder is `{ … }` → a **set**. Members are split on `,` and trimmed of surrounding
-   whitespace. The set is a **flag set** if *every* member is a flag (per rule 4), a
-   **positional set** if *no* member is a flag, and **invalid** (→ §11) if members are mixed.
-6. Otherwise → a **positional word**.
-
-`?` is only valid as a flag disposition (`?--foo`, `?{--a,--b}`); `?` before a non-flag, or a
-bare `?` term, is invalid (§11).
-
-### 3.2 Lexical grammar of a word / flag
-
-- **word** = a maximal run of `wordchar`, where `wordchar` is any character except
-  unescaped whitespace and the metacharacters `* { } , ! ? \`. An unescaped `*` inside a word
-  is the glob; all other `wordchar`s are literal. A word must be non-empty.
-- **glob** = a word used in a value or operand position; `*` is the only metacharacter
-  (`fnmatch`). `?` is **not** a glob char here — it is a literal in words/values (it is special
-  only as a leading flag disposition). An empty value glob (`--out=`) matches only an empty value.
-- **flag name** = `-` or `--` followed by one or more of `[A-Za-z0-9_-]`.
-
-### 3.3 Escaping
-
-`\` escapes the next character to a literal: `\*` `\{` `\}` `\,` `\!` `\?` `\-` `\\` (and `\ `
-for a literal space inside a token). `\-` at the start of a term forces it to be read as a
-positional operand rather than a flag. Because rules live in JSON strings, the backslash is
-doubled in the file: `"Shell(echo \\*)"` matches a literal `*`.
-
-### 3.4 Grammar (EBNF)
-
-```
-pattern    = term { WS term } ;
-term       = positional | flagterm | rest | exact ;
-
-positional = word | posset ;
-word       = wordchar { wordchar } ;                 (* '*' = glob; non-empty *)
-posset     = [ "!" ] "{" word { "," word } "}" ;     (* all members non-flag *)
-
-flagterm   = [ "!" | "?" ] ( flag [ "=" glob ] | flagset | "-*" ) ;
-flag       = ("--" | "-") namechar { namechar } ;    (* len ≥ 1 after dashes *)
-flagset    = "{" flag { "," flag } "}" ;             (* all members flags *)
-
-rest       = "..." ;
-exact      = "!" "..." ;
-```
-
-`:*` (trailing) and `**` (any tokens) are accepted as **legacy aliases** for Claude
-compatibility: `:*` ≡ the default trailing behaviour, `**` ≡ `...`.
-
-## 4. Semantics
-
-### 4.1 Operand / flag split, and flag normalization
+### 5.2 Operand / flag split, and flag normalization
 
 1. Find the first standalone `--` token in argv. Everything at/after it is an **operand**
    (the `--` itself is dropped) — the POSIX end-of-options boundary.
 2. Before `--`: a token of `-` followed by ≥1 char is a **flag**; a bare `-` and everything
    else are **operands**. Order within each group is preserved.
-3. **Declared value flags:** if the pattern declares `--flag=<glob>`, the matcher knows
-   `--flag` takes a value, so a following `--flag value` token is consumed as the value, not an
-   operand. (Undeclared space-separated values are not knowable — see §8.)
-4. **Normalize flags into atoms** so clustering and `=`-values are comparable:
+3. **Declared value flags:** if the pattern declares `--flag=<glob>` or lists `--flag` in
+   `values(...)`, the matcher knows `--flag` takes a value, so a following `--flag value`
+   token is consumed as the value, not an operand. Both sources contribute to a single
+   `value_flags` set.
+4. **Unknown option arity:** for allow rules, a non-flag token immediately following an
+   undeclared option stays an ordinary operand and is never skipped to find a later command-path
+   term. Deny and ask rules conservatively explore both interpretations so an option value cannot
+   hide a dangerous path. Declare the flag with `values(...)` for an exact interpretation.
+5. **Normalize flags into atoms** so clustering and `=`-values are comparable:
    - `--name` → atom `--name`; `--name=value` → atom `--name` with value `value`.
    - a short cluster `-abc` → atoms `-a`, `-b`, `-c` (POSIX clustering).
    - the result is a set `F` of flag atoms plus a map `V: atom → value` for `=`-form and
      declared value flags.
 
-### 4.2 Positional path
+### 5.3 Positional path matching
 
 The positional terms match the operand list left-to-right:
 
-- **word**: `fnmatch(operand[i], word)`; for `i == 0`, match against `basename(operand[0])`.
-- **`{a,b}`**: `operand[i]` `fnmatch`es some member. **`!{a,b}`**: `operand[i]` **exists** and
-  matches no member (a missing operand never satisfies a negation).
+- **word**: `fnmatch(operand[i], word)`; for `i == 0`, bare executable patterns match the
+  basename, while patterns containing `/` match the supplied argv path.
+- **`{a,b}`**: `operand[i]` `fnmatch`es some member. **`!{a,b}`**: `operand[i]` **exists**
+  and matches no member (a missing operand never satisfies a negation).
 - **`...`**: consumes zero or more operands.
 
 `match_path` returns the **set of operand counts it can consume** (a range, because `...`
 backtracks). The caller uses this for exactness:
 
-- **default** (no `!...`): match succeeds if *some* consumable count exists and ≤ `len(operands)`
-  — extra trailing operands are allowed.
-- **exact** (`!...`): match succeeds only if `len(operands)` itself is a consumable count — i.e.
-  the path consumes **every** operand. This is what makes `cmd ... target !...` match
+- **default** (no `!...`): match succeeds if *some* consumable count exists and
+  ≤ `len(operands)` — extra trailing operands are allowed.
+- **exact** (`!...`): match succeeds only if `len(operands)` itself is a consumable count —
+  i.e. the path consumes **every** operand. This is what makes `cmd ... target !...` match
   `cmd a b target` but not `cmd a target b`.
 
-### 4.3 Flags
+### 5.4 Flag matching
 
 Pattern flag terms (over the normalized atoms `F`, values `V`):
 
 - **required** (`--foo` / `-x`): the atom is in `F`. Short flags compare per atom, so `-x`
   matches a `-x` atom produced from `-x`, `-xE`, `-ax`.
 - **forbidden** (`!--foo`): the atom is not in `F`.
-- **permitted** (`?--foo`): declared allowed; imposes nothing on its own (only affects closure).
+- **permitted** (`?--foo`, or a member of `only(...)`): declared allowed; imposes nothing on
+  its own. Only affects the permitted set when flags are closed.
 - **value** (`--out=<glob>`): the atom is in `F` and `fnmatch(V[atom], glob)`.
-- **sets**: `{--a,--b}` ≡ require any one; `!{--a,--b}` ≡ none present; `?{--a,--b}` ≡ permit all.
+- **sets**: `{--a,--b}` ≡ require any one; `!{--a,--b}` ≡ none present.
 
-### 4.4 Trailing default, `!...`, and flag closure
+### 5.5 Operand and flag defaults
 
 Two independent knobs, both permissive by default:
 
-| Pattern | operands | flags |
+| What you write | Operands | Flags |
 |---|---|---|
-| (default) | extra trailing allowed | unnamed flags allowed (open) |
-| `!-*` | extra trailing allowed | **closed**: only *permitted* atoms allowed |
-| `!...` | **exact**: path consumes all operands | **closed** |
+| (nothing) | extra trailing allowed | any flags allowed (open) |
+| `!...` | **exact**: path must consume all | any flags allowed (open) |
+| `!-*` or `only(...)` | extra trailing allowed | **closed**: only permitted flags |
+| `!... !-*` | **exact** | **closed** |
 
-- **`!-*` (closed flags):** every atom in `F` must be *permitted* — in the union of the
-  required, value, and `?`-permitted atoms. Any other flag → no match. (`!--foo` forbidden flags
-  reject if present whether open or closed.)
-- **`!...` (nothing else):** asserts **no unmatched operands and no unpermitted flags** — it is
-  exact-operands *plus* closed-flags. So `Shell(git status --short !...)` matches `git status
-  --short` (and `git --short status`) but not `git status --short --verbose` (extra flag) or
-  `git status --short x` (extra operand). `Shell(git stash !...)` matches only bare `git stash`.
+- **`!-*` / `only(...)` (closed flags):** every atom in `F` must be *permitted* — in the
+  union of the required, value, and permitted atoms. Any unpermitted flag → no match.
+  Forbidden flags (`!--foo`) reject if present regardless of open/closed.
+- **`!...` (exact operands):** the positional path must consume every operand. Does **not**
+  affect flags — use `!-*` or `only(...)` independently if you also want to close the flag
+  set.
 
-A **whitelist** is `!-*` with carve-outs: `Shell(git stash ?--keep-index ?-p !-*)` = "git stash,
-only the flags `--keep-index`/`-p` permitted, any operands."
+### 5.6 Precedence across rules
 
-`-*` written without `!` is the explicit form of the open default (rarely needed).
+Unchanged: `deny` > `ask` > `allow`. A single pattern cannot express "allow a prefix *except*
+one of its extensions" (set difference) — use the deny list (see §3 Cookbook).
 
-### 4.5 Precedence across rules
-
-Unchanged: `deny` > `ask` > `allow`. A single positional pattern cannot express "allow a prefix
-*except* one of its extensions" (set difference) — use the deny list (see §6).
-
-## 5. Matching algorithm
+### 5.7 Matching algorithm
 
 ```
 match(pattern, argv) -> bool:
-    operands, F, V = split_and_normalize(argv, pattern.value_flags)      # §4.1
+    operands, F, V = split_and_normalize(argv, pattern.value_flags)      # §5.2
 
-    consumable = match_path(pattern.path, operands)                      # §4.2 -> set[int]
+    consumable = match_path(pattern.path, operands)                      # §5.3
     if pattern.exact:                                                    # !...
         if len(operands) not in consumable:           return False
     else:
         if not any(c <= len(operands) for c in consumable): return False
 
-    for c in pattern.flag_constraints:                                   # §4.3
+    for c in pattern.flag_constraints:                                   # §5.4
         if c.required  and c.atom not in F:            return False
         if c.forbidden and c.atom in F:                return False
         if c.value is not None and not fnmatch(V.get(c.atom, MISSING), c.value):
                                                        return False
-    if pattern.closed:                                                   # !-* or !...
+    if pattern.closed_flags:                                             # !-* or only(...)
         permitted = {c.atom for c in pattern.flag_constraints if c.disp != Forbidden}
         if any(atom not in permitted for atom in F):   return False
     return True
@@ -209,145 +444,143 @@ match(pattern, argv) -> bool:
 
 `match_path` backtracks over `*` (consumes 1), `...` (consumes 0+), and word/`{…}` terms
 (consume 1 each), returning every total operand-count it can consume so the caller can apply
-exactness. Sets and words apply `fnmatch`; `argv[0]` is matched by basename.
+exactness. Sets and words apply `fnmatch`. Bare executable patterns match `argv[0]` by basename;
+path-qualified patterns match the supplied argv path.
 
-## 6. Cookbook
+## 6. Security model & limitations
 
-```jsonc
-// read-only-ish git: any of these subcommands, any args (trailing is the default)
-"Shell(git {status,log,diff,show,branch,tag})"
-
-// only switch onto namespaced branches (in-token glob)
-"Shell(git {checkout,switch} {feature,fix}/*)"
-
-// sed, any args EXCEPT in-place (a forbidden FLAG set — members are dashed)
-"Shell(sed !{-i,--in-place})"
-
-// require a flag, forbid another, rest open
-"Shell(git push --set-upstream !--force)"
-
-// deny: force-push (any force flag, any position) — deny wins over a broad allow
-"Shell(git push {--force,--force-with-lease,-f})"
-
-// deny: recursive force rm (both required; clustered -rf normalizes to -r,-f)
-"Shell(rm -r -f)"
-
-// whitelist: only these flags permitted, nothing else (operands still open)
-"Shell(git stash ?--keep-index ?-p !-*)"
-
-// value constraint (matches --output=x.json and --output x.json)
-"Shell(curl --output=*.json)"
-
-// lock-downs
-"Shell(git stash !...)"       // ONLY bare `git stash` — no extra operands, no flags
-"Shell(rm !-*)"               // rm with no flags: `rm f` yes, `rm -rf` no (operands open)
-"Shell(git status --short !...)"  // exactly `git status --short` (in any flag order)
-```
-
-**Allow `git stash list`, not `git stash`** — one rule; the longer path excludes the shorter:
-```jsonc
-"allow": ["Shell(git stash list)"]
-```
-
-**Allow `git stash`, not `git stash list`** — forbidding a *longer* command than you allow is a
-set difference → use precedence:
-```jsonc
-"allow": ["Shell(git stash)"],
-"deny":  ["Shell(git stash list)"]
-```
-
-## 7. Compatibility
-
-- Plain positional patterns (`Shell(ls)`, `Shell(git status)`) parse as before; the only change
-  is the permissive trailing default (§4.4).
-- **`Bash(...)` is accepted as a legacy alias** for `Shell(...)` (Claude's keyword), so existing
-  policies and pasted Claude rules keep working. `:*` and `**` are likewise legacy aliases.
-- **`import` is one-way faithful (Claude → agentperm).** Claude is exact-by-default and uses the
-  `Bash` keyword, so its `Bash(git status)` is written into the agentperm policy as
-  `Shell(git status !...)`, and its `Bash(git status:*)` becomes `Shell(git status)`. The stored
-  agentperm policy is then unambiguous and canonical — `Shell(x)` always means the permissive
-  default; imported exact rules carry `!...`. The reverse (exporting agentperm patterns back to
-  Claude) is **lossy/unsupported**: flag predicates, sets, negation, value globs, and in-token
-  globs have no Claude equivalent.
-- A *dashed* token in a pattern is a flag matched anywhere, not a strict-position token — the one
-  intentional divergence from Claude (it widens flag matches, which is the usual intent).
-
-## 8. Security model & limitations
-
-agentperm matches **argv shape, not command semantics**. The richer DSL improves expressiveness
-and ergonomics; it is **not** a stronger safety boundary.
+agentperm matches **argv shape, not command semantics**. The richer DSL improves
+expressiveness and ergonomics; it is **not** a stronger safety boundary.
 
 - **Negation is convenience, not containment.** `git push !--force` doesn't know every
-  force-equivalent; `rm !-rf` doesn't know every deletion path. Prefer broad `deny` rules and the
-  existing inner-command decomposition.
+  force-equivalent; `rm !-rf` doesn't know every deletion path. Prefer broad `deny` rules and
+  the existing inner-command decomposition.
 - **Operand globs are not path confinement.** `*.json` is not "a JSON file under this dir";
-  symlinks, `..`, absolute paths, and tool behaviour aren't modeled. Path confinement is a future
-  term (§10), not operand-glob sugar.
-- **Space-separated flag values can be misread.** `git -C /repo stash` counts `/repo` as an
-  operand, so `Shell(git stash)` may miss it; and adding `--out=<glob>` *changes* operand
-  classification because the matcher then consumes that value. This fails *closed* for `allow`
-  (→ prompt), but is an under-block for `deny`. Use `=`-form values or flag predicates.
+  symlinks, `..`, absolute paths, and tool behaviour aren't modeled. Path confinement is a
+  future term (§9), not operand-glob sugar.
+- **Unknown option arity fails closed for allows.** An allow-side `Shell(git stash)` does not
+  match `git -C /repo stash`; use `Shell(git values(-C) stash)` after deliberately reviewing that
+  option. Deny/ask rules retain conservative ambiguity so global options cannot hide a dangerous
+  path. Open flag sets can still change semantics, so read-only allows should use `!-*` or
+  `only(...)`.
 - **Short-flag clustering is heuristic** (`-rf` → `-r`,`-f`), not the tool's real parser; some
   tools parse short flags non-POSIX-ly.
-- **basename matching** of `argv[0]` is name identity, not path/executable identity.
-- **Flags are one flat set per command** (§10). `Shell(git stash ?--message !-*)` permits
-  `--message` *anywhere in the `git` invocation*, not specifically on `stash push` — the DSL
-  cannot scope a flag to a subcommand level in v1.
-- **Interpreters and unrecognized executors** (`python -c`, `make`, git aliases) can act without
-  the dangerous command appearing in argv — out of scope, as in `architecture.md`.
-- **Under bypass these results may not apply:** Claude bypass defers entirely; pane bypass turns
-  `Ask`/`NoOpinion` into `Allow` (only `Deny` survives).
+- A bare `argv[0]` pattern matches by basename. A pattern containing `/` matches the supplied
+  executable path instead, allowing path-qualified rules such as `.venv/bin/{pytest,ruff}`;
+  neither form resolves symlinks or proves executable identity.
+- **Flags are one flat set per command.** `Shell(git stash only(--message))` permits `--message`
+  *anywhere in the `git` invocation*, not specifically on `stash push` — the DSL cannot scope
+  a flag to a subcommand level in v1.
+- **Interpreters and unrecognized executors** (`python -c`, `make`, git aliases) can act
+  without the dangerous command appearing in argv — out of scope, as in `architecture.md`.
 
-## 9. Internal representation (for implementation)
+## 7. Formal grammar (EBNF)
+
+```
+pattern    = term { WS term } ;
+term       = positional | flagterm | rest | exact | only | values ;
+
+positional = word | posset ;
+word       = wordpart { wordpart } ;                 (* non-empty *)
+wordpart   = wordchar | "*" | embedded_set ;
+embedded_set = "{" word { "," word } "}" ;         (* expands inside one argv token *)
+posset     = [ "!" ] "{" word { "," word } "}" ;     (* all members non-flag *)
+
+flagterm   = [ "!" | "?" ] ( flag [ "=" glob ] | flagset | "-*" ) ;
+flag       = ("--" | "-") namechar { namechar } ;    (* len ≥ 1 after dashes *)
+flagset    = "{" flag { "," flag } "}" ;             (* all members flags *)
+
+only       = "only(" flag { "," flag } ")" ;         (* sugar: permits + closes *)
+values     = "values(" flag { "," flag } ")" ;       (* arity hint: flags consume next token *)
+
+rest       = "..." ;
+exact      = "!" "..." ;
+```
+
+## 8. Internal representation (for implementation)
 
 ```python
 # Path terms (positional)
-Word(glob: str)                                # literal/glob token; basename at index 0
+Word(glob: str)                                # literal/glob; argv path when glob contains '/'
 OneOf(globs: tuple[str, ...], negated: bool)   # {a,b} / !{a,b}
 AnyRest()                                       # ...   (a bare `*` is Word("*"))
 
 class Disposition(Enum): Required; Forbidden; Permitted
 FlagConstraint(atom: str, disp: Disposition, value_glob: str | None)
 # a flag set expands to one FlagConstraint per member sharing a disposition
+# only(...) expands to Permitted FlagConstraints + closed_flags=True
 
 @dataclass(frozen=True)
 class ShellPattern(Rule):
+    raw: str
     path: tuple[PathTerm, ...]
     flags: tuple[FlagConstraint, ...]
-    closed_flags: bool        # !-* OR !... present
-    exact: bool               # !... present (implies closed_flags + path consumes all operands)
-    # serialize() round-trips to the canonical Shell(...) string
+    flag_sets: tuple[tuple[str, ...], ...]
+    closed_flags: bool        # !-* or only(...) present
+    exact: bool               # !... present (independent of closed_flags)
+    value_flags: frozenset[str]  # atoms from values(...) + --flag=<glob> constraints
+    extra_values: frozenset[str] # values supplied by the structured dict form
 ```
 
-`ShellPattern` replaces the current string-form positional matcher (`BashCommand`). The dict
-form stays for import compatibility (and is now expressible inline) — its `tool` field is
-canonically `"Shell"`, with `"Bash"` accepted as an alias. Illegal states are unrepresentable: a
-`FlagConstraint` is never positional, a `PathTerm` never carries a disposition, and `exact ⇒
-closed_flags`.
+String rules serialize as their `Shell(...)` string. A structured rule with external `values`
+serializes as `{"rule": "Shell(...)", "values": [...]}` so its arity hints survive policy
+round-trips. `ShellPattern` coexists with the legacy positional `BashCommand` matcher.
+`exact` and `closed_flags` are independent booleans — either, both, or neither can be set.
 
-## 10. Out of scope (v1) / future
+## 9. Out of scope (v1) / future
 
-- **Per-subcommand flag scoping** — separate flag constraints for `git` (global) vs `stash` vs
-  `push` in `git stash push --foo`. v1 treats flags as one flat set (§8).
+- **Per-subcommand flag scoping** — separate flag constraints for `git` (global) vs `stash`
+  vs `push` in `git stash push --foo`. v1 treats flags as one flat set (§6).
 - **Path confinement** — an `under:<root>` term that resolves an operand and checks it stays
   under a root (with `..` / symlink handling).
 - **Numeric / regex value constraints** on flag values.
 
-The grammar reserves no syntax that blocks these; each is a new term kind that composes without
-changing existing patterns.
+The grammar reserves no syntax that blocks these; each is a new term kind that composes
+without changing existing patterns.
 
-## 11. Invalid patterns — fail loud
+## 10. Invalid patterns — fail loud
 
 A malformed `Shell(...)` rule must **raise a `PolicyError` at policy load**, never be silently
 dropped or reinterpreted as a tool-name rule. Silently dropping a rule is a security bug: a
 dropped `deny` becomes a wrong-allow. Invalid cases include:
 
 - unbalanced/empty `{}` or an empty word/member;
-- a `{…}` set mixing flag and positional members (§3.1);
+- a `{…}` set mixing flag and positional members;
 - `?` on a non-flag, or a bare `?`/`!` term;
-- a malformed flag name (`-`, `---x`, `--`);
+- a malformed flag name (`---x`, `--` used as a flag);
 - a trailing backslash or unknown escape;
+- `only(...)` appearing more than once in a pattern;
+- `only(...)` with a leading `!` or `?` sigil (`!only(...)`, `?only(...)` — `only` is its own
+  term kind, not a flag);
+- `only(...)` combined with explicit `-*` (open flag wildcard — contradictory);
+- `only(...)` with mixed flag/non-flag members;
+- `values(...)` appearing more than once in a pattern;
+- `values(...)` with a leading `!` or `?` sigil;
+- `values(...)` with non-flag members;
 - text that begins `Shell(` but does not close with `)` / does not parse as a pattern.
 
-Only strings that are *not* a `Shell(...)` rule fall through to the named-tool matcher; anything
-shaped like `Shell(...)` must parse or error.
+Only strings that are *not* a `Shell(...)` rule fall through to the named-tool matcher;
+anything shaped like `Shell(...)` must parse or error.
+
+## 11. Compatibility with `Bash(...)`
+
+Policy schema version `1` currently accepts both syntaxes:
+
+- Use `Shell(...)` for new rules and for order-independent flags, alternation, constraints, and
+  `values(...)` arity hints.
+- Existing `Bash(cmd:*)` and exact `Bash(cmd)` rules retain their positional matching semantics
+  and serialize unchanged.
+- `agentperm import` preserves the form supplied by each native adapter; it does not rewrite the
+  existing policy or promise to convert every imported shell rule to `Shell(...)`.
+
+There is currently no automatic schema migration and the policy version remains `1`. If you
+choose to convert a legacy rule manually, the closest common mappings are:
+
+| Old syntax | New syntax |
+|---|---|
+| `Bash(git status:*)` | `Shell(git status)` |
+| `Bash(git status)` | `Shell(git status !... !-*)` |
+| `Bash(pnpm ** build:*)` | `Shell(pnpm ... build)` |
+
+Review conversions that use `**` carefully: `Bash` matches the raw positional argv shape, while
+`Shell` normalizes flags and has open trailing operands and flags by default.

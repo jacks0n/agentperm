@@ -10,11 +10,25 @@ When the flag is on, agentperm coerces every `Ask` and `NoOpinion` verdict to
 ## Build
 
 ```sh
-rustup target add wasm32-wasip1
-cargo build --release --target wasm32-wasip1 --manifest-path zellij-plugin/Cargo.toml
-mkdir -p ~/.config/zellij/plugins
-cp zellij-plugin/target/wasm32-wasip1/release/agentperm_indicator.wasm ~/.config/zellij/plugins/
+cd zellij-plugin
+make install
 ```
+
+This builds the WASM binary and copies it to `~/.config/zellij/plugins/`.
+The Makefile resolves `rustc` through `rustup` so the build works even when
+Homebrew's `rust` formula shadows rustup's proxies on PATH.
+
+<details>
+<summary>Manual build (without Make)</summary>
+
+```sh
+rustup target add wasm32-wasip1
+RUSTC="$(rustup which rustc)" cargo build --release --target wasm32-wasip1 --manifest-path zellij-plugin/Cargo.toml
+mkdir -p ~/.config/zellij/plugins
+cp zellij-plugin/target/wasm32-wasip1/release/agentperm-indicator.wasm ~/.config/zellij/plugins/
+```
+
+</details>
 
 ## Configure
 

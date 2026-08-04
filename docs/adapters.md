@@ -1,6 +1,6 @@
 # Adapter notes
 
-Each agent has its own hook protocol, payload shape, and verdict envelope. The adapters in `src/agentperm/__init__.py` translate between them and the bridge's uniform `Request` / `Verdict` types.
+Each agent has its own hook protocol, payload shape, and verdict envelope. The adapters in `src/agentperm/adapters/` translate between them and the bridge's uniform `Request` / `Verdict` types.
 
 ## Claude Code
 
@@ -115,7 +115,7 @@ Codex's allow-list lives in `.rules` files using a `prefix_rule(pattern=[...], d
 
 ### Tool name canonicalization
 
-OpenCode names tools in lowercase (`bash`, `read`, `grep`). The bridge maps these to the Claude-style capitalized names (`Bash`, `Read`, `Grep`) when importing rules so the policy file uses one casing convention. Adapter-level translation back to OpenCode's names happens at decision time.
+OpenCode names tools in lowercase (`bash`, `read`, `grep`). The bridge maps these to the capitalized canonical names (`Read`, `Grep`, …) both when importing native rules and when parsing hook payloads at decision time. The policy file uses one canonical naming convention across all adapters.
 
 ## Gemini CLI
 
@@ -140,6 +140,85 @@ OpenCode names tools in lowercase (`bash`, `read`, `grep`). The bridge maps thes
 
 `import` is not yet implemented for Gemini.
 
+## Kiro CLI / IDE
+
+**Hook:** `PreToolUse`. `install` merges an embedded hook into every existing custom agent configuration in both the active global profile and the current Git workspace. It does not create `agents/kiro_default.json`: Kiro's built-in default agent is held in memory and cannot be edited. Current Kiro and the IDE are covered by the global standalone hook `~/.kiro/hooks/agentperm.json`. If `KIRO_HOME` is set, global locations are resolved beneath that directory. Rerun `install` after creating a new custom agent.
+
+**Payload shape:**
+```json
+{
+  "hook_event_name": "preToolUse",
+  "cwd": "/path/to/cwd",
+  "session_id": "...",
+  "tool_name": "shell",
+  "tool_input": { "command": "..." }
+}
+```
+
+**Verdict protocol — exit codes (not JSON):**
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Allow — tool execution proceeds |
+| `2` | Block — STDERR is returned to the LLM as the reason |
+
+Unlike the other adapters, Kiro does not use a JSON stdout envelope. The bridge writes the rationale to stderr and exits with code 2 to block, or exits 0 to allow. `NoOpinion` and `Allow` both exit 0; `Ask` and `Deny` both exit 2.
+
+### Tool name canonicalization
+
+Kiro uses lowercase tool names with aliases. The bridge maps them to agentperm's capitalized policy names:
+
+| Kiro tool name | agentperm name |
+|---|---|
+| `shell`, `execute_bash`, `execute_cmd` | `Bash` |
+| `read`, `fs_read`, `fsRead` | `Read` |
+| `write`, `fs_write`, `fsWrite` | `Write` |
+| `glob` | `Glob` |
+| `grep` | `Grep` |
+| `web_search` | `WebSearch` |
+| `web_fetch` | `WebFetch` |
+| `aws`, `use_aws` | `AWS` |
+| `code` | `Code` |
+| `knowledge` | `Knowledge` |
+| `delegate` | `Delegate` |
+| `subagent`, `use_subagent` | `Subagent` |
+| `@server/tool` (MCP) | passed through as-is |
+
+### Native rules import
+
+`import` reads the active Kiro profile's `agents/*.json` (`$KIRO_HOME/agents` when set, otherwise `~/.kiro/agents`) and extracts:
+
+- **`allowedTools`** — exact names and losslessly representable trailing-`*` prefix patterns become `NamedTool` allow rules. Shell aliases and Kiro-only suffix/`?` wildcard forms are skipped rather than imported with narrower semantics.
+- **`toolsSettings.shell.allowedCommands`** — each simple pattern becomes a `BashCommand` allow rule.
+- **`toolsSettings.shell.deniedCommands`** — each simple pattern becomes a `BashCommand` deny rule.
+
+Kiro uses regex patterns for commands (anchored with `\A`/`\z`). The bridge converts simple prefix patterns (e.g. `git status`, `git push.*`) but skips entries with complex regex metacharacters like alternation or character classes.
+
+### Hook file format (v3 + IDE)
+
+The standalone hook file at `~/.kiro/hooks/agentperm.json`:
+
+```json
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "agentperm",
+      "trigger": "PreToolUse",
+      "matcher": ".*",
+      "action": {
+        "type": "command",
+        "command": "/path/to/agentperm check --agent kiro --event preToolUse"
+      },
+      "timeout": 30,
+      "enabled": true
+    }
+  ]
+}
+```
+
+Custom Kiro CLI agents also receive an embedded `hooks.preToolUse` entry with the glob matcher `"*"`. Both global agents in `$KIRO_HOME/agents` and project agents in the current Git workspace's `.kiro/agents` directory are updated. Project-scope standalone hooks can be placed at `.kiro/hooks/agentperm.json` in a workspace root.
+
 ## Adapter contract
 
 If you want to add a new agent, the contract is in `AgentAdapter`:
@@ -150,9 +229,9 @@ class AgentAdapter(ABC):
     def install(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]: ...
     def import_native_rules(self) -> Iterator[tuple[Decision, Rule]]: ...
     def parse_event(self, payload: JsonObject, event_name: str) -> Request | None: ...
-    def write_verdict(self, verdict: Verdict, event_name: str) -> None: ...
+    def write_verdict(self, verdict: Verdict, event_name: str) -> int: ...
 ```
 
-`install` wires the bridge into the agent's hook config under the requested `mode` (Rulesync or Direct) and returns the list of paths it touched (empty if already up to date). `parse_event` translates the agent's payload into a `Request`. `write_verdict` serializes a `Verdict` into the agent's expected JSON envelope on stdout. `import_native_rules` is optional.
+`install` wires the bridge into the agent's hook config under the requested `mode` (Rulesync or Direct) and returns the list of paths it touched (empty if already up to date). `parse_event` translates the agent's payload into a `Request`. `write_verdict` serializes a `Verdict` into the agent's expected format and returns a process exit code (0 for most agents; Kiro returns 2 to block). `import_native_rules` is optional.
 
 Tests for adapter parse/serialize round-trips live in `tests/test_adapters.py`.
