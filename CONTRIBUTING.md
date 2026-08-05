@@ -69,6 +69,30 @@ pytest -q && ruff check . && basedpyright src tests
 - [ ] Public API change → docs updated (`docs/`, `README.md`)
 - [ ] Behavior change → `CHANGELOG.md` entry under `## [Unreleased]`
 
+## Releasing
+
+Releases are published to PyPI by `.github/workflows/publish.yml` using PyPI Trusted Publishing. The
+PyPI project must have a trusted publisher configured with these values:
+
+- Owner: `jacks0n`
+- Repository: `agentperm`
+- Workflow: `publish.yml`
+- Environment: `pypi`
+
+Set the release version in `pyproject.toml` and `uv.lock`, move the changelog entries into a matching
+versioned section, and merge those changes to `main`. After CI passes, publish a GitHub Release whose
+tag is `v` followed by that exact project version:
+
+```sh
+gh release create v0.3.0 \
+  --repo github.com/jacks0n/agentperm \
+  --title "agentperm 0.3.0" \
+  --generate-notes
+```
+
+Publishing the GitHub Release creates the tag and starts the PyPI workflow. The workflow rejects a tag
+that does not match the version in `pyproject.toml`; prereleases are not published.
+
 ## Issue reports
 
 Please include the trace log for any "still prompting" / "incorrectly allowed" reports — see [docs/troubleshooting.md](docs/troubleshooting.md#reporting-a-bug).
