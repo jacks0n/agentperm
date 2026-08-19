@@ -282,6 +282,15 @@ def parse_shell_pattern(pattern: str) -> ShellPattern:
                 path_terms.append(AnyRest())
             continue
 
+        # A standalone ``--`` is the end-of-options separator, not a flag.
+        # Preserve it as a positional term when the policy author spells it so
+        # patterns can require the same boundary as the command.
+        if remainder == "--":
+            if sigil is not None:
+                raise PolicyError(f"'{sigil}--' is invalid at position {start}")
+            path_terms.append(Word("--"))
+            continue
+
         # Step 3: -* or !-*
         if remainder == "-*":
             if sigil == "?":
@@ -419,6 +428,7 @@ def split_and_normalize(
     *,
     known_flags: frozenset[str] = frozenset(),
     optional_operands: set[int] | None = None,
+    preserve_double_dash: bool = False,
 ) -> tuple[list[str], set[str], dict[str, list[str | None]]]:
     """Split argv into operands and normalized flag atoms.
 
@@ -472,6 +482,8 @@ def split_and_normalize(
             continue
 
         if arg == "--":
+            if preserve_double_dash:
+                operands.append(arg)
             past_double_dash = True
             previous_unknown_flag = False
             i += 1
@@ -629,11 +641,15 @@ def match_shell_pattern(
     known_flags = {constraint.atom for constraint in pattern.flags}
     for group in pattern.flag_sets:
         known_flags.update(group)
+    preserve_double_dash = any(
+        isinstance(term, Word) and term.glob == "--" for term in pattern.path
+    )
     operands, flag_atoms, flag_values = split_and_normalize(
         segment.argv,
         pattern.value_flags,
         known_flags=frozenset(known_flags),
         optional_operands=optional_operands,
+        preserve_double_dash=preserve_double_dash,
     )
 
     # Positional path matching

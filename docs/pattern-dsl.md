@@ -34,6 +34,9 @@ intent-expression layer, *not* a sandbox.
 
 // exact: only bare `git stash` — no operands, no flags
 "Shell(git stash !... !-*)"
+
+// require an explicit end-of-options separator
+"Shell(mise exec -- just {check,dev})"
 ```
 
 ## 3. Cookbook
@@ -333,7 +336,8 @@ before a non-flag, `values(...)`, or a bare `?` term, is invalid (§10).
   (`fnmatch`). `?` is **not** a glob char — it is a literal in words/values (it is special
   only as a leading flag disposition). An empty value glob (`--out=`) matches only an empty
   value.
-- **flag name** = `-` or `--` followed by one or more of `[A-Za-z0-9_-]`.
+- **flag name** = `-` or `--` followed by one or more of `[A-Za-z0-9_-]`. A standalone
+  `--` is instead a positional end-of-options separator.
 
 ## 5. Matching semantics
 
@@ -347,8 +351,9 @@ default**; you opt into closing with `!-*` or `only(...)`.
 
 ### 5.2 Operand / flag split, and flag normalization
 
-1. Find the first standalone `--` token in argv. Everything at/after it is an **operand**
-   (the `--` itself is dropped) — the POSIX end-of-options boundary.
+1. Find the first standalone `--` token in argv. Everything after it is an **operand**. The
+   separator itself is normally dropped, but is retained as a positional operand when the pattern
+   explicitly contains `--`, allowing that pattern to require the POSIX end-of-options boundary.
 2. Before `--`: a token of `-` followed by ≥1 char is a **flag**; a bare `-` and everything
    else are **operands**. Order within each group is preserved.
 3. **Declared value flags:** if the pattern declares `--flag=<glob>` or lists `--flag` in

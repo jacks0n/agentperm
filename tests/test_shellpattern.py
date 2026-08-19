@@ -44,6 +44,13 @@ def test_parse_simple_words():
     assert pat.closed_flags is False
 
 
+def test_parse_double_dash_as_positional_separator():
+    pat = parse_shell_pattern("mise exec -- just dev")
+    assert isinstance(pat.path[2], Word)
+    assert pat.path[2].glob == "--"
+    assert not pat.flags
+
+
 def test_parse_glob_in_word():
     pat = parse_shell_pattern("git checkout feature/*")
     assert isinstance(pat.path[2], Word)
@@ -273,8 +280,8 @@ def test_error_invalid_flag_name_triple_dash():
         parse_shell_pattern("git ---x")
 
 
-def test_error_invalid_flag_name_bare_double_dash():
-    with pytest.raises(PolicyError, match="empty after dashes"):
+def test_error_sigil_on_double_dash_separator():
+    with pytest.raises(PolicyError, match="'!--' is invalid"):
         parse_shell_pattern("git push !--")
 
 
@@ -747,6 +754,14 @@ def test_normalize_short_option_attached_value_forms(token: str, value: str) -> 
     # -- terminates option inference.
     ("gh pr view", ("gh", "--", "--repo", "owner/repo", "pr", "view"), False),
 
+    # A pattern may explicitly require the end-of-options separator. Patterns
+    # that omit it retain the historical behavior where argv normalization
+    # drops the separator.
+    ("mise exec -- just {check,dev}", ("mise", "exec", "--", "just", "check"), True),
+    ("mise exec -- just {check,dev}", ("mise", "exec", "--", "just", "dev"), True),
+    ("mise exec -- just {check,dev}", ("mise", "exec", "just", "dev"), False),
+    ("mise exec just dev", ("mise", "exec", "--", "just", "dev"), True),
+
     # values() with short flag
     ("git values(-C) status",
      ("git", "-C", "/other/repo", "status"), True),
@@ -814,6 +829,7 @@ def test_shell_pattern_match(pattern: str, argv: tuple[str, ...], expected: bool
     "Shell(git push {--force,--force-with-lease,-f})",
     "Shell(sed !{-i,--in-place})",
     "Shell(aws values(--region, --profile) ec2 describe-*)",
+    "Shell(mise exec -- just {check,dev})",
 ])
 def test_round_trip(rule_str: str):
     rule = parse_rule(rule_str)
