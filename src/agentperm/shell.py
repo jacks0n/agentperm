@@ -178,7 +178,7 @@ _REDIRECT_INNER_TYPES = frozenset({
     "test_command", "compound_statement",
     "if_statement", "while_statement", "until_statement",
     "case_statement", "negated_command",
-    "function_definition", "declaration_command",
+    "function_definition", "declaration_command", "unset_command",
 })
 
 
@@ -274,6 +274,29 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
             decl_argv.append(_node_text(child, source))
         yield Segment(tuple(decl_argv), ())
         yield from decl_inner
+        return
+    if node.type == "unset_command":
+        # tree-sitter-bash gives ``unset`` a dedicated node whose children contain
+        # only its options and variable names. Reconstruct a normal command segment
+        # so configured Shell(unset ...) rules can govern it. As with ordinary
+        # commands, substitutions are evaluated independently and omitted from argv
+        # because their resulting value cannot be known statically.
+        unset_argv: list[str] = ["unset"]
+        unset_inner: list[Segment] = []
+        for child in node.named_children:
+            if child.type in ("command_substitution", "process_substitution") \
+                    or _node_contains_substitution(child):
+                unset_inner.extend(_extract_substitution_segments(child, source))
+                continue
+            if child.type == "variable_name":
+                unset_argv.append(_node_text(child, source))
+                continue
+            if child.type in _OPAQUE_ARG_TYPES:
+                unset_argv.append(_argument_text(child, source))
+                continue
+            raise _UnsupportedShellError(f"unsupported unset part {child.type!r}")
+        yield Segment(tuple(unset_argv), ())
+        yield from unset_inner
         return
     if node.type in _CONTROL_FLOW_TYPES:
         for child in node.named_children:

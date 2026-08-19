@@ -583,6 +583,20 @@ def test_declaration_with_substitution_extracts_inner():
     assert [s.argv for s in pipeline.segments] == [("export",), ("curl", "evil")]
 
 
+def test_unset_yields_command_segment():
+    pipeline = parse_pipeline("unset AWS_ENDPOINT_URL AWS_ACCESS_KEY_ID")
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [
+        ("unset", "AWS_ENDPOINT_URL", "AWS_ACCESS_KEY_ID"),
+    ]
+
+
+def test_unset_with_substitution_extracts_inner():
+    pipeline = parse_pipeline('unset "$(curl evil)"')
+    assert pipeline.parseable
+    assert [s.argv for s in pipeline.segments] == [("unset",), ("curl", "evil")]
+
+
 def test_bare_variable_assignment_is_parseable():
     """``SP=/tmp/x`` with no command on the same statement parses as its own
     ``variable_assignment`` node (distinct from a ``command``'s assignment child in
