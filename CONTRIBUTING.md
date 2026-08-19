@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for considering a contribution. The bridge is small and focused on purpose — please read [docs/architecture.md](docs/architecture.md) before proposing larger changes.
+Thanks for considering a contribution. agentperm is small and focused on purpose — please read [docs/architecture.md](docs/architecture.md) before proposing larger changes.
 
 ## Dev setup
 

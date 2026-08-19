@@ -1,5 +1,7 @@
 # Policy reference
 
+Everything the `.agent-permissions.jsonc` format can express. For a guided introduction, start with [getting started](getting-started.md); for ready-made rule sets, see the bundled [templates](../src/agentperm/templates/) (`agentperm init --list`) and the complete setups in [`examples/`](../examples/).
+
 The policy file is JSON-with-comments (JSON5-compatible). Policies can live at:
 
 - `~/.agent-permissions.jsonc` — global policy
@@ -457,3 +459,7 @@ When multiple allow rules match the same command (e.g. a broad `Shell({echo,ls})
 Imports are additive: existing rules in the policy file are kept, new rules are appended in the
 form produced by the native adapter. Import does not migrate existing `Bash(...)` rules to
 `Shell(...)`. Run `import` then `edit` to deduplicate or reorganize.
+
+---
+
+Back to the [docs index](README.md).

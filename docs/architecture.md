@@ -4,7 +4,7 @@
 
 Every coding agent (Claude Code, Codex, OpenCode, Gemini CLI, Kiro) has its own permission system. They all do roughly the same job — match a tool call against an allow / ask / deny list — but their grammars differ, none of them parse compound shell commands well, and you end up maintaining separate configs that drift out of sync.
 
-The bridge replaces those configs with one policy file plus a small adapter per agent. Each adapter knows how to install a hook into its agent and how to parse the agent's hook payload into a uniform `Request`. Decision-making and shell parsing live in one place.
+agentperm replaces those configs with one policy file plus a small adapter per agent. Each adapter knows how to install a hook into its agent and how to parse the agent's hook payload into a uniform `Request`. Decision-making and shell parsing live in one place.
 
 ## Domain model
 
@@ -20,7 +20,7 @@ class Decision(StrEnum):
     NoOpinion = "no-opinion"
 ```
 
-A `Verdict` is a `Decision` plus a human-readable rationale. `NoOpinion` means "the policy doesn't speak to this" — the bridge returns an empty payload and the host agent falls back to its native permission flow.
+A `Verdict` is a `Decision` plus a human-readable rationale. `NoOpinion` means "the policy doesn't speak to this" — agentperm returns an empty payload and the host agent falls back to its native permission flow.
 
 Strictness ordering: `Deny > Ask > Allow > NoOpinion`. The strictest verdict wins when aggregating per-segment results.
 
@@ -84,7 +84,7 @@ adapter.write_verdict (agent-specific JSON envelope)
 
 ### Aggregation
 
-For a compound like `cat foo | head -60`, the bridge produces a `Verdict` per segment and aggregates:
+For a compound like `cat foo | head -60`, agentperm produces a `Verdict` per segment and aggregates:
 
 - **Strictest wins.** `Deny` from any segment beats everything.
 - **Allow + NoOpinion → Ask.** If at least one segment is allowed but another is unrecognized, the result escalates to `Ask`. This is the rule that prevents "I have a rule for `cat`" from silently allowing `cat foo | unknown_command`.
@@ -106,7 +106,7 @@ File-write verdicts are configurable via `shell.redirection` (`stdoutToFile`, `a
 
 ### Bypass — agentperm defers (Claude-specific)
 
-Claude Code's hook payload includes `permission_mode`. When the user is in `bypassPermissions` mode they've explicitly turned permission checks off — so the bridge gets out of the way entirely:
+Claude Code's hook payload includes `permission_mode`. When the user is in `bypassPermissions` mode they've explicitly turned permission checks off — so agentperm gets out of the way entirely:
 
 ```python
 def coerce_for_permission_mode(verdict, payload):
@@ -115,13 +115,13 @@ def coerce_for_permission_mode(verdict, payload):
     return verdict
 ```
 
-Claude fires `PreToolUse` hooks even in bypass mode, but the bridge returns `NoOpinion` (an empty `{}` envelope) for *everything* — `Ask`, `Allow`, even `Deny` — and lets Claude's native bypass proceed. agentperm does not second-guess a user who has explicitly chosen "skip all permissions." (The Claude write path still attaches any MCP-bypass `updatedInput`, so bypass still propagates to a downstream Codex MCP tool — see below.) If you want `deny` rules to keep biting, don't enable Claude's bypass; use [pane bypass](#pane-bypass-zellij), which *does* preserve `Deny`.
+Claude fires `PreToolUse` hooks even in bypass mode, but agentperm returns `NoOpinion` (an empty `{}` envelope) for *everything* — `Ask`, `Allow`, even `Deny` — and lets Claude's native bypass proceed. agentperm does not second-guess a user who has explicitly chosen "skip all permissions." (The Claude write path still attaches any MCP-bypass `updatedInput`, so bypass still propagates to a downstream Codex MCP tool — see below.) If you want `deny` rules to keep biting, don't enable Claude's bypass; use [pane bypass](#pane-bypass-zellij), which *does* preserve `Deny`.
 
 Codex / OpenCode / Gemini don't ship a bypass mode in the hook payload, so this is a no-op there. They get an out-of-band equivalent via [pane bypass](#pane-bypass-zellij) below or [MCP bypass propagation](#mcp-bypass-propagation) when running as a Claude Code MCP server.
 
 ### MCP bypass propagation
 
-When Claude Code is in bypass mode and calls a Codex MCP tool (`mcp__codex__*`), the downstream Codex agent's own hooks don't know about Claude Code's bypass state — their payloads carry `"permission_mode": "default"`. The bridge solves this with Claude Code's `updatedInput` hook mechanism: when a PreToolUse hook fires for an `mcp__codex__*` tool in bypass mode, the bridge injects `"approval-policy": "never"` into the tool input. Codex then runs in full-auto mode, so its `PermissionRequest` hooks never fire. `PreToolUse` hooks still fire, so Deny rules still bite for any command the parser can read.
+When Claude Code is in bypass mode and calls a Codex MCP tool (`mcp__codex__*`), the downstream Codex agent's own hooks don't know about Claude Code's bypass state — their payloads carry `"permission_mode": "default"`. agentperm solves this with Claude Code's `updatedInput` hook mechanism: when a PreToolUse hook fires for an `mcp__codex__*` tool in bypass mode, agentperm injects `"approval-policy": "never"` into the tool input. Codex then runs in full-auto mode, so its `PermissionRequest` hooks never fire. `PreToolUse` hooks still fire, so Deny rules still bite for any command the parser can read.
 
 The injection is scoped to `mcp__codex__*` because `approval-policy` is Codex's input contract; other MCP servers don't honour it, so widening the prefix would inject a meaningless key into unrelated tool calls.
 
@@ -187,7 +187,7 @@ echo  printf           write to fds; redirects evaluated separately
 
 `_match_bash` allows the **synthetic markers** *before* user rules are consulted — they aren't real commands, so a user rule can't meaningfully target them. The **real builtins** are allowed only as a *fallback* when no user rule matches, so an explicit `deny` / `ask` / `allow` rule on one of them (e.g. `deny: Bash(echo:*)`) still takes precedence. Redirect verdicts apply per-segment via `_decide_segment`, so `echo foo > out` correctly surfaces an Ask via the redirect rule, and pipe aggregation still escalates `echo foo | unknown` to Ask.
 
-The contract is "nothing the bridge does should turn an inert shell primitive into a permission prompt." Anything with real side effects — `cd`, `export`, `kill`, `eval`, etc. — stays under user rules.
+The contract is "nothing agentperm does should turn an inert shell primitive into a permission prompt." Anything with real side effects — `cd`, `export`, `kill`, `eval`, etc. — stays under user rules.
 
 ## Shell parsing
 
@@ -217,25 +217,25 @@ It refuses to parse:
 
 ## Limitations
 
-The bridge primarily analyzes shell *command structure*. `Python(readonly)` adds deliberately shallow
+agentperm primarily analyzes shell *command structure*. `Python(readonly)` adds deliberately shallow
 AST inspection for literal `python -c` and Python heredoc source, but it does not prove the behavior of
 called functions or inspect other interpreted languages:
 
 - **Other interpreters and unsupported Python forms:** `perl -e "…"`, `ruby -e`, `node -e`, `awk 'prog'`, `python -m`, scripts, and interactive stdin remain argv-only. Inline Python is inspected only when an allow-side `Python(readonly)` rule is present.
 - **Unrecognized executor prefixes:** the decomposed/​recognized wrapper lists (`command`, `env`, `timeout`, …) are not exhaustive. An executor not on either list (`busybox rm …`, `find . -exec rm …`) is treated as an ordinary command and returns `NoOpinion`.
 
-`NoOpinion` defers to the host agent. Under any **bypass** the bridge defers entirely anyway (Claude bypass → `{}`; pane bypass → `Allow`), so commands the parser can't fully decompose are **not** caught under bypass — bypass means "I accept the risk." In normal mode, an unrecognized executor returns `NoOpinion` (host decides) while a *recognized-but-undecomposable* wrapper returns `Ask`. Treat shell rules and `Python(readonly)` as intent classification, not a security sandbox, and don't rely on bypass as a boundary against a command crafted to evade analysis.
+`NoOpinion` defers to the host agent. Under any **bypass** agentperm defers entirely anyway (Claude bypass → `{}`; pane bypass → `Allow`), so commands the parser can't fully decompose are **not** caught under bypass — bypass means "I accept the risk." In normal mode, an unrecognized executor returns `NoOpinion` (host decides) while a *recognized-but-undecomposable* wrapper returns `Ask`. Treat shell rules and `Python(readonly)` as intent classification, not a security sandbox, and don't rely on bypass as a boundary against a command crafted to evade analysis.
 
 ## Why Tree-sitter Bash
 
-The first version of this bridge used a regex-based shell parser. It had real bugs:
+The first version of agentperm used a regex-based shell parser. It had real bugs:
 
 - `2>&1` parsed as "write to file `1`" → false positive on file-write detection
 - `cat foo 2>&1 | head -60` got the redirect attached to the wrong segment
 - `bash -c "ls -la"` was unrecognized
 - `FOO=bar ls` matched `FOO=bar` as the command name
 
-Tree-sitter Bash is a maintained Bash grammar. It eliminates the regex parser's shell syntax bugs and supports shell constructs such as `for` loops. The bridge interfaces with it only inside `parse_pipeline` and the parser helpers — domain code never sees raw Tree-sitter `Node` values.
+Tree-sitter Bash is a maintained Bash grammar. It eliminates the regex parser's shell syntax bugs and supports shell constructs such as `for` loops. agentperm interfaces with it only inside `parse_pipeline` and the parser helpers — domain code never sees raw Tree-sitter `Node` values.
 
 ## Module layout
 
@@ -248,7 +248,9 @@ src/agentperm/
 ├── pythoncode.py         Shallow AST analysis for inline Python (Python(readonly))
 ├── rules.py              Rule parsing: string/dict → Rule objects
 ├── policy.py             Policy file I/O (load, save, merge)
-├── cli.py                CLI entry point (install, import, check, edit)
+├── cli.py                CLI entry point (install, uninstall, import, init, validate, why, check, edit)
+├── validate.py           Policy linting (`agentperm validate`)
+├── templates/            Bundled rule templates (`agentperm init`)
 ├── errors.py             PolicyError exception
 ├── fileio.py             read_json, atomic_write
 └── adapters/
@@ -264,3 +266,7 @@ src/agentperm/
 ## Type safety
 
 The codebase runs under `basedpyright` strict mode. There is no `Any`. JSON values are typed as `JsonValue` (a recursive union of scalars, `Sequence`, and `Mapping`). `tree-sitter-bash` and `tomlkit` ship partial type information; their boundaries are isolated in `pyproject.toml` and narrowed at the seam. Domain code downstream of those seams sees only typed values.
+
+---
+
+Back to the [docs index](README.md).

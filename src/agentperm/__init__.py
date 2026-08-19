@@ -5,9 +5,10 @@ Package layout:
     agentperm.shell     — Tree-sitter Bash → Pipeline
     agentperm.pythoncode — shallow AST analysis for inline Python
     agentperm.rules     — string/dict ↔ Rule
-    agentperm.policy    — file ↔ Policy
+    agentperm.policy    — file ↔ Policy, bundled templates
+    agentperm.validate  — policy linting
     agentperm.adapters  — AgentAdapter ABC + Claude/Codex/Opencode/Gemini/Kiro
-    agentperm.cli       — import, check, edit, install
+    agentperm.cli       — install, uninstall, import, init, validate, why, check, edit
 """
 
 from __future__ import annotations

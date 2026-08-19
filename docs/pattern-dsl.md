@@ -589,3 +589,7 @@ choose to convert a legacy rule manually, the closest common mappings are:
 
 Review conversions that use `**` carefully: `Bash` matches the raw positional argv shape, while
 `Shell` normalizes flags and has open trailing operands and flags by default.
+
+---
+
+Back to the [docs index](README.md).
