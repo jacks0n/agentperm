@@ -23,6 +23,10 @@ typecheck:
 # All three gates — matches the PR checklist in CONTRIBUTING.md.
 check: lint typecheck test
 
+# Regenerate the README demo GIF (requires vhs: brew install vhs).
+demo:
+    vhs docs/media/demo.tape
+
 # --- zellij plugin ---
 
 # One-time: install the WASI target the plugin compiles to.
