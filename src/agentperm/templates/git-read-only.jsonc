@@ -1,0 +1,22 @@
+// Read-only git: history, diffs, status, refs — no mutations.
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      "Shell(git {status,log,diff,show,blame,shortlog,describe,reflog} values(-C))",
+      "Shell(git {cat-file,check-ignore,grep,ls-files,ls-remote,ls-tree} values(-C))",
+      "Shell(git {merge-base,merge-tree,range-diff,rev-list,rev-parse} values(-C))",
+      // fetch updates remote-tracking refs but never touches your work.
+      "Shell(git fetch values(-C))",
+      // branch listing only — creation, deletion, and renames stay closed.
+      "Shell(git branch !... ?{-a,-r,-l,-v,-vv,--all,--remotes,--list,--show-current} !-* values(-C))",
+      "Shell(git remote ?-v !... !-* values(-C))",
+      "Shell(git remote {show,get-url} values(-C))",
+      "Shell(git stash {list,show} values(-C))",
+      "Shell(git worktree list values(-C))",
+      "Shell(git config {get,list} values(-C))"
+    ],
+    "ask": [],
+    "deny": []
+  }
+}

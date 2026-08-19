@@ -42,12 +42,28 @@ from .domain import (
     narrow_json,
 )
 from .errors import PolicyError
-from .policy import PolicyFile, git_toplevel, load_policy_file, merged_policy, save_policy_file, write_default_policy
+from .policy import (
+    DEFAULT_TEMPLATES,
+    PolicyFile,
+    Template,
+    TemplateMerge,
+    available_templates,
+    git_toplevel,
+    load_policy_file,
+    load_template,
+    merge_templates_into,
+    merged_policy,
+    parse_policy_text,
+    render_templates,
+    save_policy_file,
+    write_default_policy,
+)
 from .rules import parse_rule
 from .shell import parse_pipeline
 
 __all__ = [
     "ADAPTERS",
+    "DEFAULT_TEMPLATES",
     "POLICY_FILENAME",
     "AgentAdapter",
     "AgentName",
@@ -76,19 +92,26 @@ __all__ = [
     "Segment",
     "ShellPattern",
     "ShellRequest",
+    "Template",
+    "TemplateMerge",
     "ToolRequest",
     "Verdict",
     "agentperm_bypass_dir",
     "aggregate",
+    "available_templates",
     "coerce_for_pane_bypass",
     "coerce_for_permission_mode",
     "git_toplevel",
     "load_policy_file",
+    "load_template",
     "main",
+    "merge_templates_into",
     "merged_policy",
     "narrow_json",
     "parse_pipeline",
+    "parse_policy_text",
     "parse_rule",
+    "render_templates",
     "save_policy_file",
     "write_default_policy",
 ]

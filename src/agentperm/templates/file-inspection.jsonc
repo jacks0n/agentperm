@@ -1,0 +1,26 @@
+// Read-only file, text, and system inspection commands.
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      "Shell({cat,head,tail,less,more,nl,wc,file,stat,readlink,realpath,du,tree,ls})",
+      "Shell({grep,egrep,fgrep,rg,ag})",
+      "Shell({diff,cmp,comm,sort,uniq,cut,tr,fold,jq,awk})",
+      "Shell(sed !{-i,--in-place})",
+      // find is deliberately absent: its single-dash long options (-delete,
+      // -exec) defeat flag matching, so they can't be reliably excluded.
+      "Shell({date,uname,hostname,id,whoami,which,whereis,env,printenv,ps,pgrep,lsof,df,uptime})",
+      // Inert shell builtins agents emit constantly.
+      "Shell({:,cd,echo,exit,false,printf,pwd,test,true,type})",
+      // Any command asked only for its version or help text.
+      "Shell(... {--version,--help} !... !-*)",
+      // Inline `python -c` that the AST check proves read-only.
+      "Python(readonly)",
+      "Read",
+      "Grep",
+      "Glob"
+    ],
+    "ask": [],
+    "deny": []
+  }
+}

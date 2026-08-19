@@ -25,12 +25,19 @@ from .domain import (
     Verdict,
     narrow_json,
 )
+from .fileio import atomic_write
 from .policy import (
+    DEFAULT_TEMPLATES,
     PolicyError,
     PolicyFile,
+    available_templates,
     git_toplevel,
     load_policy_file,
+    load_template,
+    merge_templates_into,
     merged_policy,
+    parse_policy_text,
+    render_templates,
     save_policy_file,
     write_default_policy,
 )
@@ -70,6 +77,41 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("import", help="pull native allow/ask/deny rules into ~/.agent-permissions.jsonc")
 
+    init = sub.add_parser("init", help="create or extend a policy file from bundled rule templates")
+    init.add_argument(
+        "templates",
+        nargs="*",
+        metavar="template",
+        help=f"template names to merge (default: {' '.join(DEFAULT_TEMPLATES)})",
+    )
+    init.add_argument(
+        "--list",
+        dest="list_templates",
+        action="store_true",
+        help="list available templates and exit",
+    )
+    init_target = init.add_mutually_exclusive_group()
+    init_target.add_argument(
+        "--global",
+        dest="init_local",
+        action="store_false",
+        help="write ~/.agent-permissions.jsonc (default)",
+    )
+    init_target.add_argument(
+        "--local",
+        dest="init_local",
+        action="store_true",
+        help="write <repo root>/.agent-permissions.jsonc",
+    )
+    init_target.add_argument(
+        "-o",
+        "--output",
+        dest="init_output",
+        metavar="PATH",
+        help="write to PATH instead",
+    )
+    init.set_defaults(init_local=False, init_output=None)
+
     check = sub.add_parser("check", help="runtime decision; reads stdin, writes stdout")
     check.add_argument("--agent", required=True, choices=[a.value for a in AgentName])
     check.add_argument("--event", required=True)
@@ -99,6 +141,13 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_install(mode=args.mode, dry_run=args.dry_run)
     if args.command == "import":
         return _cmd_import()
+    if args.command == "init":
+        return _cmd_init(
+            names=args.templates,
+            local=args.init_local,
+            output=args.init_output,
+            list_templates=args.list_templates,
+        )
     if args.command == "check":
         return cmd_check(AgentName(args.agent), args.event)
     if args.command == "edit":
@@ -384,6 +433,59 @@ def coerce_for_pane_bypass(
         session=session,
         original=verdict,
     )
+
+
+def _cmd_init(*, names: list[str], local: bool, output: str | None, list_templates: bool) -> int:
+    if list_templates:
+        listing = available_templates()
+        width = max(len(name) for name, _ in listing)
+        for name, description in listing:
+            print(f"{name:<{width}}  {description}")
+        return 0
+    selected = names or list(DEFAULT_TEMPLATES)
+    try:
+        templates = [load_template(name) for name in selected]
+    except PolicyError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    if output is not None:
+        path = Path(output)
+    elif local:
+        root = git_toplevel(Path.cwd())
+        if root is None:
+            print("init --local: not inside a git repository", file=sys.stderr)
+            return 2
+        path = root / POLICY_FILENAME
+    else:
+        path = Path.home() / POLICY_FILENAME
+
+    if not path.exists():
+        atomic_write(path, render_templates(templates))
+        print(f"wrote {path}")
+        for template in templates:
+            count = sum(1 for _ in template.file.policy.all_rules())
+            print(f"  {template.name}: {count} rules")
+        return 0
+
+    text = path.read_text()
+    try:
+        existing = parse_policy_text(text, str(path))
+    except PolicyError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    merge = merge_templates_into(existing, templates)
+    if not merge.added and not merge.redirection_changed:
+        print(f"{path}: no new rules")
+        return 0
+    save_policy_file(path, merge.file)
+    print(f"updated {path}")
+    for decision, rule, template_name in merge.added:
+        print(f"  +{decision.value} {json.dumps(rule.serialize())}  [{template_name}]")
+    if merge.redirection_changed:
+        print("  +shell.redirection defaults filled in")
+    if "//" in text or "/*" in text:
+        print(f"note: comments in {path} are not preserved when merging", file=sys.stderr)
+    return 0
 
 
 def _cmd_edit(*, local: bool = False) -> int:

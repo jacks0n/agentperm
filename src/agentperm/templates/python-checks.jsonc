@@ -1,0 +1,24 @@
+// Python quality loop: pytest, ruff check, basedpyright, mypy.
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      "Shell(pytest)",
+      "Shell(ruff check)",
+      "Shell({basedpyright,mypy,pyright})",
+      "Shell(uv run pytest)",
+      "Shell(uv run ruff check)",
+      "Shell(uv run {basedpyright,mypy,pyright})",
+      "Shell({python,python3} -m pytest)",
+      "Shell(uv run python -m pytest)",
+      "Shell(.venv/bin/{pytest,basedpyright,mypy,pyright})",
+      "Shell(./.venv/bin/{pytest,basedpyright,mypy,pyright})",
+      "Shell(.venv/bin/ruff check)",
+      "Shell(./.venv/bin/ruff check)",
+      "Shell({python,python3} -m py_compile)",
+      "Shell({python,python3} -m json.tool)"
+    ],
+    "ask": [],
+    "deny": []
+  }
+}

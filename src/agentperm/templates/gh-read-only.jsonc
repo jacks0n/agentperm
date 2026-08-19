@@ -1,0 +1,21 @@
+// Read-only GitHub CLI: view/list PRs, issues, runs; GET-only gh api.
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      "Shell(gh auth status values(--hostname))",
+      "Shell(gh pr {checks,diff,list,status,view} values(--hostname,--repo,-R))",
+      "Shell(gh issue {list,status,view} values(--hostname,--repo,-R))",
+      "Shell(gh run {list,view,watch} values(--hostname,--repo,-R))",
+      "Shell(gh release {list,view} values(--hostname,--repo,-R))",
+      "Shell(gh repo {list,view} values(--hostname,--json,--jq,--limit))",
+      "Shell(gh search {code,commits,issues,prs,repos} values(--hostname))",
+      "Shell(gh workflow {list,view} values(--hostname,--repo,-R))",
+      "Shell(gh variable {get,list} values(--hostname,--repo,-R))",
+      // gh api restricted to GETs: no graphql, no method/body/header flags.
+      "Shell(gh api values(--hostname) !{graphql} !{-X,--method,-f,--raw-field,-F,--field,--input,-H,--header})"
+    ],
+    "ask": [],
+    "deny": []
+  }
+}

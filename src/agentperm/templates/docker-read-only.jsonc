@@ -1,0 +1,14 @@
+// Read-only Docker: ps, logs, inspect, ls — no builds, runs, or removals.
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      "Shell(docker {ps,inspect,logs,top,stats,port,history,diff,version,info})",
+      "Shell(docker {container,image,network,volume,context} {ls,inspect})",
+      "Shell(docker compose {ls,ps,config,logs,top,version})",
+      "Shell(docker system df)"
+    ],
+    "ask": [],
+    "deny": []
+  }
+}

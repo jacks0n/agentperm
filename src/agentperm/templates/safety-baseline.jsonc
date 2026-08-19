@@ -1,0 +1,29 @@
+// Deny destructive commands, ask on in-place edits, gate file redirects.
+{
+  "version": 1,
+  "permissions": {
+    "allow": [],
+    "ask": [
+      {
+        "tool": "Bash",
+        "command": ["sed", "gsed"],
+        "when": { "hasOption": ["-i", "--in-place"] },
+        "reason": "sed in-place editing changes files"
+      }
+    ],
+    "deny": [
+      "Shell(sudo)",
+      "Shell(su)",
+      "Shell(rm -r -f /*)",
+      "Shell(fdisk)"
+    ]
+  },
+  "shell": {
+    "redirection": {
+      "stderrToDevNull": "allow",
+      "stdoutToFile": "ask",
+      "appendToFile": "ask",
+      "allowPaths": ["/tmp"]
+    }
+  }
+}

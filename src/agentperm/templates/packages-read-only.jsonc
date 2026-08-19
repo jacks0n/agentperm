@@ -1,0 +1,24 @@
+// Read-only package managers: npm, pnpm, pip, uv, brew, cargo inspection.
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      "Shell(npm {explain,ls,outdated,search,view,why})",
+      // exact: blocks `npm audit fix`, which mutates package.json.
+      "Shell(npm audit !...)",
+      "Shell(pnpm {audit,list,ls,outdated,why})",
+      "Shell({pip,pip3} {check,debug,freeze,inspect,list,show})",
+      "Shell({pip,pip3} config {get,list})",
+      "Shell({pip,pip3} index versions)",
+      "Shell({pip,pip3} cache {dir,info,list})",
+      "Shell({python,python3} -m pip {check,freeze,inspect,list,show})",
+      "Shell(uv pip {check,freeze,list,show,tree})",
+      "Shell(uv tool list)",
+      "Shell(uv tree)",
+      "Shell(brew {deps,info,list,outdated,search})",
+      "Shell(cargo {metadata,search,tree})"
+    ],
+    "ask": [],
+    "deny": []
+  }
+}

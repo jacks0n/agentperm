@@ -6,6 +6,15 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- `agentperm init`: create or extend a policy file from bundled, composable rule templates grouped
+  by domain — `safety-baseline`, `file-inspection`, `git-read-only`, `gh-read-only`, `aws-read-only`,
+  `docker-read-only`, `packages-read-only`, and `python-checks`. With no arguments it writes a
+  starter set (`safety-baseline file-inspection git-read-only`); `--list` enumerates templates;
+  `--local` targets the repo root and `-o PATH` anywhere else. A fresh file keeps rules grouped
+  under per-template comment headers; an existing file gains only the rules it doesn't already
+  have, and its redirect decisions are never overridden.
+- `SECURITY.md`: threat model, the implicit trust of project-level policy files, bypass surfaces,
+  and failure behavior.
 - `Shell(...)` accepts a standalone `--` operand, allowing patterns to require an end-of-options boundary while `--name` remains a flag.
 
 ### Changed

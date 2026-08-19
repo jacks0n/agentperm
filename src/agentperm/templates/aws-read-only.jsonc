@@ -1,0 +1,31 @@
+// Read-only AWS CLI: describe/get/list across common services.
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      // Note: get-* is non-mutating but not secret-free — it includes
+      // `ssm get-parameter` and `s3api get-object`. Tighten per service if
+      // your parameters or buckets hold secrets.
+      "Shell(aws values(--profile,--region,--output) {ec2,ecs,ecr,eks,lambda} {describe-*,get-*,list-*})",
+      "Shell(aws values(--profile,--region,--output) {apigateway,cloudfront,elbv2,route53} {describe-*,get-*,list-*})",
+      "Shell(aws values(--profile,--region,--output) {athena,dynamodb,elasticache,kinesis,rds} {describe-*,get-*,list-*})",
+      "Shell(aws values(--profile,--region,--output) {events,scheduler,sfn,sns,sqs} {describe-*,get-*,list-*})",
+      "Shell(aws values(--profile,--region,--output) {acm,cognito-idp,iam,kms,sts,wafv2} {describe-*,get-*,list-*})",
+      "Shell(aws values(--profile,--region,--output) {cloudformation,cloudwatch,organizations,ssm} {describe-*,get-*,list-*})",
+      "Shell(aws values(--profile,--region,--output) {codebuild,codepipeline} {batch-get-*,get-*,list-*})",
+      "Shell(aws values(--profile,--region,--output) cloudtrail {describe-*,get-*,list-*,lookup-*})",
+      "Shell(aws values(--profile,--region,--output) xray {batch-get-*,get-*})",
+      "Shell(aws values(--profile,--region,--output) s3api {get-*,head-*,list-*})",
+      "Shell(aws values(--profile,--region,--output) s3 ls)",
+      "Shell(aws values(--profile,--region,--output) logs {describe-*,get-*,filter-log-events,start-query,tail})",
+      // secretsmanager is deliberately metadata-only: get-* would include
+      // get-secret-value, which reads secret payloads.
+      "Shell(aws values(--profile,--region,--output) secretsmanager {describe-*,list-*})",
+      "Shell(aws values(--profile,--region,--output) iam simulate-*)",
+      "Shell(aws sts get-caller-identity)",
+      "Shell(aws configure {list,list-profiles} !... !-*)"
+    ],
+    "ask": [],
+    "deny": []
+  }
+}
