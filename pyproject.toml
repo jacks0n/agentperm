@@ -4,47 +4,25 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentperm"
-version = "0.3.0"
+version = "0.4.0"
 description = "Permission policy mediator for Claude Code, Codex, OpenCode, Gemini CLI, and Kiro."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
 authors = [{ name = "Jackson Cooper", email = "jackson@jacksonc.com" }]
 keywords = [
-    "ai",
-    "ai-agent",
-    "ai-agents",
-    "ai-tools",
-    "agent",
-    "agentic",
-    "agentic-ai",
-    "agentic-tools",
-    "ai-coding-assistant",
-    "anthropic",
-    "tree-sitter",
-    "tree-sitter-bash",
-    "claude",
     "claude-code",
-    "codex",
     "codex-cli",
-    "coding-agent",
-    "coding-assistant",
-    "developer-tools",
-    "gemini",
     "gemini-cli",
-    "hooks",
-    "kiro",
-    "llm",
-    "llm-agent",
-    "llm-tools",
-    "mcp",
-    "mediator",
     "opencode",
-    "openai",
+    "kiro",
+    "coding-agent",
+    "ai-agents",
     "permissions",
-    "policy",
     "policy-engine",
-    "shell",
+    "hooks",
+    "tree-sitter-bash",
+    "llm",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -75,6 +53,8 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/jacks0n/agentperm"
 Repository = "https://github.com/jacks0n/agentperm"
+Documentation = "https://github.com/jacks0n/agentperm/tree/main/docs"
+Changelog = "https://github.com/jacks0n/agentperm/blob/main/CHANGELOG.md"
 Issues = "https://github.com/jacks0n/agentperm/issues"
 
 [project.scripts]

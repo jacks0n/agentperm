@@ -4,6 +4,8 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-20
+
 ### Added
 
 - `agentperm init`: create or extend a policy file from bundled, composable rule templates grouped
@@ -127,7 +129,8 @@ Initial public release.
 - Gemini native-rule import is unavailable because its regex policy cannot be safely round-tripped.
 - Legacy `BashOption` matching conservatively ignores the `--` boundary; use `Shell(...)` for boundary-aware rules.
 
-[Unreleased]: https://github.com/jacks0n/agentperm/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jacks0n/agentperm/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.4.0
 [0.3.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.3.0
 [0.2.1]: https://github.com/jacks0n/agentperm/releases/tag/v0.2.1
 [0.2.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.2.0
