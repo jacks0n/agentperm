@@ -200,7 +200,7 @@ def cmd_check(agent: AgentName, event: str) -> int:
     if isinstance(request, ShellRequest):
         request = ShellRequest(pipeline=request.pipeline, cwd=cwd)
     try:
-        policy = merged_policy(local_root=git_toplevel(cwd))
+        policy = merged_policy(cwd=cwd)
     except PolicyError as error:
         _trace(agent, event, payload, None, f"policy load failed: {error}")
         return adapter.write_verdict(Verdict(Decision.Ask, f"policy load failed: {error}"), event)
@@ -388,7 +388,8 @@ def coerce_for_pane_bypass(
 
 def _cmd_edit(*, local: bool = False) -> int:
     if local:
-        # --local targets the project policy `check` reads at the git repo root.
+        # Keep --local anchored to a deliberate project boundary even though
+        # runtime discovery also supports more specific directory policies.
         # Require a worktree so we never create a stray file in an unrelated cwd.
         root = git_toplevel(Path.cwd())
         if root is None:

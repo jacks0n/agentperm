@@ -165,15 +165,36 @@ def save_policy_file(path: Path, policy_file: PolicyFile) -> None:
     atomic_write(path, json.dumps(raw, indent=2) + "\n")
 
 
-def merged_policy(local_root: Path | None) -> Policy:
-    """Merge global ``~/.agent-permissions.jsonc`` with optional project-local file."""
-    paths: list[Path] = [Path.home() / POLICY_FILENAME]
-    if local_root is not None:
-        candidate = local_root / POLICY_FILENAME
-        if candidate not in paths:
-            paths.append(candidate)
+def _policy_paths(cwd: Path | None) -> tuple[Path, ...]:
+    """Policy files in merge order: global, then filesystem root through ``cwd``."""
+    global_path = Path.home() / POLICY_FILENAME
+    paths = [global_path]
+    seen = {global_path.resolve()}
+    if cwd is None:
+        return tuple(paths)
+
+    resolved_cwd = cwd.resolve()
+    for directory in reversed((resolved_cwd, *resolved_cwd.parents)):
+        candidate = directory / POLICY_FILENAME
+        identity = candidate.resolve()
+        if identity in seen:
+            continue
+        paths.append(candidate)
+        seen.add(identity)
+    return tuple(paths)
+
+
+def merged_policy(cwd: Path | None = None, *, local_root: Path | None = None) -> Policy:
+    """Merge global policy with every policy from the filesystem root through ``cwd``.
+
+    ``local_root`` is retained as a compatibility alias for callers of the previous
+    Git-root-only API. Supplying both names is ambiguous and therefore rejected.
+    """
+    if cwd is not None and local_root is not None:
+        raise TypeError("merged_policy accepts either cwd or local_root, not both")
+    search_from = cwd if cwd is not None else local_root
     policy = Policy()
-    for path in paths:
+    for path in _policy_paths(search_from):
         if not path.exists():
             continue
         policy = policy.merged_with(load_policy_file(path).policy)

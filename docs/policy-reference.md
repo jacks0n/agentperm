@@ -1,11 +1,13 @@
 # Policy reference
 
-The policy file is JSON-with-comments (JSON5-compatible). It lives at:
+The policy file is JSON-with-comments (JSON5-compatible). Policies can live at:
 
 - `~/.agent-permissions.jsonc` — global policy
-- `<project-root>/.agent-permissions.jsonc` — per-project override
+- `<any-directory>/.agent-permissions.jsonc` — directory-scoped policy
 
-Both are loaded; rules union, deny wins. Project-root is detected via `git rev-parse --show-toplevel`, falling back to the current working directory.
+The global policy is loaded first, followed by every policy from the filesystem root through the
+command's working directory. Duplicate paths are loaded once. Rules union and deny wins. For
+override-style settings, files closer to the working directory take precedence.
 
 ## Top-level shape
 

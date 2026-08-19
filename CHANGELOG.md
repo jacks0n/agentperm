@@ -7,10 +7,23 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ### Added
 
 - `Shell(...)` accepts a standalone `--` operand, allowing patterns to require an end-of-options boundary while `--name` remains a flag.
-- Published GitHub releases build and publish matching non-prerelease tags to PyPI via trusted publishing.
+
+### Changed
+
+- Runtime policy discovery now merges the global policy with every `.agent-permissions.jsonc` from
+  the filesystem root through the command's working directory instead of limiting local policy to
+  the Git worktree root. Directory policies also apply outside Git repositories; rules union across
+  levels, while the nearest override-style setting wins.
+- `check` uses the working directory from the hook payload for policy discovery. A malformed policy
+  at any discovered level produces an `ask` verdict whose reason identifies the failing file.
+- `edit --local` remains anchored to the Git worktree root; nested directory policies are created
+  manually.
+- The exported `merged_policy` API accepts `cwd` for hierarchy discovery while retaining
+  `local_root` as a compatibility alias.
 
 ### Fixed
 
+- OpenCode imports preserve scoped non-shell permission patterns instead of widening them to whole-tool rules.
 - `unset` is parsed as a policy-governed command, including nested substitutions.
 - `continue` receives the overridable inert-builtin fallback allow.
 
@@ -92,6 +105,7 @@ Initial public release.
 - Gemini native-rule import is unavailable because its regex policy cannot be safely round-tripped.
 - Legacy `BashOption` matching conservatively ignores the `--` boundary; use `Shell(...)` for boundary-aware rules.
 
+[Unreleased]: https://github.com/jacks0n/agentperm/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.3.0
 [0.2.1]: https://github.com/jacks0n/agentperm/releases/tag/v0.2.1
 [0.2.0]: https://github.com/jacks0n/agentperm/releases/tag/v0.2.0

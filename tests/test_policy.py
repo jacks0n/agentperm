@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
+import agentperm.policy as policy_module
 from agentperm import (
+    POLICY_FILENAME,
     BashCommand,
     BashOption,
     Decision,
@@ -30,6 +32,7 @@ from agentperm import (
     coerce_for_pane_bypass,
     coerce_for_permission_mode,
     load_policy_file,
+    merged_policy,
     parse_pipeline,
     parse_rule,
     save_policy_file,
@@ -555,6 +558,126 @@ def test_merged_policies_union_rules_without_duplicates():
     merged = a.merged_with(b)
     prefixes = {r.prefix for r in merged.allow if isinstance(r, BashCommand)}
     assert prefixes == {("ls",), ("cat",), ("rg",)}
+
+
+def test_merged_policy_loads_global_and_all_ancestors_with_nearest_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    home = Path("/home/example")
+    cwd = Path("/workspace/project/src")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    policy_files = {
+        home / POLICY_FILENAME: PolicyFile(
+            policy=Policy(
+                allow=(BashCommand(("cat",)),),
+                redirection=RedirectionPolicy(stdout_to_file=Decision.Deny, allow_paths=("/global",)),
+                python_calls=PythonCallPolicy(allow=frozenset({"package.read"})),
+            )
+        ),
+        Path("/") / POLICY_FILENAME: PolicyFile(policy=Policy(allow=(BashCommand(("echo",)),))),
+        Path("/workspace") / POLICY_FILENAME: PolicyFile(
+            policy=Policy(
+                ask=(BashCommand(("curl",)),),
+                redirection=RedirectionPolicy(
+                    stdout_to_file=Decision.Ask,
+                    append_to_file=Decision.Deny,
+                    allow_paths=("/workspace",),
+                ),
+                python_calls=PythonCallPolicy(ask=frozenset({"package.inspect"})),
+            )
+        ),
+        Path("/workspace/project") / POLICY_FILENAME: PolicyFile(
+            policy=Policy(
+                deny=(BashCommand(("rm",)),),
+                redirection=RedirectionPolicy(stdout_to_file=Decision.Ask, allow_paths=("/project",)),
+                python_calls=PythonCallPolicy(deny=frozenset({"package.delete"})),
+            )
+        ),
+        cwd / POLICY_FILENAME: PolicyFile(
+            policy=Policy(
+                allow=(BashCommand(("pwd",)),),
+                redirection=RedirectionPolicy(stdout_to_file=Decision.Allow, allow_paths=("/cwd",)),
+            )
+        ),
+    }
+    loaded: list[Path] = []
+
+    def policy_exists(path: Path) -> bool:
+        return path in policy_files
+
+    def fake_load_policy_file(path: Path) -> PolicyFile:
+        loaded.append(path)
+        return policy_files[path]
+
+    monkeypatch.setattr(Path, "exists", policy_exists)
+    monkeypatch.setattr(policy_module, "load_policy_file", fake_load_policy_file)
+
+    policy = merged_policy(cwd=cwd)
+
+    assert loaded == list(policy_files)
+    assert tuple(rule.prefix for rule in policy.allow if isinstance(rule, BashCommand)) == (
+        ("cat",),
+        ("echo",),
+        ("pwd",),
+    )
+    assert tuple(rule.prefix for rule in policy.ask if isinstance(rule, BashCommand)) == (("curl",),)
+    assert tuple(rule.prefix for rule in policy.deny if isinstance(rule, BashCommand)) == (("rm",),)
+    assert policy.redirection.stdout_to_file is Decision.Allow
+    assert policy.redirection.append_to_file is Decision.Deny
+    assert policy.redirection.allow_paths == ("/global", "/workspace", "/project", "/cwd")
+    assert policy.python_calls.allow == frozenset({"package.read"})
+    assert policy.python_calls.ask == frozenset({"package.inspect"})
+    assert policy.python_calls.deny == frozenset({"package.delete"})
+
+
+def test_merged_policy_loads_global_only_once_when_cwd_is_below_home(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    home = Path("/home/example")
+    cwd = home / "project"
+    global_path = home / POLICY_FILENAME
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    loaded: list[Path] = []
+
+    def global_policy_exists(path: Path) -> bool:
+        return path == global_path
+
+    def recording_load(path: Path) -> PolicyFile:
+        loaded.append(path)
+        return PolicyFile(policy=Policy(allow=(BashCommand(("cat",)),)))
+
+    monkeypatch.setattr(Path, "exists", global_policy_exists)
+    monkeypatch.setattr(policy_module, "load_policy_file", recording_load)
+
+    merged_policy(cwd=cwd)
+
+    assert loaded.count(global_path) == 1
+
+
+def test_merged_policy_accepts_legacy_local_root_keyword(monkeypatch: pytest.MonkeyPatch):
+    home = Path("/home/example")
+    local_root = Path("/workspace/project")
+    policy_path = local_root / POLICY_FILENAME
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
+    def local_policy_exists(path: Path) -> bool:
+        return path == policy_path
+
+    def load_local_policy(path: Path) -> PolicyFile:
+        assert path == policy_path
+        return PolicyFile(policy=Policy(deny=(BashCommand(("rm",)),)))
+
+    monkeypatch.setattr(Path, "exists", local_policy_exists)
+    monkeypatch.setattr(policy_module, "load_policy_file", load_local_policy)
+
+    policy = merged_policy(local_root=local_root)
+
+    assert tuple(rule.prefix for rule in policy.deny if isinstance(rule, BashCommand)) == (("rm",),)
+
+
+def test_merged_policy_rejects_cwd_and_legacy_local_root_together():
+    with pytest.raises(TypeError, match="either cwd or local_root"):
+        merged_policy(cwd=Path("/workspace"), local_root=Path("/workspace"))
 
 
 # ---- Inert command names -------------------------------------------------

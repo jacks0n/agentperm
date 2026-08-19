@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from agentperm import POLICY_FILENAME, main
+import agentperm.cli as cli_module
+from agentperm import POLICY_FILENAME, BashCommand, Policy, PolicyError, main
 
 EMPTY_DEFAULT = {"version": 1, "permissions": {"allow": [], "ask": [], "deny": []}}
 DENY_RM = '{"version":1,"permissions":{"deny":["Bash(rm:*)"]}}'
@@ -181,44 +182,45 @@ def test_edit_global_and_local_are_mutually_exclusive() -> None:
     assert exit_info.value.code == 2  # argparse usage error
 
 
-# --- check: project-local policy is git-root-only, keyed off the payload cwd --
+# --- check: ancestor policies are keyed off the payload cwd ----------------
 
 
-def test_check_resolves_payload_cwd_to_git_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_check_passes_payload_cwd_to_public_policy_loader(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    home = tmp_path / "home"
-    home.mkdir()  # no global policy
-    repo = tmp_path / "repo"
-    nested = repo / "pkg" / "nested"
-    nested.mkdir(parents=True)
-    _init_repo(repo)
-    (repo / POLICY_FILENAME).write_text(DENY_RM)
-    neutral = tmp_path / "neutral"
-    neutral.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
-    monkeypatch.chdir(neutral)  # bridge process runs OUTSIDE the repo
+    payload_cwd = Path("/workspace/project/src")
+    received: list[Path | None] = []
 
-    # payload cwd is deep inside the repo -> must resolve up to the repo-root policy
-    assert _decision(_run_check(monkeypatch, capsys, "rm foo", cwd=nested)) == "deny"
+    def fake_merged_policy(cwd: Path | None = None, *, local_root: Path | None = None) -> Policy:
+        assert local_root is None
+        received.append(cwd)
+        return Policy(deny=(BashCommand(("rm",)),))
+
+    monkeypatch.setattr(cli_module, "merged_policy", fake_merged_policy)
+
+    assert _decision(_run_check(monkeypatch, capsys, "rm foo", cwd=payload_cwd)) == "deny"
+    assert received == [payload_cwd]
 
 
-def test_check_ignores_local_policy_outside_git_repo(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_check_asks_and_names_malformed_ancestor_policy(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    home = tmp_path / "home"
-    home.mkdir()  # no global policy
-    loose = tmp_path / "loose"
-    loose.mkdir()
-    (loose / POLICY_FILENAME).write_text(DENY_RM)  # same rule, but NOT in a git repo
-    neutral = tmp_path / "neutral"
-    neutral.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
-    monkeypatch.chdir(neutral)
+    cwd = Path("/workspace/project/src")
+    policy_path = Path("/workspace/project") / POLICY_FILENAME
 
-    assert _decision(_run_check(monkeypatch, capsys, "rm foo", cwd=loose)) != "deny"
+    def failing_merged_policy(cwd: Path | None = None, *, local_root: Path | None = None) -> Policy:
+        raise PolicyError(f"{policy_path}: invalid JSON/JSONC")
+
+    monkeypatch.setattr(cli_module, "merged_policy", failing_merged_policy)
+
+    verdict = _run_check(monkeypatch, capsys, "cat README.md", cwd=cwd)
+
+    assert _decision(verdict) == "ask"
+    hook = verdict.get("hookSpecificOutput")
+    assert isinstance(hook, dict)
+    reason = hook.get("permissionDecisionReason")
+    assert isinstance(reason, str)
+    assert str(policy_path) in reason
 
 
 def test_check_applies_python_readonly_ast_policy(

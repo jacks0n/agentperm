@@ -75,7 +75,7 @@ Behavior:
 
 1. Read JSON payload from stdin
 2. Parse it via the named adapter into a `Request`
-3. Load merged policy (global + project-local if cwd is inside a git repo)
+3. Load the global policy plus every policy from the filesystem root through the payload cwd
 4. Decide → aggregate → coerce for permission mode → emit verdict envelope on stdout
 
 Failure modes (all fail open with empty `{}` so the agent's native flow takes over):
@@ -129,7 +129,9 @@ agentperm edit [--global | --local]
 ```
 
 - `--global` (default) edits `~/.agent-permissions.jsonc`.
-- `--local` edits the current git repository's root `.agent-permissions.jsonc` — the project-local file that `check` merges at decision time. Exits non-zero if you are not inside a git worktree, rather than creating a stray file in an unrelated directory.
+- `--local` edits the current Git repository's root `.agent-permissions.jsonc`. Runtime discovery also
+  reads policies in more specific directories, but those are created manually. The command exits
+  non-zero outside a Git worktree rather than creating a stray file in an unrelated directory.
 
 The created file has no rules; add your own (see the [policy reference](policy-reference.md)). The exit code is the editor's own exit code.
 

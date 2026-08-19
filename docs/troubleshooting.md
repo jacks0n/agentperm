@@ -85,13 +85,12 @@ grep -E '"(Bash\(|allow)' ~/.agent-permissions.jsonc
 
 Remember that **`deny` beats `allow`** — if you have an `allow: Bash(rm:*)` rule and want to block `rm -rf /tmp`, add a `deny: Bash(rm -rf /*)` rule. Don't remove the allow.
 
-### Did a project-local override widen things?
+### Did a directory policy widen things?
 
-```sh
-cat <repo>/.agent-permissions.jsonc
-```
-
-Project-local rules union with global. To narrow at project level, add `deny` rules — there's no "remove from upstream" form.
+agentperm loads the global policy and every `.agent-permissions.jsonc` from the filesystem root to
+the command's working directory. Check each ancestor directory when tracking down an unexpected
+rule. Rules union across all levels. To narrow at a more specific level, add `deny` rules — there's
+no "remove from upstream" form.
 
 ### Is bypass mode on?
 

@@ -52,7 +52,11 @@ wildcard or `mcp__memory__*` prefix.
 
 ### Policy
 
-`Policy` is `(deny, ask, allow)` — three immutable tuples of `Rule`. Decisions are evaluated in that order; the first matching rule wins. Two policies merge by taking the union of each list (deduplicated by structural equality) — that's how `~/.agent-permissions.jsonc` and a project-local override combine.
+`Policy` is `(deny, ask, allow)` plus feature-specific policy objects. Decisions are evaluated in
+deny, ask, allow order; the first matching rule wins. Runtime discovery folds the global policy and
+every filesystem-ancestor policy through `Policy.merged_with`. Rule-like settings union and
+deduplicate; override-style settings are applied from root toward the working directory so the
+nearest value wins. Discovery therefore does not need feature-specific logic when `Policy` grows.
 
 ## Decision flow
 

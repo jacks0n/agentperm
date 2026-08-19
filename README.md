@@ -100,9 +100,12 @@ Rules go in `allow`, `ask`, or `deny`. First match wins within a list; deny beat
 
 In compounds the strictest segment decides. One unrecognized command = ask. Deny always wins. Full spec: [Shell pattern DSL](docs/pattern-dsl.md) · [Policy reference](docs/policy-reference.md).
 
-## Global + per-project
+## Global + directory hierarchy
 
-`~/.agent-permissions.jsonc` sets global defaults. `<repo>/.agent-permissions.jsonc` adds project-specific rules. Both apply at the same time — deny wins across both.
+`~/.agent-permissions.jsonc` sets global defaults. From the command's working directory, agentperm
+loads every `.agent-permissions.jsonc` on the path up to the filesystem root. All policies apply at
+the same time — deny wins across them. Override-style settings are applied from root toward the
+working directory, so the nearest file wins.
 
 ```jsonc
 // global — broad defaults
@@ -122,7 +125,9 @@ In compounds the strictest segment decides. One unrecognized command = ask. Deny
 }}
 ```
 
-A repo adds its own tools and clamps down on dangerous variants without touching the global file. `agentperm edit --local` creates or opens the project file.
+A repo adds its own tools and clamps down on dangerous variants without touching the global file.
+Nested directories can refine that policy further. `agentperm edit --local` creates or opens the Git
+worktree-root file; more specific files can be created manually.
 
 ## Redirect allowlisting
 
