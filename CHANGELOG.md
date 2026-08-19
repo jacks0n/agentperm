@@ -24,6 +24,8 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   named-tool rules, unknown keys, and redirect decisions that would be silently ignored. With no
   arguments it checks every file runtime discovery would load from the current directory. Exit 1
   on errors; warnings alone exit 0.
+- `agentperm why "<command>"`: explain what the merged policy decides for a shell command —
+  the aggregate verdict, a per-segment breakdown for compounds, and the policy files consulted.
 - `SECURITY.md`: threat model, the implicit trust of project-level policy files, bypass surfaces,
   and failure behavior.
 - `Shell(...)` accepts a standalone `--` operand, allowing patterns to require an end-of-options boundary while `--name` remains a flag.

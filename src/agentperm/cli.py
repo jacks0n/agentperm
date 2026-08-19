@@ -42,6 +42,7 @@ from .policy import (
     save_policy_file,
     write_default_policy,
 )
+from .shell import parse_pipeline
 from .validate import validate_policy_file
 
 # -----------------------------------------------------------------------------
@@ -141,6 +142,13 @@ def main(argv: list[str] | None = None) -> int:
         help="policy files to check (default: every file runtime discovery would load here)",
     )
 
+    why = sub.add_parser("why", help="explain what the merged policy decides for a shell command")
+    why.add_argument(
+        "shell_command",
+        metavar="command",
+        help="shell command to evaluate, quoted as one argument",
+    )
+
     check = sub.add_parser("check", help="runtime decision; reads stdin, writes stdout")
     check.add_argument("--agent", required=True, choices=[a.value for a in AgentName])
     check.add_argument("--event", required=True)
@@ -181,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "validate":
         return _cmd_validate(paths=args.paths)
+    if args.command == "why":
+        return _cmd_why(command=args.shell_command)
     if args.command == "check":
         return cmd_check(AgentName(args.agent), args.event)
     if args.command == "edit":
@@ -554,6 +564,29 @@ def _cmd_init(*, names: list[str], local: bool, output: str | None, list_templat
         print("  +shell.redirection defaults filled in")
     if "//" in text or "/*" in text:
         print(f"note: comments in {path} are not preserved when merging", file=sys.stderr)
+    return 0
+
+
+def _cmd_why(*, command: str) -> int:
+    cwd = Path.cwd()
+    try:
+        policy = merged_policy(cwd=cwd)
+    except PolicyError as error:
+        print(f"policy load failed: {error}", file=sys.stderr)
+        return 2
+    request = ShellRequest(parse_pipeline(command), cwd=cwd)
+    verdict = policy.decide(request)
+    print(f"{verdict.decision.value} — {verdict.rationale or 'no rule matched'}")
+    segments = policy.decide_segments(request)
+    if len(segments) > 1:
+        for segment, segment_verdict in segments:
+            rendered = shlex.join(segment.argv)
+            print(f"  {rendered}  → {segment_verdict.decision.value} ({segment_verdict.rationale})")
+    paths = existing_policy_paths(cwd)
+    if paths:
+        print("policy files: " + ", ".join(str(path) for path in paths))
+    else:
+        print("no policy files found — run `agentperm init` to create one")
     return 0
 
 

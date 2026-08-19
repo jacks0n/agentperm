@@ -247,3 +247,54 @@ def test_check_applies_python_readonly_ast_policy(
     )
     assert _decision(readonly) == "allow"
     assert _decision(mutation) == "ask"
+
+
+# --- why: human-readable decision explanations --------------------------------
+
+
+def _why_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    return home
+
+
+def test_why_explains_each_segment_of_a_compound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = _why_home(tmp_path, monkeypatch)
+    (home / POLICY_FILENAME).write_text(
+        '{"version":1,"permissions":{"allow":["Shell({cat,head})"],"deny":["Shell(sudo)"]}}'
+    )
+
+    assert main(["why", "cat foo | ./deploy.sh"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("ask")
+    assert "cat foo  → allow" in out
+    assert "./deploy.sh  → no-opinion" in out
+    assert str(home / POLICY_FILENAME) in out
+
+    assert main(["why", "sudo ls"]) == 0
+    assert capsys.readouterr().out.startswith("deny — deny by rule")
+
+
+def test_why_with_no_policy_files_points_at_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _why_home(tmp_path, monkeypatch)
+    assert main(["why", "ls"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("no-opinion")
+    assert "agentperm init" in out
+
+
+def test_why_broken_policy_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = _why_home(tmp_path, monkeypatch)
+    (home / POLICY_FILENAME).write_text("not jsonc")
+    assert main(["why", "ls"]) == 2
+    assert "policy load failed" in capsys.readouterr().err

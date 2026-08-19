@@ -563,6 +563,19 @@ class Policy:
         for rule in self.allow:
             yield Decision.Allow, rule
 
+    def decide_segments(self, request: ShellRequest) -> list[tuple[Segment, Verdict]]:
+        """Per-segment verdicts for a parseable shell request (`agentperm why`).
+
+        Empty for an unparseable pipeline; ``decide`` reports that case as one
+        aggregate ``Ask`` verdict.
+        """
+        if not request.pipeline.parseable:
+            return []
+        return [
+            (segment, self._decide_segment(segment, request.cwd))
+            for segment in request.pipeline.segments
+        ]
+
     def merged_with(self, other: Policy) -> Policy:
         def union(a: tuple[Rule, ...], b: tuple[Rule, ...]) -> tuple[Rule, ...]:
             seen: list[Rule] = list(a)
