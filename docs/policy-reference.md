@@ -248,6 +248,7 @@ Two categories of shell input have no OS-level side effect on their own:
 | `[`, `[[` | Synthetic from `test_command` AST node (both emit `("[",)`) | Allowed *before* user rules — not real commands |
 | `((` | Synthetic from arithmetic `compound_statement` | Allowed *before* user rules — not real commands |
 | `true`, `false`, `:` | Status setters / no-op | Allowed as a *fallback* — user rules override |
+| `continue` | Changes loop control only in the current shell | Allowed as a *fallback* — user rules override |
 | `read` | Binds shell variable from stdin (process-local) | Allowed as a *fallback* — user rules override |
 | `echo`, `printf` | Write to fds; redirects evaluated separately | Allowed as a *fallback* — user rules override |
 

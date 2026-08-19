@@ -63,7 +63,7 @@ The trace will show the verdict rationale: `"compound includes unrecognized segm
 
 The synthetic predicate markers (`[`, `[[`, `((`) are parser artifacts, not real commands, so a `Bash([:*)` rule can't gate them — they are always allowed. This is intentional: `[ -f x ]` and `(( 1 + 1 ))` have no OS-level side effect.
 
-Rules on the **real builtins** (`true`, `false`, `:`, `read`, `echo`, `printf`) *do* take effect — e.g. `deny: Bash(echo:*)` blocks `echo`. Absent any rule, those builtins fall through to an inert allow (nothing to prompt about on a bare `echo foo`). The side effects around them are still gated regardless: `echo foo > sensitive.txt` surfaces an Ask via the redirect rule, and `echo foo | weird_cmd` escalates to Ask via pipe aggregation if `weird_cmd` is unrecognised.
+Rules on the **real builtins** (`true`, `false`, `:`, `continue`, `read`, `echo`, `printf`) *do* take effect — e.g. `deny: Bash(echo:*)` blocks `echo`. Absent any rule, those builtins fall through to an inert allow (nothing to prompt about on a bare `echo foo`). The side effects around them are still gated regardless: `echo foo > sensitive.txt` surfaces an Ask via the redirect rule, and `echo foo | weird_cmd` escalates to Ask via pipe aggregation if `weird_cmd` is unrecognised.
 
 See [Policy reference: Inert command names](policy-reference.md#inert-command-names) for the full list and rationale.
 

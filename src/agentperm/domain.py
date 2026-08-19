@@ -530,6 +530,7 @@ _SYNTHETIC_INERT_MARKERS: frozenset[str] = frozenset({"[", "[[", "(("})
 # ``echo foo > out`` still surfaces an Ask via the redirect rule.
 _INERT_COMMAND_NAMES: frozenset[str] = frozenset({
     "true", "false", ":",       # status setters / no-op
+    "continue",                  # loop control in the current shell
     "read",                     # in-process variable bind only
     "echo", "printf",           # output to fds; redirects evaluated separately
 })

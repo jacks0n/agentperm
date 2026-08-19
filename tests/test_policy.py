@@ -571,6 +571,7 @@ def test_inert_builtins_allowed_when_no_rule_matches():
         "true",
         "false",
         ":",
+        "continue",
         "read line",
         'printf "%s" hi',
         "[ -f x ]",

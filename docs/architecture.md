@@ -176,6 +176,7 @@ A small set of shell builtins / synthetic AST tokens have no possible OS-level s
 
 # real builtins — actual commands with no OS-level side effect
 true  false  :         status setters / no-op
+continue               loop control in the current shell
 read                   binds shell variable from stdin (process-local)
 echo  printf           write to fds; redirects evaluated separately
 ```
