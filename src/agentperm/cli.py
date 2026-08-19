@@ -75,6 +75,22 @@ def main(argv: list[str] | None = None) -> int:
         help="print would-be writes without modifying files",
     )
 
+    uninstall = sub.add_parser(
+        "uninstall",
+        help="remove agentperm hooks from agent configs (policy files are kept)",
+    )
+    uninstall.add_argument(
+        "--mode",
+        choices=["auto", "rulesync", "direct"],
+        default="auto",
+        help="auto: strip both rulesync and per-tool configs; or limit to one",
+    )
+    uninstall.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print would-be removals without modifying files",
+    )
+
     sub.add_parser("import", help="pull native allow/ask/deny rules into ~/.agent-permissions.jsonc")
 
     init = sub.add_parser("init", help="create or extend a policy file from bundled rule templates")
@@ -139,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "install":
         return _cmd_install(mode=args.mode, dry_run=args.dry_run)
+    if args.command == "uninstall":
+        return _cmd_uninstall(mode=args.mode, dry_run=args.dry_run)
     if args.command == "import":
         return _cmd_import()
     if args.command == "init":
@@ -187,6 +205,42 @@ def _cmd_install(*, mode: str, dry_run: bool) -> int:
         verb = "would write" if dry_run else "wrote"
         for path in touched:
             print(f"{adapter.name.value}: {verb} {path}")
+    return 1 if failed else 0
+
+
+def _cmd_uninstall(*, mode: str, dry_run: bool) -> int:
+    # Unlike install, "auto" strips both shapes and "rulesync" needs no
+    # ~/.rulesync/ to exist: uninstall means "get agentperm out of everything
+    # it might have written", and the strip helpers no-op on missing files.
+    if mode == "rulesync":
+        modes = [InstallMode.Rulesync]
+    elif mode == "direct":
+        modes = [InstallMode.Direct]
+    else:
+        modes = [InstallMode.Direct, InstallMode.Rulesync]
+    print(f"mode: {mode}{' (dry-run)' if dry_run else ''}")
+    failed = False
+    for adapter in ADAPTERS.values():
+        touched: list[Path] = []
+        try:
+            for install_mode in modes:
+                for path in adapter.uninstall(install_mode, dry_run=dry_run):
+                    if path not in touched:
+                        touched.append(path)
+        except Exception as error:
+            print(f"{adapter.name.value}: failed ({error})", file=sys.stderr)
+            failed = True
+            continue
+        if not touched:
+            print(f"{adapter.name.value}: nothing to remove")
+            continue
+        verb = "would remove hooks from" if dry_run else "removed hooks from"
+        for path in touched:
+            print(f"{adapter.name.value}: {verb} {path}")
+    policy_paths = [p for p in (Path.home() / POLICY_FILENAME,) if p.exists()]
+    kept = str(policy_paths[0]) if policy_paths else "~/.agent-permissions.jsonc"
+    print(f"policy files are left in place ({kept} and any per-directory files) — remove them yourself if unwanted")
+    print("to remove the tool itself: uv tool uninstall agentperm (or pipx uninstall agentperm)")
     return 1 if failed else 0
 
 

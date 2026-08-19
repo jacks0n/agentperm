@@ -13,6 +13,12 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   `--local` targets the repo root and `-o PATH` anywhere else. A fresh file keeps rules grouped
   under per-template comment headers; an existing file gains only the rules it doesn't already
   have, and its redirect decisions are never overridden.
+- `agentperm uninstall`: the inverse of `install`. Strips every hook entry the installer wrote from
+  Claude Code, Codex, OpenCode, Gemini CLI, Kiro, and rulesync configs, deleting containers left
+  empty so an install/uninstall round trip restores the original file. Everything else is left
+  untouched: Codex's `[features] hooks` flag stays, an OpenCode plugin file that isn't recognizably
+  ours is kept with a warning, and policy files are never removed. `--mode` limits the sweep;
+  `--dry-run` previews it.
 - `SECURITY.md`: threat model, the implicit trust of project-level policy files, bypass surfaces,
   and failure behavior.
 - `Shell(...)` accepts a standalone `--` operand, allowing patterns to require an end-of-options boundary while `--name` remains a flag.

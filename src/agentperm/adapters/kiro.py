@@ -18,6 +18,7 @@ from ..domain import (
     InstallMode,
     JsonArray,
     JsonObject,
+    JsonValue,
     NamedTool,
     Pipeline,
     Request,
@@ -116,6 +117,55 @@ class KiroAdapter(AgentAdapter):
             touched.append(hooks_path)
         return touched
 
+    def uninstall(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
+        touched: list[Path] = []
+        for agent_path in sorted(self._custom_agent_paths()):
+            touched.extend(self._uninstall_v2_agent_hook(agent_path, dry_run=dry_run))
+        touched.extend(self._uninstall_standalone_hooks(dry_run=dry_run))
+        return touched
+
+    def _uninstall_v2_agent_hook(self, agent_path: Path, *, dry_run: bool) -> list[Path]:
+        before = read_json(agent_path)
+        after: JsonObject = json.loads(json.dumps(before))
+        hooks = after.get("hooks")
+        if not isinstance(hooks, dict):
+            return []
+        pre_tool = hooks.get("preToolUse")
+        if not isinstance(pre_tool, list):
+            return []
+        remaining: JsonArray = [hook for hook in pre_tool if not is_bridge_hook(hook)]
+        if len(remaining) == len(pre_tool):
+            return []
+        if remaining:
+            hooks["preToolUse"] = remaining
+        else:
+            del hooks["preToolUse"]
+            if not hooks:
+                del after["hooks"]
+        if not dry_run:
+            atomic_write(agent_path, json.dumps(after, indent=2) + "\n")
+        return [agent_path]
+
+    def _uninstall_standalone_hooks(self, *, dry_run: bool) -> list[Path]:
+        """Remove the standalone hook file, or just our entries if it holds others."""
+        hooks_path = self._hooks_path()
+        if not hooks_path.exists():
+            return []
+        data = read_json(hooks_path)
+        entries = data.get("hooks")
+        entry_list: JsonArray = entries if isinstance(entries, list) else []
+        others: JsonArray = [entry for entry in entry_list if not _kiro_standalone_is_bridge(entry)]
+        if len(others) == len(entry_list):
+            return []
+        if others:
+            updated: JsonObject = json.loads(json.dumps(data))
+            updated["hooks"] = others
+            if not dry_run:
+                atomic_write(hooks_path, json.dumps(updated, indent=2) + "\n")
+        elif not dry_run:
+            hooks_path.unlink()
+        return [hooks_path]
+
     def _custom_agent_paths(self) -> set[Path]:
         paths: set[Path] = set()
         global_agents = self._agents_path()
@@ -199,6 +249,14 @@ class KiroAdapter(AgentAdapter):
                         rule = _kiro_command_rule(cmd)
                         if rule is not None:
                             yield Decision.Deny, rule
+
+
+def _kiro_standalone_is_bridge(entry: JsonValue) -> bool:
+    """Bridge detection for standalone hook entries, whose command nests under ``action``."""
+    if not isinstance(entry, dict):
+        return False
+    action = entry.get("action")
+    return is_bridge_hook(action if isinstance(action, dict) else entry)
 
 
 def kiro_tool_name(name: str) -> str:

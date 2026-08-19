@@ -29,6 +29,8 @@ from .base import (
     merge_rulesync_hooks,
     permission_request_output,
     pretooluse_output,
+    strip_nested_hooks,
+    strip_rulesync_hooks,
 )
 
 
@@ -125,5 +127,18 @@ class ClaudeAdapter(AgentAdapter):
             add=[("PreToolUse", "*")],
             strip=["PermissionRequest"],
             agent_name="claude",
+            dry_run=dry_run,
+        )
+
+    def uninstall(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
+        if mode is InstallMode.Rulesync:
+            return strip_rulesync_hooks(
+                block="claudecode",
+                keys=["preToolUse", "permissionRequest"],
+                dry_run=dry_run,
+            )
+        return strip_nested_hooks(
+            self.settings_path,
+            events=["PreToolUse", "PermissionRequest"],
             dry_run=dry_run,
         )

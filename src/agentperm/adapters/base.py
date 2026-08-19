@@ -46,6 +46,15 @@ class AgentAdapter(ABC):
         """
         return []
 
+    def uninstall(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
+        """Remove every hook entry ``install`` wrote from this agent's config.
+
+        The inverse of ``install``: strips bridge entries and deletes containers
+        that are left empty, leaving everything else in the config untouched.
+        Returns the paths that changed (or would change under ``dry_run``).
+        """
+        return []
+
 
 def mcp_bypass_input(payload: JsonObject) -> JsonObject | None:
     """When Claude Code is in bypass mode and the tool call targets an MCP server,
@@ -274,6 +283,65 @@ def merge_rulesync_hooks(
                     hooks[event_name] = stripped
                 else:
                     del hooks[event_name]
+    return _write_json_if_changed(path, before, after, dry_run=dry_run)
+
+
+def strip_rulesync_hooks(*, block: str, keys: list[str], dry_run: bool) -> list[Path]:
+    """Remove bridge entries from one agent block of ``~/.rulesync/hooks.json``.
+
+    Never creates the file or any section: a missing file, block, or hooks map is
+    already uninstalled. Containers left empty by the strip are deleted so an
+    install/uninstall round trip restores the original structure.
+    """
+    path = _rulesync_hooks_path()
+    if not path.exists():
+        return []
+    before = read_json(path)
+    after: JsonObject = json.loads(json.dumps(before))
+    block_section = after.get(block)
+    hooks = block_section.get("hooks") if isinstance(block_section, dict) else None
+    if not isinstance(block_section, dict) or not isinstance(hooks, dict):
+        return []
+    for key in keys:
+        current = hooks.get(key)
+        if not isinstance(current, list):
+            continue
+        stripped = _strip_bridge_entries(current)
+        if stripped:
+            hooks[key] = stripped
+        else:
+            del hooks[key]
+    if not hooks:
+        del block_section["hooks"]
+    if not block_section:
+        del after[block]
+    return _write_json_if_changed(path, before, after, dry_run=dry_run)
+
+
+def strip_nested_hooks(path: Path, *, events: list[str], dry_run: bool) -> list[Path]:
+    """Remove bridge groups from a Claude-style ``hooks.<Event>`` config file.
+
+    Never creates the file or the ``hooks`` section. Event lists and the
+    ``hooks`` section itself are deleted when the strip leaves them empty.
+    """
+    if not path.exists():
+        return []
+    before = read_json(path)
+    after: JsonObject = json.loads(json.dumps(before))
+    hooks_section = after.get("hooks")
+    if not isinstance(hooks_section, dict):
+        return []
+    for event_name in events:
+        current = hooks_section.get(event_name)
+        if not isinstance(current, list):
+            continue
+        stripped = _strip_bridge_groups(current)
+        if stripped:
+            hooks_section[event_name] = stripped
+        else:
+            del hooks_section[event_name]
+    if not hooks_section:
+        del after["hooks"]
     return _write_json_if_changed(path, before, after, dry_run=dry_run)
 
 

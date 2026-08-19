@@ -33,6 +33,8 @@ from .base import (
     merge_rulesync_hooks,
     permission_request_output,
     pretooluse_output,
+    strip_nested_hooks,
+    strip_rulesync_hooks,
 )
 from .claude import ClaudeAdapter
 
@@ -116,6 +118,21 @@ class CodexAdapter(AgentAdapter):
         )
         touched.extend(_enable_codex_hooks_feature(self.config_path, dry_run=dry_run))
         return touched
+
+    def uninstall(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
+        # ``[features] hooks = true`` in config.toml is deliberately left alone:
+        # other tools may rely on it, and it is inert without hook entries.
+        if mode is InstallMode.Rulesync:
+            return strip_rulesync_hooks(
+                block="codexcli",
+                keys=["preToolUse", "permissionRequest"],
+                dry_run=dry_run,
+            )
+        return strip_nested_hooks(
+            self.hooks_path,
+            events=["PreToolUse", "PermissionRequest"],
+            dry_run=dry_run,
+        )
 
 
 def _enable_codex_hooks_feature(path: Path, *, dry_run: bool) -> list[Path]:

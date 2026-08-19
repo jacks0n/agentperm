@@ -23,6 +23,8 @@ from .base import (
     AgentAdapter,
     merge_nested_hooks,
     merge_rulesync_hooks,
+    strip_nested_hooks,
+    strip_rulesync_hooks,
 )
 
 
@@ -71,6 +73,11 @@ class GeminiAdapter(AgentAdapter):
             agent_name="gemini",
             dry_run=dry_run,
         )
+
+    def uninstall(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
+        if mode is InstallMode.Rulesync:
+            return strip_rulesync_hooks(block="geminicli", keys=["preToolUse"], dry_run=dry_run)
+        return strip_nested_hooks(self.settings_path, events=["BeforeTool"], dry_run=dry_run)
 
 
 def _gemini_tool_name(name: str) -> str:

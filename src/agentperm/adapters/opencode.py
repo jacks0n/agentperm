@@ -132,6 +132,26 @@ class OpencodeAdapter(AgentAdapter):
             atomic_write(self.plugin_path, contents)
         return [self.plugin_path]
 
+    def uninstall(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
+        """Delete the plugin shim, but only when it is recognizably ours.
+
+        Exact-template matching would be too brittle (the file embeds an
+        absolute path and changes across versions), so match on the plugin's
+        own identifiers instead. Anything else stays put with a warning.
+        """
+        if not self.plugin_path.exists():
+            return []
+        text = self.plugin_path.read_text()
+        if "AgentBridgePlugin" not in text or '"--agent", "opencode"' not in text:
+            print(
+                f"warning: {self.plugin_path} does not look like the agentperm plugin; leaving it in place",
+                file=sys.stderr,
+            )
+            return []
+        if not dry_run:
+            self.plugin_path.unlink()
+        return [self.plugin_path]
+
 
 def _opencode_rule(tool: str, pattern: str) -> Rule | None:
     if tool == "bash":
