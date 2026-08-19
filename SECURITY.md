@@ -77,10 +77,10 @@ Two mechanisms deliberately suppress prompts; both are opt-in and both are bound
 - **Malformed policy file → fail closed to ask.** Every decision returns **ask** with a
   rationale naming the failing file, so a broken policy is loud, not silently permissive.
 - **Malformed `Shell(...)` and `Python(...)` patterns fail loudly at load** (`PolicyError`),
-  rather than being dropped. Some mistakes are still silent, though: a typo'd rule prefix
-  (`"Shel(git status)"`) parses as a named-tool rule that never matches a shell command, and
-  entries of an unrecognized shape are skipped — a rule you wrote can end up protecting
-  nothing without an error.
+  rather than being dropped. Some mistakes are still silent at runtime, though: a typo'd rule
+  prefix (`"Shel(git status)"`) parses as a named-tool rule that never matches a shell command,
+  and entries of an unrecognized shape are skipped — run `agentperm validate` to catch exactly
+  these cases before they cost you protection.
 
 ## Reporting a vulnerability
 

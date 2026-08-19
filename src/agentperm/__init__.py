@@ -48,6 +48,7 @@ from .policy import (
     Template,
     TemplateMerge,
     available_templates,
+    existing_policy_paths,
     git_toplevel,
     load_policy_file,
     load_template,
@@ -60,6 +61,7 @@ from .policy import (
 )
 from .rules import parse_rule
 from .shell import parse_pipeline
+from .validate import Finding, validate_policy_file, validate_policy_text
 
 __all__ = [
     "ADAPTERS",
@@ -72,6 +74,7 @@ __all__ = [
     "ClaudeAdapter",
     "CodexAdapter",
     "Decision",
+    "Finding",
     "GeminiAdapter",
     "InstallMode",
     "JsonArray",
@@ -101,6 +104,7 @@ __all__ = [
     "available_templates",
     "coerce_for_pane_bypass",
     "coerce_for_permission_mode",
+    "existing_policy_paths",
     "git_toplevel",
     "load_policy_file",
     "load_template",
@@ -113,5 +117,7 @@ __all__ = [
     "parse_rule",
     "render_templates",
     "save_policy_file",
+    "validate_policy_file",
+    "validate_policy_text",
     "write_default_policy",
 ]

@@ -188,6 +188,11 @@ def _policy_paths(cwd: Path | None) -> tuple[Path, ...]:
     return tuple(paths)
 
 
+def existing_policy_paths(cwd: Path | None = None) -> tuple[Path, ...]:
+    """The policy files runtime discovery would actually load for ``cwd``, in merge order."""
+    return tuple(path for path in _policy_paths(cwd) if path.exists())
+
+
 def merged_policy(cwd: Path | None = None, *, local_root: Path | None = None) -> Policy:
     """Merge global policy with every policy from the filesystem root through ``cwd``.
 

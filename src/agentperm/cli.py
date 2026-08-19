@@ -31,6 +31,7 @@ from .policy import (
     PolicyError,
     PolicyFile,
     available_templates,
+    existing_policy_paths,
     git_toplevel,
     load_policy_file,
     load_template,
@@ -41,6 +42,7 @@ from .policy import (
     save_policy_file,
     write_default_policy,
 )
+from .validate import validate_policy_file
 
 # -----------------------------------------------------------------------------
 # CLI
@@ -128,6 +130,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     init.set_defaults(init_local=False, init_output=None)
 
+    validate = sub.add_parser(
+        "validate",
+        help="check policy files for unparseable rules and typo'd settings",
+    )
+    validate.add_argument(
+        "paths",
+        nargs="*",
+        metavar="path",
+        help="policy files to check (default: every file runtime discovery would load here)",
+    )
+
     check = sub.add_parser("check", help="runtime decision; reads stdin, writes stdout")
     check.add_argument("--agent", required=True, choices=[a.value for a in AgentName])
     check.add_argument("--event", required=True)
@@ -166,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
             output=args.init_output,
             list_templates=args.list_templates,
         )
+    if args.command == "validate":
+        return _cmd_validate(paths=args.paths)
     if args.command == "check":
         return cmd_check(AgentName(args.agent), args.event)
     if args.command == "edit":
@@ -540,6 +555,25 @@ def _cmd_init(*, names: list[str], local: bool, output: str | None, list_templat
     if "//" in text or "/*" in text:
         print(f"note: comments in {path} are not preserved when merging", file=sys.stderr)
     return 0
+
+
+def _cmd_validate(*, paths: list[str]) -> int:
+    targets = [Path(p) for p in paths] if paths else list(existing_policy_paths(Path.cwd()))
+    if not targets:
+        print("no policy files found — run `agentperm init` to create one")
+        return 0
+    errors = 0
+    for target in targets:
+        findings = validate_policy_file(target)
+        if not findings:
+            print(f"{target}: ok")
+            continue
+        print(f"{target}:")
+        for finding in findings:
+            print(f"  {finding.severity}: {finding.message}")
+            if finding.severity == "error":
+                errors += 1
+    return 1 if errors else 0
 
 
 def _cmd_edit(*, local: bool = False) -> int:

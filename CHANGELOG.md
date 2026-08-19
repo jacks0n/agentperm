@@ -19,6 +19,11 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   untouched: Codex's `[features] hooks` flag stays, an OpenCode plugin file that isn't recognizably
   ours is kept with a warning, and policy files are never removed. `--mode` limits the sweep;
   `--dry-run` previews it.
+- `agentperm validate`: lint policy files for what the tolerant runtime loader lets slide —
+  entries that would be silently dropped, mistyped `Shell` prefixes that become never-matching
+  named-tool rules, unknown keys, and redirect decisions that would be silently ignored. With no
+  arguments it checks every file runtime discovery would load from the current directory. Exit 1
+  on errors; warnings alone exit 0.
 - `SECURITY.md`: threat model, the implicit trust of project-level policy files, bypass surfaces,
   and failure behavior.
 - `Shell(...)` accepts a standalone `--` operand, allowing patterns to require an end-of-options boundary while `--name` remains a flag.
