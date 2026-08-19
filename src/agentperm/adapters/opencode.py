@@ -138,7 +138,8 @@ def _opencode_rule(tool: str, pattern: str) -> Rule | None:
         if pattern == "*":
             return BashCommand(("**",), trailing_wildcard=True)
         return BashCommand(tuple(pattern.split()))
-    return NamedTool(_opencode_tool_name(tool))
+    specifier = None if pattern == "*" else pattern
+    return NamedTool(_opencode_tool_name(tool), specifier)
 
 
 _OPENCODE_TOOL_NAMES = {
