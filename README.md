@@ -12,6 +12,8 @@ and the only one that actually parses the command before deciding.
 
 ![agentperm demo](https://raw.githubusercontent.com/jacks0n/agentperm/main/docs/media/demo.gif)
 
+[Watch with playback controls](docs/media/demo.mp4)
+
 Coding agents prompt you constantly because their permission matchers are string prefixes:
 allow `cat` and allow `head`, and `cat README.md | head -20` still prompts — the pipe defeats
 the match. And you maintain that allowlist five times, once per agent, in five different formats.

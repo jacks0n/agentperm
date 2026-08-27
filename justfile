@@ -23,9 +23,9 @@ typecheck:
 # All three gates — matches the PR checklist in CONTRIBUTING.md.
 check: lint typecheck test
 
-# Regenerate the README demo GIF (requires vhs: brew install vhs).
+# Regenerate the README demo GIF (requires vhs, claude CLI, codex CLI).
 demo:
-    vhs docs/media/demo.tape
+    docs/media/record-demo.sh
 
 # --- zellij plugin ---
 

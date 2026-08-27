@@ -1,41 +1,131 @@
-# agentperm README demo. Regenerate from the repo root with: just demo
-# Requires vhs (https://github.com/charmbracelet/vhs) and a synced .venv.
+# agentperm README demo. Regenerate from the repository root with: just demo
+# The runner supplies an isolated workspace and demo-only agent settings.
 Output docs/media/demo.gif
+Output docs/media/demo.mp4
 
 Set Shell "bash"
-Set FontSize 21
-Set Width 1400
-Set Height 700
+Set FontSize 18
+Set Width 1600
+Set Height 900
 Set Padding 24
-Set TypingSpeed 35ms
+Set TypingSpeed 28ms
 Set Theme "Catppuccin Mocha"
+Set CursorBlink false
 
-# Deterministic sandbox: fresh HOME and cwd, local build on PATH.
 Hide
-Type `export PATH="$PWD/.venv/bin:$PATH" && rm -rf /tmp/agentperm-demo && mkdir -p /tmp/agentperm-demo/home /tmp/agentperm-demo/work && export HOME=/tmp/agentperm-demo/home && cd /tmp/agentperm-demo/work && clear`
+Type `cd "$AGENTPERM_DEMO_WORK" && clear`
 Enter
-Sleep 1s
 Show
 
-Type "# one permission policy for Claude Code, Codex, OpenCode, Gemini CLI & Kiro"
+Type "# One permission policy. Every coding agent."
 Enter
-Sleep 1.5s
-
-Type "agentperm init"
-Enter
-Sleep 2.5s
-
-Type `agentperm why "git status | head -5"`
-Enter
-Sleep 3.5s
-
-Type `agentperm why "cat notes.txt | ./deploy.sh"`
-Enter
-Sleep 3.5s
-
-Type `agentperm why "sudo rm -rf /"`
+Sleep 1s
+Type "cat .agent-permissions.jsonc"
 Enter
 Sleep 3s
 
+Type "# Every segment is checked — even across pipes"
+Enter
+Sleep 1s
+Type `agentperm why "cat demo-notes.txt | head -2"`
+Enter
+Wait+Screen@10s /allow —/
+Sleep 3s
+
+
+Type "# Unknown commands fall back to the agent's normal approval flow"
+Enter
+Sleep 1s
+Type `agentperm why "touch demo-created.txt"`
+Enter
+Wait+Screen@10s /no-opinion/
+Sleep 3s
+
+Type "clear"
+Enter
+Type "# Claude Code"
+Enter
+Type "claude-demo"
+Enter
+Hide
+Wait+Screen@45s /Sonnet/
+Show
+Sleep 1s
+Type "Run this exact shell command once, then stop: cat demo-notes.txt | head -2"
+Enter
+Sleep 1s
+Hide
+Wait+Screen@60s /every agent/
+Show
+Sleep 3s
+Hide
+Type "/clear"
+Enter
+Sleep 2s
+Show
+Type "Run this exact shell command once, then stop: curl https://example.com"
+Enter
+Wait+Screen@60s /[Bb]locked by/
+Sleep 3s
+Hide
+Type "/clear"
+Enter
+Sleep 2s
+Show
+Type "Run this exact shell command once, then stop: touch demo-created.txt"
+Enter
+Wait+Screen@60s /Do you want to proceed/
+Sleep 3s
+Hide
+Escape
+Sleep 2s
+Ctrl+C
+Sleep 1s
+Type "/exit"
+Enter
+Sleep 3s
+
+Type "clear"
+Enter
+Type "# Codex CLI — same policy, same result"
+Enter
+Type "codex-demo"
+Enter
+Hide
+Wait+Screen@45s /OpenAI Codex/
+Sleep 4s
+Ctrl+L
+Show
+Sleep 1s
+Type "Run this exact shell command once, then stop: cat demo-notes.txt | head -2"
+Enter
+Sleep 1s
+Hide
+Wait+Screen@60s /every agent/
+Show
+Sleep 3s
+Ctrl+L
+Sleep 1s
+Type "Run this exact shell command once, then stop: curl https://example.com"
+Enter
+Wait+Screen@60s /[Bb]locked by/
+Sleep 3s
+Ctrl+L
+Sleep 1s
+Type "Run this exact shell command once, then stop: touch demo-created.txt"
+Enter
+Wait+Screen@60s /Would you like to run/
+Sleep 3s
+Hide
+Escape
+Sleep 2s
+Ctrl+C
+Sleep 3s
+
+Type "clear"
+Enter
+Show
+Type "# Parse commands once. Stop permission drift."
+Enter
 Type "# uv tool install agentperm"
-Sleep 3s
+Sleep 4s
