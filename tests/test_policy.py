@@ -14,6 +14,7 @@ from agentperm import (
     POLICY_FILENAME,
     BashCommand,
     BashOption,
+    CompoundRequest,
     Decision,
     JsonObject,
     NamedTool,
@@ -21,7 +22,9 @@ from agentperm import (
     PolicyError,
     PolicyFile,
     PythonCallPolicy,
+    PythonReadonly,
     RedirectionPolicy,
+    RejectedRequest,
     Segment,
     ShellPattern,
     ShellRequest,
@@ -145,10 +148,167 @@ def test_named_tool_prefix_glob():
     assert NamedTool("mcp__memory__*").matches("mcp__other__x") is False
 
 
+def test_named_tool_reason_round_trips_and_is_verbatim_rationale():
+    raw: JsonObject = {"Edit(generated/**)": {"reason": "Generated file; update its source and rerun the generator."}}
+    rule = parse_rule(raw)
+    assert isinstance(rule, NamedTool)
+    assert rule.rationale == "Generated file; update its source and rerun the generator."
+    assert rule.serialize() == raw
+
+    policy = Policy(deny=(rule,))
+    verdict = policy.decide(ToolRequest("Edit", (("file_path", "generated/client.py"),)))
+    assert verdict == Verdict(
+        Decision.Deny,
+        "Generated file; update its source and rerun the generator.",
+    )
+
+
+def test_legacy_rule_wrapper_reason_is_accepted_and_serializes_canonically():
+    rule = parse_rule({"rule": "Write(dist/**)", "reason": "Use the generator."})
+    assert isinstance(rule, NamedTool)
+    assert rule.serialize() == {"Write(dist/**)": {"reason": "Use the generator."}}
+
+
+def test_reason_metadata_does_not_affect_rule_equality_or_merge():
+    first = NamedTool("Edit", "generated/**", rationale="First reason")
+    duplicate = NamedTool("Edit", "generated/**", rationale="Second reason")
+    assert first == duplicate
+    assert Policy(deny=(first,)).merged_with(Policy(deny=(duplicate,))).deny == (first,)
+
+
+def test_reasonless_rule_serialization_and_automatic_rationale_are_unchanged():
+    rule = NamedTool("Edit", "generated/**")
+    assert rule.serialize() == "Edit(generated/**)"
+    verdict = Policy(deny=(rule,)).decide(ToolRequest("Edit", (("file_path", "generated/client.py"),)))
+    assert verdict.rationale == "deny by rule 'Edit(generated/**)'"
+
+
+@pytest.mark.parametrize(
+    "raw, serialized",
+    [
+        (
+            {"Bash(git status:*)": {"reason": "Inspect only."}},
+            {"Bash(git status:*)": {"reason": "Inspect only."}},
+        ),
+        (
+            {"Python(readonly)": {"reason": "Static analysis approved."}},
+            {"Python(readonly)": {"reason": "Static analysis approved."}},
+        ),
+    ],
+)
+def test_reason_metadata_round_trips_for_other_rule_types(raw: JsonObject, serialized: JsonObject):
+    rule = parse_rule(raw)
+    assert rule is not None
+    assert rule.serialize() == serialized
+
+
+def test_python_readonly_reason_is_verbatim_for_readonly_source():
+    rule = parse_rule({"Python(readonly)": {"reason": "Static analysis approved."}})
+    assert isinstance(rule, PythonReadonly)
+
+    verdict = Policy(allow=(rule,)).decide(ShellRequest(parse_pipeline("python -c 'print(1)'")))
+
+    assert verdict == Verdict(Decision.Allow, "Static analysis approved.")
+
+
+def test_python_readonly_reason_does_not_hide_unsafe_analysis():
+    rule = PythonReadonly(rationale="Static analysis approved.")
+
+    verdict = Policy(allow=(rule,)).decide(
+        ShellRequest(parse_pipeline("python -c 'import os; os.remove(\"generated.py\")'"))
+    )
+
+    assert verdict.decision is Decision.Ask
+    assert verdict.rationale == "Python call may mutate external state: os.remove"
+
+
+def test_multi_key_rule_as_key_object_is_not_partially_parsed():
+    raw: JsonObject = {
+        "Shell(git status)": {"reason": "Inspect the worktree."},
+        "comment": "This sibling must not be silently ignored.",
+    }
+
+    assert parse_rule(raw) is None
+
+
 def test_named_tool_no_specifier_ignores_arguments():
     # Bare name (and the `*` specifier) match the tool regardless of input.
     assert NamedTool("Read").matches("Read", (("file_path", "/etc/passwd"),)) is True
     assert NamedTool("Read", "*").matches("Read", (("file_path", "/anything"),)) is True
+
+
+def test_relative_tool_path_rule_matches_absolute_request_from_hook_cwd(tmp_path: Path):
+    generated = tmp_path / "generated/client.py"
+    verdict = Policy(deny=(NamedTool("Edit", "generated/**"),)).decide(
+        ToolRequest("Edit", (("file_path", str(generated)),), cwd=tmp_path)
+    )
+    assert verdict.decision is Decision.Deny
+
+
+def test_relative_tool_path_rule_normalizes_traversal_against_hook_cwd(tmp_path: Path):
+    verdict = Policy(deny=(NamedTool("Write", "generated/**"),)).decide(
+        ToolRequest(
+            "Write",
+            (("file_path", "src/../generated/client.py"),),
+            cwd=tmp_path,
+        )
+    )
+    assert verdict.decision is Decision.Deny
+
+
+def test_deny_tool_path_rule_cannot_be_bypassed_through_symlink(tmp_path: Path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (generated / "linked").symlink_to(outside, target_is_directory=True)
+
+    verdict = Policy(deny=(NamedTool("Edit", "generated/**"),)).decide(
+        ToolRequest(
+            "Edit",
+            (("file_path", "generated/linked/client.py"),),
+            cwd=tmp_path,
+        )
+    )
+    assert verdict.decision is Decision.Deny
+
+
+def test_allow_tool_path_rule_does_not_follow_symlink_outside_scope(tmp_path: Path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (generated / "linked").symlink_to(outside, target_is_directory=True)
+
+    verdict = Policy(allow=(NamedTool("Edit", "generated/**"),)).decide(
+        ToolRequest(
+            "Edit",
+            (("file_path", "generated/linked/client.py"),),
+            cwd=tmp_path,
+        )
+    )
+    assert verdict.decision is Decision.NoOpinion
+
+
+def test_compound_request_uses_strictest_semantic_file_verdict():
+    request = CompoundRequest(
+        (
+            ToolRequest("Edit", (("file_path", "generated/client.py"),)),
+            ToolRequest("Write", (("file_path", "generated/client.py"),)),
+        )
+    )
+    verdict = Policy(
+        deny=(NamedTool("Edit", "generated/**", rationale="Regenerate this file."),),
+        allow=(NamedTool("Write", "generated/**"),),
+    ).decide(request)
+    assert verdict == Verdict(Decision.Deny, "Regenerate this file.")
+
+
+def test_rejected_native_request_is_denied_before_policy_matching():
+    assert Policy().decide(RejectedRequest("unsafe payload")) == Verdict(
+        Decision.Deny,
+        "unsafe payload",
+    )
 
 
 def test_named_tool_domain_specifier_matches_url_field():
@@ -175,12 +335,18 @@ def test_named_tool_domain_does_not_crash_on_malformed_url():
 
 def test_named_tool_domain_idna_normalizes_host():
     # Unicode and punycode forms of the same host are equivalent in both directions.
-    assert NamedTool("WebFetch", "domain:bücher.example").matches(
-        "WebFetch", (("url", "https://xn--bcher-kva.example/x"),)
-    ) is True
-    assert NamedTool("WebFetch", "domain:xn--bcher-kva.example").matches(
-        "WebFetch", (("url", "https://bücher.example/x"),)
-    ) is True
+    assert (
+        NamedTool("WebFetch", "domain:bücher.example").matches(
+            "WebFetch", (("url", "https://xn--bcher-kva.example/x"),)
+        )
+        is True
+    )
+    assert (
+        NamedTool("WebFetch", "domain:xn--bcher-kva.example").matches(
+            "WebFetch", (("url", "https://bücher.example/x"),)
+        )
+        is True
+    )
 
 
 def test_named_tool_glob_specifier_matches_path_field():
@@ -195,12 +361,8 @@ def test_named_tool_glob_specifier_matches_path_field():
 
 def test_named_tool_glob_normalizes_path_traversal():
     # `..` is collapsed before matching, so a scope can't be escaped via traversal.
-    assert NamedTool("Read", "/repo/src/**").matches(
-        "Read", (("file_path", "/repo/src/../secrets/token"),)
-    ) is False
-    assert NamedTool("Read", "/repo/secrets/**").matches(
-        "Read", (("file_path", "/repo/src/../secrets/token"),)
-    ) is True
+    assert NamedTool("Read", "/repo/src/**").matches("Read", (("file_path", "/repo/src/../secrets/token"),)) is False
+    assert NamedTool("Read", "/repo/secrets/**").matches("Read", (("file_path", "/repo/src/../secrets/token"),)) is True
 
 
 def test_named_tool_glob_ignores_path_in_non_path_field():
@@ -379,9 +541,7 @@ def test_policy_allows_zsh_lc_when_inner_substitution_commands_allowed():
     """The Codex motivating case: ``zsh -lc 'rg "pattern" $(git ls-files | rg foo)'``
     should Allow when rg and git are in the allow list."""
     policy = Policy(allow=(BashCommand(("rg",)), BashCommand(("git", "ls-files"))))
-    pipeline = parse_pipeline(
-        "/opt/homebrew/opt/zsh/bin/zsh -lc 'rg \"pattern\" -n $(git ls-files | rg foo)'"
-    )
+    pipeline = parse_pipeline("/opt/homebrew/opt/zsh/bin/zsh -lc 'rg \"pattern\" -n $(git ls-files | rg foo)'")
     assert policy.decide(ShellRequest(pipeline)).decision is Decision.Allow
 
 
@@ -560,6 +720,42 @@ def test_merged_policies_union_rules_without_duplicates():
     assert prefixes == {("ls",), ("cat",), ("rg",)}
 
 
+def test_more_specific_allow_overrides_ancestor_ask() -> None:
+    global_policy = Policy(ask=(BashCommand(("git", "push")),))
+    project_policy = Policy(allow=(BashCommand(("git", "push", "origin")),))
+
+    verdict = _decide(global_policy.merged_with(project_policy), "git push origin main")
+
+    assert verdict.decision is Decision.Allow
+
+
+def test_more_specific_ask_overrides_ancestor_allow() -> None:
+    global_policy = Policy(allow=(BashCommand(("git", "push")),))
+    project_policy = Policy(ask=(BashCommand(("git", "push", "origin")),))
+
+    verdict = _decide(global_policy.merged_with(project_policy), "git push origin main")
+
+    assert verdict.decision is Decision.Ask
+
+
+def test_ancestor_deny_cannot_be_overridden_by_more_specific_allow() -> None:
+    global_policy = Policy(deny=(BashCommand(("git", "push")),))
+    project_policy = Policy(allow=(BashCommand(("git", "push", "origin")),))
+
+    verdict = _decide(global_policy.merged_with(project_policy), "git push origin main")
+
+    assert verdict.decision is Decision.Deny
+
+
+def test_ask_still_overrides_allow_within_one_policy_file() -> None:
+    policy = Policy(
+        ask=(BashCommand(("git", "push")),),
+        allow=(BashCommand(("git", "push", "origin")),),
+    )
+
+    assert _decide(policy, "git push origin main").decision is Decision.Ask
+
+
 def test_merged_policy_loads_global_and_all_ancestors_with_nearest_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -595,7 +791,7 @@ def test_merged_policy_loads_global_and_all_ancestors_with_nearest_overrides(
         ),
         cwd / POLICY_FILENAME: PolicyFile(
             policy=Policy(
-                allow=(BashCommand(("pwd",)),),
+                allow=(BashCommand(("pwd",)), BashCommand(("curl", "https://approved.example"))),
                 redirection=RedirectionPolicy(stdout_to_file=Decision.Allow, allow_paths=("/cwd",)),
             )
         ),
@@ -619,6 +815,7 @@ def test_merged_policy_loads_global_and_all_ancestors_with_nearest_overrides(
         ("cat",),
         ("echo",),
         ("pwd",),
+        ("curl", "https://approved.example"),
     )
     assert tuple(rule.prefix for rule in policy.ask if isinstance(rule, BashCommand)) == (("curl",),)
     assert tuple(rule.prefix for rule in policy.deny if isinstance(rule, BashCommand)) == (("rm",),)
@@ -628,6 +825,7 @@ def test_merged_policy_loads_global_and_all_ancestors_with_nearest_overrides(
     assert policy.python_calls.allow == frozenset({"package.read"})
     assert policy.python_calls.ask == frozenset({"package.inspect"})
     assert policy.python_calls.deny == frozenset({"package.delete"})
+    assert _decide(policy, "curl https://approved.example").decision is Decision.Allow
 
 
 def test_merged_policy_loads_global_only_once_when_cwd_is_below_home(
@@ -1107,15 +1305,21 @@ def test_load_policy_file_ignores_invalid_redirection_value(tmp_path: Path):
 
 def test_load_policy_file_parses_python_call_decisions(tmp_path: Path):
     path = tmp_path / ".agent-permissions.jsonc"
-    path.write_text(json.dumps({
-        "version": 1,
-        "permissions": {"allow": ["Python(readonly)"]},
-        "python": {"calls": {
-            "allow": ["project.allowed"],
-            "ask": ["project.ambiguous"],
-            "deny": ["project.forbidden"],
-        }},
-    }))
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "permissions": {"allow": ["Python(readonly)"]},
+                "python": {
+                    "calls": {
+                        "allow": ["project.allowed"],
+                        "ask": ["project.ambiguous"],
+                        "deny": ["project.forbidden"],
+                    }
+                },
+            }
+        )
+    )
     policy = load_policy_file(path).policy
     assert policy.python_calls == PythonCallPolicy(
         allow=frozenset({"project.allowed"}),
@@ -1133,15 +1337,31 @@ def test_python_call_policy_merge_unions_each_decision():
     assert merged.python_calls.deny == frozenset({"blocked", "a"})
 
 
+def test_more_specific_python_call_allow_overrides_ancestor_ask() -> None:
+    base = PythonCallPolicy(ask=frozenset({"project.inspect"}))
+    local = PythonCallPolicy(allow=frozenset({"project.inspect"}))
+
+    assert base.merged_with(local).decision_for("project.inspect") is Decision.Allow
+
+
+def test_ancestor_python_call_deny_cannot_be_overridden() -> None:
+    base = PythonCallPolicy(deny=frozenset({"project.mutate"}))
+    local = PythonCallPolicy(allow=frozenset({"project.mutate"}))
+
+    assert base.merged_with(local).decision_for("project.mutate") is Decision.Deny
+
+
 def test_save_policy_file_serializes_python_call_decisions(tmp_path: Path):
     path = tmp_path / ".agent-permissions.jsonc"
-    policy_file = PolicyFile(policy=Policy(
-        python_calls=PythonCallPolicy(
-            allow=frozenset({"project.allowed"}),
-            ask=frozenset({"project.review"}),
-            deny=frozenset({"project.blocked"}),
+    policy_file = PolicyFile(
+        policy=Policy(
+            python_calls=PythonCallPolicy(
+                allow=frozenset({"project.allowed"}),
+                ask=frozenset({"project.review"}),
+                deny=frozenset({"project.blocked"}),
+            )
         )
-    ))
+    )
     save_policy_file(path, policy_file)
     calls = json.loads(path.read_text())["python"]["calls"]
     assert calls == {
@@ -1149,6 +1369,19 @@ def test_save_policy_file_serializes_python_call_decisions(tmp_path: Path):
         "ask": ["project.review"],
         "deny": ["project.blocked"],
     }
+
+
+def test_save_policy_file_preserves_rule_reason_metadata(tmp_path: Path):
+    path = tmp_path / ".agent-permissions.jsonc"
+    reason = "Generated output; modify its source."
+    policy_file = PolicyFile(policy=Policy(deny=(NamedTool("Write", "generated/**", rationale=reason),)))
+    save_policy_file(path, policy_file)
+
+    saved = json.loads(path.read_text())
+    assert saved["permissions"]["deny"] == [{"Write(generated/**)": {"reason": reason}}]
+    loaded = load_policy_file(path).policy
+    assert loaded.deny == policy_file.policy.deny
+    assert loaded.deny[0].rationale == reason
 
 
 def test_save_policy_file_clears_existing_python_call_decisions(tmp_path: Path):
@@ -1289,10 +1522,12 @@ def test_allow_paths_merge_deduplicates():
 
 def test_allow_paths_policy_file_round_trip(tmp_path: Path):
     path = tmp_path / ".agent-permissions.jsonc"
-    policy = Policy(redirection=RedirectionPolicy(
-        stdout_to_file=Decision.Ask,
-        allow_paths=("/tmp", "/var/log"),
-    ))
+    policy = Policy(
+        redirection=RedirectionPolicy(
+            stdout_to_file=Decision.Ask,
+            allow_paths=("/tmp", "/var/log"),
+        )
+    )
     save_policy_file(path, PolicyFile(policy=policy, raw={}))
     reloaded = load_policy_file(path)
     assert reloaded.policy.redirection.allow_paths == ("/tmp", "/var/log")

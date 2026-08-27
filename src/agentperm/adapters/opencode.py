@@ -24,6 +24,7 @@ from ..domain import (
 )
 from ..fileio import atomic_write, read_json
 from ..shell import parse_pipeline
+from .apply_patch import parse_apply_patch_request
 from .base import (
     AgentAdapter,
     resolve_bridge_command,
@@ -33,10 +34,10 @@ _OPENCODE_PLUGIN_TEMPLATE = """import {{ spawnSync }} from "node:child_process";
 
 const bridge = {bridge};
 
-function bridgeDecision(payload) {{
+function bridgeDecision(event, payload) {{
   const proc = spawnSync(
     bridge,
-    ["check", "--agent", "opencode", "--event", "permission.ask"],
+    ["check", "--agent", "opencode", "--event", event],
     {{ input: JSON.stringify(payload), encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] }},
   );
   if (proc.status !== 0 || !proc.stdout.trim()) return null;
@@ -44,8 +45,19 @@ function bridgeDecision(payload) {{
 }}
 
 export const AgentBridgePlugin = async (input) => ({{
+  "tool.execute.before": async (tool, output) => {{
+    const decision = bridgeDecision("tool.execute.before", {{
+      cwd: input.directory,
+      hook_event_name: "tool.execute.before",
+      tool_name: tool.tool,
+      tool_input: output.args,
+    }});
+    if (decision?.status === "deny") {{
+      throw new Error(decision.reason || "Blocked by agentperm policy");
+    }}
+  }},
   "permission.ask": async (permission, output) => {{
-    const decision = bridgeDecision({{
+    const decision = bridgeDecision("permission.ask", {{
       cwd: input.directory,
       hook_event_name: "permission.ask",
       permission,
@@ -95,17 +107,42 @@ class OpencodeAdapter(AgentAdapter):
                         yield decision, rule
 
     def parse_event(self, payload: JsonObject, event_name: str) -> Request | None:
+        if event_name == "tool.execute.before":
+            tool_name = payload.get("tool_name")
+            if not isinstance(tool_name, str):
+                return None
+            tool_input_raw = payload.get("tool_input")
+            tool_input: JsonObject = tool_input_raw if isinstance(tool_input_raw, dict) else {}
+            cwd_raw = payload.get("cwd")
+            cwd = Path(cwd_raw) if isinstance(cwd_raw, str) else None
+            if tool_name == "bash":
+                command = tool_input.get("command")
+                return ShellRequest(
+                    parse_pipeline(command if isinstance(command, str) else ""),
+                    cwd=cwd,
+                )
+            if tool_name == "apply_patch":
+                patch = tool_input.get("patchText")
+                return parse_apply_patch_request(patch if isinstance(patch, str) else "", cwd)
+            return ToolRequest(_opencode_tool_name(tool_name), tool_arguments(tool_input), cwd=cwd)
+
         permission = payload.get("permission")
         if not isinstance(permission, dict):
             return None
         permission_type = permission.get("type")
         metadata_raw = permission.get("metadata")
         metadata: JsonObject = metadata_raw if isinstance(metadata_raw, dict) else permission
+        cwd_raw = payload.get("cwd")
+        cwd = Path(cwd_raw) if isinstance(cwd_raw, str) else None
         if permission_type == "bash":
             command = metadata.get("command")
-            return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
+            return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""), cwd=cwd)
+        if permission_type == "apply_patch":
+            patch = metadata.get("patchText")
+            if isinstance(patch, str):
+                return parse_apply_patch_request(patch, cwd)
         if isinstance(permission_type, str):
-            return ToolRequest(_opencode_tool_name(permission_type), tool_arguments(metadata))
+            return ToolRequest(_opencode_tool_name(permission_type), tool_arguments(metadata), cwd=cwd)
         return None
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> int:

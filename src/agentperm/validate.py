@@ -20,9 +20,7 @@ from .rules import parse_rule
 
 _TOP_LEVEL_KEYS = frozenset({"version", "permissions", "shell", "python"})
 _PERMISSION_KEYS = ("allow", "ask", "deny")
-_REDIRECTION_DECISION_KEYS = frozenset(
-    {"stderrToDevNull", "stdoutToDevNull", "stdoutToFile", "appendToFile"}
-)
+_REDIRECTION_DECISION_KEYS = frozenset({"stderrToDevNull", "stdoutToDevNull", "stdoutToFile", "appendToFile"})
 _REDIRECTION_KEYS = _REDIRECTION_DECISION_KEYS | {"allowPaths"}
 _DECISION_VALUES = frozenset({"allow", "ask", "deny"})
 
@@ -87,24 +85,45 @@ def _validate_permissions(data: JsonObject) -> list[Finding]:
 
 
 def _validate_rule(entry: JsonValue, where: str) -> list[Finding]:
+    metadata_findings = _validate_rule_metadata(entry, where)
     try:
         rule = parse_rule(entry)
     except PolicyError as error:
-        return [Finding("error", f"{where}: {error}")]
+        return [*metadata_findings, Finding("error", f"{where}: {error}")]
     if rule is None:
         # The loader would skip this entry without a sound — the rule you wrote
         # protects (or allows) nothing.
-        return [Finding("error", f"{where}: unparseable rule {_show(entry)} (silently ignored at runtime)")]
+        return [
+            *metadata_findings,
+            Finding("error", f"{where}: unparseable rule {_show(entry)} (silently ignored at runtime)"),
+        ]
     if isinstance(rule, NamedTool) and rule.specifier is not None and " " in rule.specifier:
         # ``Shel(git status)`` parses as NamedTool("Shel", "git status") — a real
         # tool specifier never contains a space, so this is almost surely a typo.
         return [
+            *metadata_findings,
             Finding(
                 "warning",
                 f"{where}: {_show(entry)} matches a tool literally named {rule.name!r} — "
                 f"did you mean Shell(...) or Bash(...)?",
-            )
+            ),
         ]
+    return metadata_findings
+
+
+def _validate_rule_metadata(entry: JsonValue, where: str) -> list[Finding]:
+    if not isinstance(entry, dict):
+        return []
+    metadata: JsonObject = entry
+    if "rule" not in entry and "tool" not in entry and len(entry) == 1:
+        value = next(iter(entry.values()))
+        if isinstance(value, dict):
+            metadata = value
+    if "reason" not in metadata:
+        return []
+    reason = metadata["reason"]
+    if not isinstance(reason, str) or not reason.strip():
+        return [Finding("error", f"{where}: 'reason' must be a non-empty string")]
     return []
 
 

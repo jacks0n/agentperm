@@ -65,11 +65,17 @@ class ClaudeAdapter(AgentAdapter):
         tool_name = payload.get("tool_name")
         if not isinstance(tool_name, str):
             return None
+        cwd_raw = payload.get("cwd")
+        cwd = Path(cwd_raw) if isinstance(cwd_raw, str) else None
         if tool_name == "Bash":
             tool_input = payload.get("tool_input")
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
-            return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
-        return ToolRequest(tool_name, tool_arguments(payload.get("tool_input")))
+            return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""), cwd=cwd)
+        # Claude's notebook mutation tool is an edit operation in agentperm's
+        # semantic namespace.  Keep native Edit/Write names unchanged while
+        # hiding this agent-specific spelling from policy authors.
+        semantic_name = "Edit" if tool_name == "NotebookEdit" else tool_name
+        return ToolRequest(semantic_name, tool_arguments(payload.get("tool_input")), cwd=cwd)
 
     def write_verdict(
         self,

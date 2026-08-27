@@ -71,6 +71,42 @@ def test_bad_python_calls_are_errors() -> None:
     assert any("python.calls.deny" in m for m in errors)
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        '{"Edit(generated/**)": {"reason": ""}}',
+        '{"Write(generated/**)": {"reason": 42}}',
+        '{"rule": "Read(secrets/**)", "reason": null}',
+        '{"tool": "Bash", "command": "sed", "when": {"hasOption": "-i"}, "reason": "   "}',
+    ],
+)
+def test_invalid_rule_reason_is_an_error_without_making_rule_unparseable(entry: str) -> None:
+    errors = _messages(f'{{"permissions": {{"deny": [{entry}]}}}}', "error")
+    assert any("'reason' must be a non-empty string" in message for message in errors)
+    assert not any("unparseable rule" in message for message in errors)
+
+
+def test_valid_rule_reason_has_no_finding() -> None:
+    text = '{"permissions": {"deny": [{"Edit(generated/**)": {"reason": "Generated file"}}]}}'
+    assert validate_policy_text(text) == []
+
+
+def test_multi_key_rule_as_key_object_is_an_error() -> None:
+    text = """{
+        "permissions": {
+            "allow": [{
+                "Shell(git status)": {"reason": "Inspect the worktree."},
+                "comment": "This sibling must not be silently ignored."
+            }]
+        }
+    }"""
+
+    errors = _messages(text, "error")
+
+    assert len(errors) == 1
+    assert "unparseable rule" in errors[0]
+
+
 # --- the validate command -------------------------------------------------
 
 

@@ -8,7 +8,7 @@ import urllib.parse
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from pathlib import Path
 
@@ -26,6 +26,8 @@ type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 type JsonObject = dict[str, JsonValue]
 type JsonArray = list[JsonValue]
+
+
 def narrow_json(value: object) -> JsonValue:
     """Convert untyped JSON output (json.load / pyjson5.decode) into a typed JsonValue.
 
@@ -172,22 +174,63 @@ class ShellRequest(Request):
 class ToolRequest(Request):
     tool: str
     arguments: ToolArguments = ()
+    cwd: Path | None = None
+
+
+@dataclass(frozen=True)
+class CompoundRequest(Request):
+    """One native operation represented by every semantic request it performs."""
+
+    requests: tuple[Request, ...]
+
+
+@dataclass(frozen=True)
+class RejectedRequest(Request):
+    """A native mutation payload that could not be translated safely."""
+
+    rationale: str
 
 
 # Permission rules are a sum type. Each rule knows how to match its kind of request.
 
 
 class Rule(ABC):
+    """Base class for semantic policy rules.
+
+    Concrete rules may carry a user-facing rationale.  It is deliberately not
+    part of rule equality: metadata must not turn an otherwise duplicate rule
+    into a second policy entry.
+    """
+
+    rationale: str
+
     @abstractmethod
     def serialize(self) -> str | JsonObject: ...
+
+
+def _serialize_rule_metadata(serialized: str | JsonObject, rationale: str) -> str | JsonObject:
+    """Attach optional metadata using the canonical rule-as-key representation."""
+    if not rationale:
+        return serialized
+    if isinstance(serialized, str):
+        return {serialized: {"reason": rationale}}
+    if len(serialized) == 1:
+        key, value = next(iter(serialized.items()))
+        if isinstance(value, dict):
+            metadata: JsonObject = dict(value)
+            metadata["reason"] = rationale
+            return {key: metadata}
+    return serialized
 
 
 @dataclass(frozen=True)
 class PythonReadonly(Rule):
     """Enable shallow AST analysis for inline Python code."""
 
-    def serialize(self) -> str:
-        return "Python(readonly)"
+    rationale: str = field(default="", compare=False)
+
+    def serialize(self) -> str | JsonObject:
+        return _serialize_rule_metadata("Python(readonly)", self.rationale)
 
 
 @dataclass(frozen=True)
@@ -201,15 +244,17 @@ class BashCommand(Rule):
 
     prefix: tuple[str, ...]
     trailing_wildcard: bool = True
+    rationale: str = field(default="", compare=False)
 
     def matches(self, segment: Segment) -> bool:
         if not self.prefix:
             return False
         return _glob_match_argv(self.prefix, segment.argv, self.trailing_wildcard)
 
-    def serialize(self) -> str:
+    def serialize(self) -> str | JsonObject:
         body = " ".join(self.prefix)
-        return f"Bash({body}:*)" if self.trailing_wildcard else f"Bash({body})"
+        serialized = f"Bash({body}:*)" if self.trailing_wildcard else f"Bash({body})"
+        return _serialize_rule_metadata(serialized, self.rationale)
 
 
 def _glob_match_argv(pattern: tuple[str, ...], argv: tuple[str, ...], trailing_wildcard: bool) -> bool:
@@ -219,6 +264,7 @@ def _glob_match_argv(pattern: tuple[str, ...], argv: tuple[str, ...], trailing_w
     one argv token; ``**`` consumes zero or more. When ``*`` or ``**`` covers position 0 the
     basename rule does not apply — the glob doesn't carry the literal token to compare.
     """
+
     def go(pi: int, ai: int) -> bool:
         while pi < len(pattern):
             tok = pattern[pi]
@@ -246,7 +292,7 @@ class BashOption(Rule):
 
     commands: frozenset[str]
     options: frozenset[str]
-    rationale: str
+    rationale: str = field(default="", compare=False)
 
     def matches(self, segment: Segment) -> bool:
         if not segment.argv:
@@ -256,12 +302,14 @@ class BashOption(Rule):
         return any(_arg_matches_option(arg, opt) for arg in segment.argv[1:] for opt in self.options)
 
     def serialize(self) -> JsonObject:
-        return {
+        serialized: JsonObject = {
             "tool": "Bash",
             "command": sorted(self.commands),
             "when": {"hasOption": sorted(self.options)},
-            "reason": self.rationale,
         }
+        if self.rationale:
+            serialized["reason"] = self.rationale
+        return serialized
 
 
 # ---------------------------------------------------------------------------
@@ -313,15 +361,14 @@ class ShellPattern(Rule):
     value_flags: frozenset[str]
     extra_values: frozenset[str] = frozenset()
     allow_paths: tuple[str, ...] = ()
+    rationale: str = field(default="", compare=False)
 
     def __post_init__(self) -> None:
         if not self.raw or not self.path:
             raise ValueError("ShellPattern requires non-empty source and command path")
         if not self.extra_values.issubset(self.value_flags):
             raise ValueError("external values must be included in value_flags")
-        constrained_values = {
-            constraint.atom for constraint in self.flags if constraint.value_glob is not None
-        }
+        constrained_values = {constraint.atom for constraint in self.flags if constraint.value_glob is not None}
         if not constrained_values.issubset(self.value_flags):
             raise ValueError("value-constrained flags must be included in value_flags")
 
@@ -333,19 +380,19 @@ class ShellPattern(Rule):
     def serialize(self) -> str | JsonObject:
         shell_str = f"Shell({self.raw})"
         if not self.extra_values and not self.allow_paths:
-            return shell_str
+            return _serialize_rule_metadata(shell_str, self.rationale)
         opts: JsonObject = {}
         if self.extra_values:
             opts["values"] = sorted(self.extra_values)
         if self.allow_paths:
             opts["allowPaths"] = list(self.allow_paths)
+        if self.rationale:
+            opts["reason"] = self.rationale
         return {shell_str: opts}
 
 
 _URL_ARG_KEYS = frozenset({"url", "uri", "href"})
-_PATH_ARG_KEYS = frozenset(
-    {"path", "file_path", "filepath", "paths", "file_paths", "notebook_path", "absolute_path"}
-)
+_PATH_ARG_KEYS = frozenset({"path", "file_path", "filepath", "paths", "file_paths", "notebook_path", "absolute_path"})
 _MAX_ARG_NODES = 1000
 
 
@@ -366,30 +413,48 @@ class NamedTool(Rule):
 
     name: str
     specifier: str | None = None
+    rationale: str = field(default="", compare=False)
 
-    def matches(self, name: str, arguments: ToolArguments = ()) -> bool:
+    def matches(
+        self,
+        name: str,
+        arguments: ToolArguments = (),
+        cwd: Path | None = None,
+        *,
+        conservative_paths: bool = False,
+    ) -> bool:
         if not self._name_matches(name):
             return False
         if self.specifier is None or self.specifier == "*":
             return True
-        return self._specifier_matches(arguments)
+        return self._specifier_matches(arguments, cwd, conservative_paths)
 
     def _name_matches(self, name: str) -> bool:
         if self.name in ("*", name):
             return True
         return self.name.endswith("*") and name.startswith(self.name[:-1])
 
-    def _specifier_matches(self, arguments: ToolArguments) -> bool:
+    def _specifier_matches(
+        self,
+        arguments: ToolArguments,
+        cwd: Path | None,
+        conservative_paths: bool,
+    ) -> bool:
         spec = self.specifier
         if spec is None:
             return True
         if spec.startswith("domain:"):
-            host = spec[len("domain:"):]
+            host = spec[len("domain:") :]
             return any(_url_host_matches(value, host) for key, value in arguments if key.lower() in _URL_ARG_KEYS)
-        return any(_path_glob_matches(spec, value) for key, value in arguments if key.lower() in _PATH_ARG_KEYS)
+        return any(
+            _path_glob_matches(spec, value, cwd, conservative=conservative_paths)
+            for key, value in arguments
+            if key.lower() in _PATH_ARG_KEYS
+        )
 
-    def serialize(self) -> str:
-        return self.name if self.specifier is None else f"{self.name}({self.specifier})"
+    def serialize(self) -> str | JsonObject:
+        serialized = self.name if self.specifier is None else f"{self.name}({self.specifier})"
+        return _serialize_rule_metadata(serialized, self.rationale)
 
 
 @dataclass(frozen=True)
@@ -399,21 +464,31 @@ class PythonCallPolicy:
     deny: frozenset[str] = frozenset()
     ask: frozenset[str] = frozenset()
     allow: frozenset[str] = frozenset()
+    _precedence: tuple[tuple[Decision, str], ...] = field(default=(), compare=False, repr=False)
+
+    def _non_deny_entries(self) -> tuple[tuple[Decision, str], ...]:
+        if self._precedence:
+            return self._precedence
+        return tuple((Decision.Ask, target) for target in sorted(self.ask)) + tuple(
+            (Decision.Allow, target) for target in sorted(self.allow)
+        )
 
     def decision_for(self, target: str) -> Decision | None:
         if target in self.deny:
             return Decision.Deny
-        if target in self.ask:
-            return Decision.Ask
-        if target in self.allow:
-            return Decision.Allow
+        for decision, candidate in self._non_deny_entries():
+            if target == candidate:
+                return decision
         return None
 
     def merged_with(self, other: PythonCallPolicy) -> PythonCallPolicy:
+        """Merge a more-specific call policy over this policy."""
+        precedence = tuple(dict.fromkeys(other._non_deny_entries() + self._non_deny_entries()))
         return PythonCallPolicy(
             deny=self.deny | other.deny,
             ask=self.ask | other.ask,
             allow=self.allow | other.allow,
+            _precedence=precedence,
         )
 
 
@@ -441,13 +516,46 @@ def _idna_host(host: str) -> str:
         return host
 
 
-def _path_glob_matches(pattern: str, value: str) -> bool:
+def _path_glob_matches(
+    pattern: str,
+    value: str,
+    cwd: Path | None = None,
+    *,
+    conservative: bool = False,
+) -> bool:
     """Glob match where ``*`` stays within one path segment and ``**`` crosses ``/``.
 
     The value's ``.``/``..`` segments are normalized first, so a scope can't be escaped via
     traversal (``/repo/src/../secrets`` is matched as ``/repo/secrets``).
     """
-    return re.fullmatch(_glob_to_regex(pattern), posixpath.normpath(value)) is not None
+    pattern = pattern.replace("\\", "/")
+    value = value.replace("\\", "/")
+    normalized_pattern = posixpath.normpath(pattern)
+    if cwd is None:
+        candidates = (posixpath.normpath(value),)
+    else:
+        resolved_cwd = cwd.resolve(strict=False)
+        supplied = Path(value)
+        resolved_value = (
+            supplied.resolve(strict=False)
+            if supplied.is_absolute()
+            else (resolved_cwd / supplied).resolve(strict=False)
+        )
+        if pattern.startswith("/"):
+            resolved_candidate = resolved_value.as_posix()
+            lexical_candidate = (
+                posixpath.normpath(value) if supplied.is_absolute() else posixpath.normpath((cwd / supplied).as_posix())
+            )
+        else:
+            resolved_candidate = posixpath.relpath(resolved_value.as_posix(), resolved_cwd.as_posix())
+            lexical_candidate = (
+                posixpath.relpath(posixpath.normpath(value), cwd.as_posix())
+                if supplied.is_absolute()
+                else posixpath.normpath(value)
+            )
+        candidates = (resolved_candidate, lexical_candidate) if conservative else (resolved_candidate,)
+    regex = _glob_to_regex(normalized_pattern)
+    return any(re.fullmatch(regex, candidate) is not None for candidate in candidates)
 
 
 def _glob_to_regex(pattern: str) -> str:
@@ -528,12 +636,17 @@ _SYNTHETIC_INERT_MARKERS: frozenset[str] = frozenset({"[", "[[", "(("})
 # ``deny``/``ask``/``allow`` rule on one of these still takes precedence.
 # Redirect verdicts are applied independently in ``_decide_segment``, so e.g.
 # ``echo foo > out`` still surfaces an Ask via the redirect rule.
-_INERT_COMMAND_NAMES: frozenset[str] = frozenset({
-    "true", "false", ":",       # status setters / no-op
-    "continue",                  # loop control in the current shell
-    "read",                     # in-process variable bind only
-    "echo", "printf",           # output to fds; redirects evaluated separately
-})
+_INERT_COMMAND_NAMES: frozenset[str] = frozenset(
+    {
+        "true",
+        "false",
+        ":",  # status setters / no-op
+        "continue",  # loop control in the current shell
+        "read",  # in-process variable bind only
+        "echo",
+        "printf",  # output to fds; redirects evaluated separately
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -543,6 +656,7 @@ class Policy:
     allow: tuple[Rule, ...] = ()
     redirection: RedirectionPolicy = RedirectionPolicy()
     python_calls: PythonCallPolicy = PythonCallPolicy()
+    _precedence: tuple[tuple[Decision, Rule], ...] = field(default=(), compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if any(isinstance(rule, PythonReadonly) for rule in self.deny + self.ask):
@@ -552,16 +666,25 @@ class Policy:
         if isinstance(request, ShellRequest):
             return self._decide_shell(request.pipeline, request.cwd)
         if isinstance(request, ToolRequest):
-            return self._decide_tool(request.tool, request.arguments)
+            return self._decide_tool(request.tool, request.arguments, request.cwd)
+        if isinstance(request, CompoundRequest):
+            return aggregate([self.decide(part) for part in request.requests])
+        if isinstance(request, RejectedRequest):
+            return Verdict(Decision.Deny, request.rationale)
         return Verdict(Decision.NoOpinion, "unrecognized request")
 
     def all_rules(self) -> Iterator[tuple[Decision, Rule]]:
         for rule in self.deny:
             yield Decision.Deny, rule
-        for rule in self.ask:
-            yield Decision.Ask, rule
-        for rule in self.allow:
-            yield Decision.Allow, rule
+        yield from self._non_deny_rules()
+
+    def _non_deny_rules(self) -> tuple[tuple[Decision, Rule], ...]:
+        """Ask/Allow rules in evaluation order, most-specific policy layer first."""
+        if self._precedence:
+            return self._precedence
+        return tuple((Decision.Ask, rule) for rule in self.ask) + tuple(
+            (Decision.Allow, rule) for rule in self.allow
+        )
 
     def decide_segments(self, request: ShellRequest) -> list[tuple[Segment, Verdict]]:
         """Per-segment verdicts for a parseable shell request (`agentperm why`).
@@ -571,12 +694,10 @@ class Policy:
         """
         if not request.pipeline.parseable:
             return []
-        return [
-            (segment, self._decide_segment(segment, request.cwd))
-            for segment in request.pipeline.segments
-        ]
+        return [(segment, self._decide_segment(segment, request.cwd)) for segment in request.pipeline.segments]
 
     def merged_with(self, other: Policy) -> Policy:
+        """Merge ``other`` as a more-specific policy layer over this policy."""
         def union(a: tuple[Rule, ...], b: tuple[Rule, ...]) -> tuple[Rule, ...]:
             seen: list[Rule] = list(a)
             for rule in b:
@@ -584,12 +705,14 @@ class Policy:
                     seen.append(rule)
             return tuple(seen)
 
+        precedence = tuple(dict.fromkeys(other._non_deny_rules() + self._non_deny_rules()))
         return Policy(
             deny=union(self.deny, other.deny),
             ask=union(self.ask, other.ask),
             allow=union(self.allow, other.allow),
             redirection=self.redirection.merged_with(other.redirection),
             python_calls=self.python_calls.merged_with(other.python_calls),
+            _precedence=precedence,
         )
 
     def _decide_shell(self, pipeline: Pipeline, cwd: Path | None = None) -> Verdict:
@@ -615,12 +738,16 @@ class Policy:
                 rule_paths.extend(rule.allow_paths)
         allow_paths = tuple(dict.fromkeys(self.redirection.allow_paths + tuple(rule_paths)))
         redirect_verdict = evaluate_redirects(
-            segment.redirects, self.redirection, allow_paths=allow_paths, cwd=cwd,
+            segment.redirects,
+            self.redirection,
+            allow_paths=allow_paths,
+            cwd=cwd,
         )
         return _stricter(redirect_verdict, command_verdict)
 
     def _match_bash(self, segment: Segment) -> tuple[Verdict, Rule | None]:
         from .shell import ALL_EXEC_WRAPPERS, is_command_lookup, is_opaque_shell_command
+
         argv0 = basename(segment.argv[0]) if segment.argv else None
         if argv0 in _SYNTHETIC_INERT_MARKERS:
             return Verdict(Decision.Allow, "inert predicate"), None
@@ -635,16 +762,29 @@ class Policy:
             else:
                 matches = isinstance(rule, BashCommand | BashOption) and rule.matches(segment)
             if matches:
-                rationale = rule.rationale if isinstance(rule, BashOption) else _format_rule(rule, decision)
-                shell_verdict = Verdict(decision, rationale)
+                shell_verdict = Verdict(decision, _format_rule(rule, decision))
                 matched_rule = rule
                 break
 
         python_verdict: Verdict | None = None
-        if any(isinstance(rule, PythonReadonly) for rule in self.allow):
+        python_rule = next(
+            (
+                rule
+                for decision, rule in self.all_rules()
+                if decision is Decision.Allow and isinstance(rule, PythonReadonly)
+            ),
+            None,
+        )
+        if python_rule is not None:
             from .pythoncode import analyze_python_segment
 
             python_verdict = analyze_python_segment(segment, self.python_calls)
+            if (
+                python_verdict is not None
+                and python_verdict.decision is Decision.Allow
+                and python_rule.rationale
+            ):
+                python_verdict = Verdict(Decision.Allow, python_rule.rationale)
         if python_verdict is not None:
             combined = python_verdict if shell_verdict is None else _stricter(shell_verdict, python_verdict)
             return combined, matched_rule
@@ -660,14 +800,26 @@ class Policy:
             return Verdict(Decision.Allow, "inert shell builtin"), None
         return Verdict(Decision.NoOpinion, f"no rule matched {segment.argv[0] if segment.argv else '<empty>'!r}"), None
 
-    def _decide_tool(self, name: str, arguments: ToolArguments) -> Verdict:
+    def _decide_tool(
+        self,
+        name: str,
+        arguments: ToolArguments,
+        cwd: Path | None = None,
+    ) -> Verdict:
         for decision, rule in self.all_rules():
-            if isinstance(rule, NamedTool) and rule.matches(name, arguments):
+            if isinstance(rule, NamedTool) and rule.matches(
+                name,
+                arguments,
+                cwd,
+                conservative_paths=decision is not Decision.Allow,
+            ):
                 return Verdict(decision, _format_rule(rule, decision))
         return Verdict(Decision.NoOpinion, f"no rule matched {name!r}")
 
 
 def _format_rule(rule: Rule, decision: Decision) -> str:
+    if rule.rationale:
+        return rule.rationale
     return f"{decision.value} by rule {rule.serialize()!r}"
 
 

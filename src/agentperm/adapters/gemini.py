@@ -36,11 +36,13 @@ class GeminiAdapter(AgentAdapter):
         tool_name = payload.get("tool_name")
         if not isinstance(tool_name, str):
             return None
+        cwd_raw = payload.get("cwd")
+        cwd = Path(cwd_raw) if isinstance(cwd_raw, str) else None
         tool_input = payload.get("tool_input")
         if tool_name == "run_shell_command":
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
-            return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
-        return ToolRequest(_gemini_tool_name(tool_name), tool_arguments(tool_input))
+            return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""), cwd=cwd)
+        return ToolRequest(_gemini_tool_name(tool_name), tool_arguments(tool_input), cwd=cwd)
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> int:
         if verdict.decision is Decision.NoOpinion:

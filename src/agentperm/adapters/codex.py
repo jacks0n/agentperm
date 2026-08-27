@@ -17,6 +17,7 @@ from ..domain import (
     Decision,
     InstallMode,
     JsonObject,
+    RejectedRequest,
     Request,
     Rule,
     ShellRequest,
@@ -27,6 +28,7 @@ from ..domain import (
 from ..errors import PolicyError
 from ..fileio import atomic_write
 from ..shell import parse_pipeline
+from .apply_patch import parse_apply_patch_request
 from .base import (
     AgentAdapter,
     merge_nested_hooks,
@@ -58,6 +60,13 @@ class CodexAdapter(AgentAdapter):
                 yield decision, BashCommand(tuple(tokens))
 
     def parse_event(self, payload: JsonObject, event_name: str) -> Request | None:
+        tool_name = payload.get("tool_name")
+        if tool_name == "apply_patch":
+            tool_input = payload.get("tool_input")
+            command = tool_input.get("command") if isinstance(tool_input, dict) else None
+            if not isinstance(command, str):
+                return RejectedRequest("apply_patch hook input has no command")
+            return parse_apply_patch_request(command)
         if event_name == "PermissionRequest":
             # Codex 0.128+ ships a Claude-shaped envelope at top level
             # (``tool_name`` + ``tool_input``). Earlier builds wrapped the
@@ -111,7 +120,7 @@ class CodexAdapter(AgentAdapter):
             )
         touched = merge_nested_hooks(
             self.hooks_path,
-            add=[("PreToolUse", "Bash"), ("PermissionRequest", "Bash|apply_patch|mcp__.*")],
+            add=[("PreToolUse", "Bash|apply_patch"), ("PermissionRequest", "Bash|apply_patch|mcp__.*")],
             strip=[],
             agent_name="codex",
             dry_run=dry_run,

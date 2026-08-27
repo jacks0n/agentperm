@@ -16,12 +16,15 @@ from .adapters.base import mcp_bypass_input
 from .domain import (
     POLICY_FILENAME,
     AgentName,
+    CompoundRequest,
     Decision,
     InstallMode,
     JsonObject,
     Policy,
+    Request,
     Rule,
     ShellRequest,
+    ToolRequest,
     Verdict,
     narrow_json,
 )
@@ -325,8 +328,7 @@ def cmd_check(agent: AgentName, event: str) -> int:
         return 0
     cwd_value = payload.get("cwd")
     cwd = Path(cwd_value) if isinstance(cwd_value, str) else Path(os.getcwd())
-    if isinstance(request, ShellRequest):
-        request = ShellRequest(pipeline=request.pipeline, cwd=cwd)
+    request = _with_cwd(request, cwd)
     try:
         policy = merged_policy(cwd=cwd)
     except PolicyError as error:
@@ -340,6 +342,17 @@ def cmd_check(agent: AgentName, event: str) -> int:
         adapter.write_verdict(verdict, event, updated_input=mcp_bypass_input(payload))
         return 0
     return adapter.write_verdict(verdict, event)
+
+
+def _with_cwd(request: Request, cwd: Path) -> Request:
+    """Attach the hook working directory to every path-bearing request."""
+    if isinstance(request, ShellRequest):
+        return ShellRequest(pipeline=request.pipeline, cwd=cwd)
+    if isinstance(request, ToolRequest):
+        return ToolRequest(tool=request.tool, arguments=request.arguments, cwd=cwd)
+    if isinstance(request, CompoundRequest):
+        return CompoundRequest(tuple(_with_cwd(part, cwd) for part in request.requests))
+    return request
 
 
 def effective_event(event: str, payload: JsonObject) -> str:

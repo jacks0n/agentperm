@@ -4,6 +4,28 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+
+- Optional per-rule `reason` metadata for named tools, `Shell(...)`, `Bash(...)`, and
+  `Python(readonly)`; custom text is returned verbatim when the rule fires.
+- Cross-agent semantic `Edit`/`Write` enforcement for Claude Code, Codex, OpenCode, Gemini CLI,
+  and Kiro, including multi-file patch and move decomposition with cwd- and symlink-aware paths.
+
+### Fixed
+
+- `Python(readonly)` now returns its configured per-rule reason for read-only source while retaining
+  analyzer explanations for unsafe or ambiguous source. Rule-as-key objects now require exactly one
+  rule key instead of partially parsing a rule and ignoring sibling fields.
+- Codex `apply_patch` calls are now covered by the `PreToolUse` hook matcher and translated into
+  scoped file operations. OpenCode now uses a pre-execution hook so native allow settings cannot
+  bypass an agentperm deny.
+- Recognized but unparseable Codex/OpenCode patch payloads now deny instead of bypassing scoped file
+  rules. Kiro shell events without a command now require approval instead of becoming an empty
+  operation.
+- Policy-layer precedence now keeps `deny` non-overridable across every file, while the nearest
+  matching `ask`/`allow` rule wins. A project `allow` can therefore whitelist an ancestor/global
+  `ask`; an `ask` still precedes `allow` within the same file. This also applies to `python.calls`.
+
 ## [0.4.0] — 2026-08-20
 
 ### Added

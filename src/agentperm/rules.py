@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
 from .domain import BashCommand, BashOption, JsonObject, JsonValue, NamedTool, PythonReadonly, Rule, ShellPattern
 from .errors import PolicyError
@@ -29,6 +30,7 @@ def _parse_string_rule(text: str) -> Rule | None:
         if not inner:
             raise PolicyError("empty Shell() pattern")
         from .shellpattern import parse_shell_pattern
+
         return parse_shell_pattern(inner)
     bash_wildcard = re.fullmatch(r"Bash\((.+):\*\)", text)
     if bash_wildcard:
@@ -71,8 +73,6 @@ def _parse_allow_paths(data: JsonObject) -> tuple[str, ...]:
 
 
 def _parse_shell_dict_rule(rule_str: str, data: JsonObject) -> ShellPattern:
-    from dataclasses import replace
-
     pattern = _parse_string_rule(rule_str)
     if not isinstance(pattern, ShellPattern):
         raise PolicyError(f"invalid Shell rule: {rule_str!r}")
@@ -97,30 +97,51 @@ def _parse_shell_dict_rule(rule_str: str, data: JsonObject) -> ShellPattern:
             extra.add(v)
         extra_frozen = frozenset(extra)
 
-    if not extra_frozen and not allow_paths:
-        return pattern
     return replace(
         pattern,
         value_flags=pattern.value_flags | extra_frozen,
         extra_values=extra_frozen,
         allow_paths=allow_paths,
+        rationale=_reason_from_metadata(data),
     )
 
 
-def _parse_dict_rule(data: JsonObject) -> Rule | None:
-    # Legacy {"rule": "Shell(...)", ...} form
-    rule_str = data.get("rule")
-    if isinstance(rule_str, str) and rule_str.strip().startswith("Shell("):
-        return _parse_shell_dict_rule(rule_str, data)
+def _reason_from_metadata(data: JsonObject) -> str:
+    """Return valid reason metadata; validation reports malformed values separately."""
+    reason = data.get("reason")
+    return reason if isinstance(reason, str) and reason.strip() else ""
 
-    # New rule-as-key form: {"Shell(...)": {"allowPaths": [...], "values": [...]}}
+
+def _parse_metadata_rule(rule_str: str, metadata: JsonObject) -> Rule | None:
+    if rule_str.startswith("Shell("):
+        return _parse_shell_dict_rule(rule_str, metadata)
+    rule = _parse_string_rule(rule_str)
+    if rule is None:
+        return None
+    rationale = _reason_from_metadata(metadata)
+    if isinstance(rule, PythonReadonly):
+        return replace(rule, rationale=rationale)
+    if isinstance(rule, BashCommand):
+        return replace(rule, rationale=rationale)
+    if isinstance(rule, NamedTool):
+        return replace(rule, rationale=rationale)
+    return rule
+
+
+def _parse_dict_rule(data: JsonObject) -> Rule | None:
+    # Legacy {"rule": "...", ...} form.
+    rule_str = data.get("rule")
+    if isinstance(rule_str, str):
+        return _parse_metadata_rule(rule_str.strip(), data)
+
+    # Canonical rule-as-key form: {"Edit(path)": {"reason": "..."}}.
     if "rule" not in data and "tool" not in data:
-        for key, value in data.items():
-            key_stripped = key.strip()
-            if key_stripped.startswith(("Shell(", "Bash(")):
-                if not isinstance(value, dict):
-                    raise PolicyError(f"rule-as-key value must be an object, got {type(value).__name__}")
-                return _parse_shell_dict_rule(key_stripped, value)
+        if len(data) != 1:
+            return None
+        key, value = next(iter(data.items()))
+        if not isinstance(value, dict):
+            raise PolicyError(f"rule-as-key value must be an object, got {type(value).__name__}")
+        return _parse_metadata_rule(key.strip(), value)
 
     if data.get("tool") != "Bash":
         return None
@@ -145,9 +166,8 @@ def _parse_dict_rule(data: JsonObject) -> Rule | None:
         return None
     if not options:
         return None
-    reason = data.get("reason")
     return BashOption(
         commands=frozenset(commands),
         options=frozenset(options),
-        rationale=reason if isinstance(reason, str) else "",
+        rationale=_reason_from_metadata(data),
     )

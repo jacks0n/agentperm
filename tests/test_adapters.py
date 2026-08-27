@@ -152,12 +152,16 @@ def test_claude_permission_request_emits_allow_behavior():
 
 def test_claude_import_native_rules_skips_bare_bash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     settings = tmp_path / "settings.json"
-    settings.write_text(json.dumps({
-        "permissions": {
-            "allow": ["Bash", "Read"],
-            "deny": ["Bash"],
-        }
-    }))
+    settings.write_text(
+        json.dumps(
+            {
+                "permissions": {
+                    "allow": ["Bash", "Read"],
+                    "deny": ["Bash"],
+                }
+            }
+        )
+    )
     monkeypatch.setattr(ClaudeAdapter, "settings_path", settings)
     rules = list(ClaudeAdapter().import_native_rules())
     names = [(d.value, r.serialize()) for d, r in rules]
@@ -469,7 +473,10 @@ def test_opencode_no_opinion_emits_empty():
 
 @pytest.mark.parametrize("action,expected", [("deny", Decision.Deny), ("ask", Decision.Ask), ("allow", Decision.Allow)])
 def test_opencode_import_blanket_bash(
-    action: str, expected: Decision, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    expected: Decision,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     config = tmp_path / "opencode.json"
     config.write_text(json.dumps({"permission": {"bash": action}}))
@@ -740,7 +747,7 @@ def test_codex_install_direct_writes_both_files(fake_home: Path):
     hooks = json.loads((fake_home / ".codex/hooks.json").read_text())
     pre = hooks["hooks"]["PreToolUse"]
     perm = hooks["hooks"]["PermissionRequest"]
-    assert pre[0]["matcher"] == "Bash"
+    assert pre[0]["matcher"] == "Bash|apply_patch"
     assert perm[0]["matcher"] == "Bash|apply_patch|mcp__.*"
     # Each entry embeds its own --event arg so the bridge doesn't have to infer.
     assert "--event PreToolUse" in pre[0]["hooks"][0]["command"]
@@ -1050,13 +1057,16 @@ def test_kiro_parse_missing_tool_name():
     assert adapter.parse_event({"tool_input": {"command": "ls"}}, "preToolUse") is None
 
 
-@pytest.mark.parametrize("tool_input", [
-    None,
-    "not a dict",
-    {"other_key": "value"},
-    {"command": ""},
-    {"command": 42},
-])
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        None,
+        "not a dict",
+        {"other_key": "value"},
+        {"command": ""},
+        {"command": 42},
+    ],
+)
 def test_kiro_shell_with_missing_or_bad_command_is_unparseable(tool_input: JsonValue):
     adapter = KiroAdapter()
     request = adapter.parse_event({"tool_name": "shell", "tool_input": tool_input}, "preToolUse")
@@ -1251,9 +1261,7 @@ def test_kiro_install_dry_run_writes_nothing(fake_home: Path):
 def test_kiro_import_allowed_tools(fake_home: Path):
     agents_dir = fake_home / ".kiro/agents"
     agents_dir.mkdir(parents=True)
-    (agents_dir / "default.json").write_text(
-        json.dumps({"allowedTools": ["read", "grep", "@git/git_status"]})
-    )
+    (agents_dir / "default.json").write_text(json.dumps({"allowedTools": ["read", "grep", "@git/git_status"]}))
     rules = list(KiroAdapter().import_native_rules())
     decisions = {(d.value, r.name) for d, r in rules if isinstance(r, NamedTool)}
     assert ("allow", "Read") in decisions
@@ -1264,9 +1272,7 @@ def test_kiro_import_allowed_tools(fake_home: Path):
 def test_kiro_import_skips_shell_in_allowed_tools(fake_home: Path):
     agents_dir = fake_home / ".kiro/agents"
     agents_dir.mkdir(parents=True)
-    (agents_dir / "default.json").write_text(
-        json.dumps({"allowedTools": ["shell", "execute_bash", "read"]})
-    )
+    (agents_dir / "default.json").write_text(json.dumps({"allowedTools": ["shell", "execute_bash", "read"]}))
     rules = list(KiroAdapter().import_native_rules())
     # shell/execute_bash should be skipped (too broad)
     tools = [r.name for _, r in rules if isinstance(r, NamedTool)]
@@ -1277,9 +1283,7 @@ def test_kiro_import_skips_shell_in_allowed_tools(fake_home: Path):
 def test_kiro_import_skips_unrepresentable_allowed_tool_wildcards(fake_home: Path):
     agents_dir = fake_home / ".kiro/agents"
     agents_dir.mkdir(parents=True)
-    (agents_dir / "default.json").write_text(
-        json.dumps({"allowedTools": ["code_*", "*_bash", "?ead", "@git/read_*"]})
-    )
+    (agents_dir / "default.json").write_text(json.dumps({"allowedTools": ["code_*", "*_bash", "?ead", "@git/read_*"]}))
     tools = [r.name for _, r in KiroAdapter().import_native_rules() if isinstance(r, NamedTool)]
     assert tools == ["code_*", "@git/read_*"]
 
@@ -1287,9 +1291,7 @@ def test_kiro_import_skips_unrepresentable_allowed_tool_wildcards(fake_home: Pat
 def test_kiro_import_expands_known_wildcard_aliases(fake_home: Path):
     agents_dir = fake_home / ".kiro/agents"
     agents_dir.mkdir(parents=True)
-    (agents_dir / "default.json").write_text(
-        json.dumps({"allowedTools": ["fs_*"]})
-    )
+    (agents_dir / "default.json").write_text(json.dumps({"allowedTools": ["fs_*"]}))
     rules = list(KiroAdapter().import_native_rules())
     tools = sorted(r.name for _, r in rules if isinstance(r, NamedTool))
     assert tools == ["Read", "Write"]
@@ -1324,9 +1326,7 @@ def test_kiro_import_shell_commands(fake_home: Path):
 def test_kiro_import_keeps_single_command_regex_exact(fake_home: Path):
     agents_dir = fake_home / ".kiro/agents"
     agents_dir.mkdir(parents=True)
-    (agents_dir / "default.json").write_text(
-        json.dumps({"toolsSettings": {"shell": {"allowedCommands": ["pytest"]}}})
-    )
+    (agents_dir / "default.json").write_text(json.dumps({"toolsSettings": {"shell": {"allowedCommands": ["pytest"]}}}))
     [(_, rule)] = list(KiroAdapter().import_native_rules())
     assert isinstance(rule, BashCommand)
     assert rule.prefix == ("pytest",)
@@ -1361,9 +1361,7 @@ def test_kiro_import_skips_complex_regex_that_is_valid_shell_syntax(
 ):
     agents_dir = fake_home / ".kiro/agents"
     agents_dir.mkdir(parents=True)
-    (agents_dir / "default.json").write_text(
-        json.dumps({"toolsSettings": {"shell": {"deniedCommands": [pattern]}}})
-    )
+    (agents_dir / "default.json").write_text(json.dumps({"toolsSettings": {"shell": {"deniedCommands": [pattern]}}}))
     assert list(KiroAdapter().import_native_rules()) == []
 
 
@@ -1526,9 +1524,7 @@ def test_uninstall_rulesync_keeps_foreign_entries(fake_home: Path):
     rulesync = fake_home / ".rulesync/hooks.json"
     rulesync.parent.mkdir(parents=True)
     foreign = {"type": "command", "command": "/bin/audit", "matcher": "*"}
-    rulesync.write_text(
-        json.dumps({"version": 1, "claudecode": {"hooks": {"preToolUse": [foreign]}}}, indent=2) + "\n"
-    )
+    rulesync.write_text(json.dumps({"version": 1, "claudecode": {"hooks": {"preToolUse": [foreign]}}}, indent=2) + "\n")
     ClaudeAdapter().install(InstallMode.Rulesync)
     ClaudeAdapter().uninstall(InstallMode.Rulesync)
     data = json.loads(rulesync.read_text())

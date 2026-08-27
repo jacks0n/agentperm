@@ -14,6 +14,7 @@ from typing import ClassVar
 from ..domain import (
     AgentName,
     BashCommand,
+    CompoundRequest,
     Decision,
     InstallMode,
     JsonArray,
@@ -60,13 +61,29 @@ class KiroAdapter(AgentAdapter):
         tool_name = payload.get("tool_name")
         if not isinstance(tool_name, str):
             return None
+        cwd_raw = payload.get("cwd")
+        cwd = Path(cwd_raw) if isinstance(cwd_raw, str) else None
         tool_input = payload.get("tool_input")
         if tool_name in ("shell", "execute_bash", "execute_cmd"):
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             if not isinstance(command, str) or not command:
-                return ShellRequest(Pipeline((), parseable=False, unparseable_reason="no command in tool_input"))
-            return ShellRequest(parse_pipeline(command))
-        return ToolRequest(kiro_tool_name(tool_name), tool_arguments(tool_input))
+                return ShellRequest(
+                    Pipeline((), parseable=False, unparseable_reason="no command in tool_input"),
+                    cwd=cwd,
+                )
+            return ShellRequest(parse_pipeline(command), cwd=cwd)
+        arguments = tool_arguments(tool_input)
+        if tool_name in _KIRO_WRITE_TOOL_NAMES:
+            # Kiro exposes creation and modification through one native write
+            # tool. Evaluate both semantic capabilities so either policy can
+            # guard the operation without exposing Kiro's implementation detail.
+            return CompoundRequest(
+                (
+                    ToolRequest("Edit", arguments, cwd=cwd),
+                    ToolRequest("Write", arguments, cwd=cwd),
+                )
+            )
+        return ToolRequest(kiro_tool_name(tool_name), arguments, cwd=cwd)
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> int:
         if verdict.decision == Decision.Deny:
@@ -282,6 +299,9 @@ def kiro_tool_name(name: str) -> str:
         "subagent": "Subagent",
         "use_subagent": "Subagent",
     }.get(name, name)
+
+
+_KIRO_WRITE_TOOL_NAMES = frozenset({"write", "fs_write", "fsWrite"})
 
 
 KIRO_TOOL_NAMES = frozenset(
