@@ -10,9 +10,9 @@ and the only one that actually parses the command before deciding.
 [![CI](https://github.com/jacks0n/agentperm/actions/workflows/ci.yml/badge.svg)](https://github.com/jacks0n/agentperm/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jacks0n/agentperm/blob/main/LICENSE)
 
-![agentperm demo](https://raw.githubusercontent.com/jacks0n/agentperm/main/docs/media/demo.gif)
+<video controls width="100%" src="https://raw.githubusercontent.com/jacks0n/agentperm/main/docs/media/demo.mp4"></video>
 
-[Watch with playback controls](docs/media/demo.mp4)
+[GIF fallback](https://raw.githubusercontent.com/jacks0n/agentperm/main/docs/media/demo.gif)
 
 Coding agents prompt you constantly because their permission matchers are string prefixes:
 allow `cat` and allow `head`, and `cat README.md | head -20` still prompts — the pipe defeats
