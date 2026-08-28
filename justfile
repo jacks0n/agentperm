@@ -8,6 +8,9 @@ default:
 
 # --- Python quality gates ---
 
+sync:
+    uv sync --extra dev --locked
+
 test:
     uv run pytest -q
 
@@ -22,6 +25,38 @@ typecheck:
 
 # All three gates — matches the PR checklist in CONTRIBUTING.md.
 check: lint typecheck test
+
+# Install locked dependencies and run every CI gate.
+ci: sync check
+
+build:
+    uv build
+
+# Validate that a stable release tag matches package and changelog metadata.
+verify-release tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    package_version="$(uv version --short)"
+    if [[ "{{ tag }}" != "v$package_version" ]]; then
+      echo "Release tag {{ tag }} does not match package version $package_version"
+      exit 1
+    fi
+    if ! grep -Fq "## [$package_version] —" CHANGELOG.md; then
+      echo "CHANGELOG.md has no release section for $package_version"
+      exit 1
+    fi
+
+publish:
+    uv publish dist/* --trusted-publishing always
+
+github-release tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version="{{ tag }}"
+    gh release create "{{ tag }}" dist/* \
+      --verify-tag \
+      --title "agentperm ${version#v}" \
+      --generate-notes
 
 # Regenerate the README demo GIF (requires vhs, claude CLI, codex CLI).
 demo:

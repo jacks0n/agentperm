@@ -79,19 +79,22 @@ PyPI project must have a trusted publisher configured with these values:
 - Workflow: `publish.yml`
 - Environment: `pypi`
 
+The Python, uv, and just versions in `mise.toml` are the authoritative development and CI toolchain.
+Run `mise install` once, then use the `justfile` recipes for local checks and builds.
+
 Set the release version in `pyproject.toml` and `uv.lock`, move the changelog entries into a matching
-versioned section, and merge those changes to `main`. After CI passes, publish a GitHub Release whose
-tag is `v` followed by that exact project version:
+versioned section, and merge those changes to `main`. After branch CI passes, create an annotated tag
+whose name is `v` followed by that exact project version, then push it:
 
 ```sh
-gh release create v0.3.0 \
-  --repo github.com/jacks0n/agentperm \
-  --title "agentperm 0.3.0" \
-  --generate-notes
+git tag -a v0.4.0 -m "agentperm 0.4.0"
+git push origin v0.4.0
 ```
 
-Publishing the GitHub Release creates the tag and starts the PyPI workflow. The workflow rejects a tag
-that does not match the version in `pyproject.toml`; prereleases are not published.
+The tag push starts the release workflow. It rejects a tag that does not match `pyproject.toml` or a
+missing changelog section, runs `just ci`, builds the distributions once, publishes them to PyPI
+with Trusted Publishing, and then creates the GitHub Release with those files attached. Only stable
+`vMAJOR.MINOR.PATCH` tags trigger a release.
 
 ## Issue reports
 
