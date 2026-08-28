@@ -8,8 +8,9 @@ The policy file is JSON-with-comments (JSON5-compatible). Policies can live at:
 - `<any-directory>/.agent-permissions.jsonc` — directory-scoped policy
 
 The global policy is loaded first, followed by every policy from the filesystem root through the
-command's working directory. Duplicate paths are loaded once. Rules union and deny wins. For
-override-style settings, files closer to the working directory take precedence.
+command's working directory. Duplicate paths are loaded once. Deny rules union and always win. Ask
+and Allow use nearest-policy precedence: the closest matching layer wins, with Ask before Allow
+inside one file. Other override-style settings also prefer files closer to the working directory.
 
 ## Top-level shape
 
@@ -34,7 +35,10 @@ agentperm currently writes schema `version: 1`; `Shell(...)` does not introduce 
 there is no automatic Bash-to-Shell schema migration. The loader currently treats `version` as
 reserved metadata rather than selecting different rule semantics from it.
 
-The three lists are evaluated in order **deny → ask → allow** for any single rule lookup; the first match wins. (Aggregation across compound segments is separate — see [Architecture](architecture.md#aggregation).)
+Within one policy file, the lists are evaluated **deny → ask → allow**. Across files, every Deny is
+checked first; then Ask and Allow are checked from the nearest policy back toward the global policy.
+The first match wins. Aggregation across compound segments is separate—see
+[Architecture](architecture.md#aggregation).
 
 ## Rule forms
 
@@ -66,10 +70,15 @@ variables, ordinary calls, printing, and inspection are allowed. Recognized file
 network, database, environment, attribute, or subscript mutation asks. Syntax errors, dynamic call
 targets, shell-expanded heredocs, and unavailable stdin also ask.
 
-This is deliberately shallow and assumes a non-adversarial caller. It tracks direct import aliases,
-but does not inspect function bodies or follow assignment aliases such as `f = os.remove`. Hidden
-effects inside an otherwise ordinary function call are outside the v1 model. `python -m`, script
-files, and interactive Python are unaffected.
+This is deliberately shallow and assumes a non-adversarial caller. It tracks import aliases and
+direct assignment rebinding such as `f = os.remove`, and visits syntax inside function definitions.
+It does not perform interprocedural analysis: calling a user-defined function does not prove or
+re-evaluate that function's effects. Hidden effects inside an otherwise ordinary call remain outside
+the v1 model. `python -m`, script files, and interactive Python are unaffected.
+
+This is Python analysis, not general query analysis. SQL passed to `psql`, `sqlite3`, `mysql`, a
+Python database driver, or another client is not parsed as SQL. Constrain client argv with Shell
+rules or require approval; agentperm cannot currently prove that a query string is read-only.
 
 Call decisions can be customized by exact qualified name:
 
@@ -85,10 +94,11 @@ Call decisions can be customized by exact qualified name:
 }
 ```
 
-Precedence is configured `deny` → `ask` → `allow`, then the built-in catalogue, then the ordinary-call
-default. An explicit configured allow can override a built-in unsafe classification. Global and
-project call lists union, so a project deny still beats a global allow. Structural operations such as
-attribute assignment are not call targets and cannot be overridden through `python.calls`.
+Within one file, precedence is configured `deny` → `ask` → `allow`, then the built-in catalogue,
+then the ordinary-call default. Across files, every configured Deny applies; Ask and Allow use the
+nearest matching file. An explicit configured Allow can override a built-in unsafe classification.
+Structural operations such as attribute assignment are not call targets and cannot be overridden
+through `python.calls`.
 
 Once enabled, the Python result is combined with ordinary shell rules by strictness. This means an
 AST Ask cannot be bypassed by a broad `Shell(python -c)` allow, while explicit shell and configured
@@ -195,23 +205,56 @@ An optional specifier in parentheses scopes the rule by the tool's input values 
 
 Matching is **keyed by field name**, so a specifier only ever checks the authoritative field — `WebFetch(domain:github.com)` will not be satisfied by a `github.com` URL that happens to appear in a `prompt`, and `Edit(src/**)` will not be satisfied by path-like text in `old_string`. Adapters that don't surface those fields only match the name-only forms.
 
+Relative path specifiers are evaluated from the hook's working directory, whether the agent sends
+a relative or absolute path. `.`/`..` segments and existing symlinks are resolved before matching,
+so a path cannot remain inside a protected glob lexically while resolving outside it.
+
+`Edit` and `Write` are semantic capabilities, not literal host tool names:
+
+| Native operation | Semantic request |
+|---|---|
+| Claude Edit / NotebookEdit | `Edit` |
+| Claude Write | `Write` |
+| Codex or OpenCode patch update/delete | `Edit` |
+| Codex or OpenCode patch add | `Write` |
+| Codex or OpenCode patch move | source `Edit` + destination `Write` |
+| OpenCode edit/write | `Edit` / `Write` |
+| Gemini replace/write_file | `Edit` / `Write` |
+| Kiro write aliases | compound `Edit` + `Write` |
+
+Patch operations are collected into one `CompoundRequest`; the strictest file verdict wins. A
+mutation patch with an invalid envelope, unknown marker, empty target, invalid move, or no file
+operation becomes a rejected request and is denied. Kiro checks both capabilities because its
+single write tool does not reveal whether it will create or replace a file.
+
+These rules cover native agent file tools, not writes hidden inside arbitrary shell commands. See
+the [capability matrix](capabilities.md#semantic-file-operations) for per-agent coverage.
+
 ### Dict rules
 
-#### Rule-as-key dict — per-rule options
+#### Rule-as-key dict — per-rule options and reasons
 
-A Shell rule can carry additional options (`values`, `allowPaths`) by using the rule string as the
-key and a dict of options as the value:
+Any rule can carry an optional `reason` by using the rule string as the key and a dict of metadata
+as the value. The reason is returned verbatim when the rule fires:
 
 ```jsonc
+{"Edit(generated/**)": {"reason": "Generated file; update its source and rerun the generator."}}
+{"Write(generated/**)": {"reason": "Generated file; update its source and rerun the generator."}}
 {"Shell(aws ec2 describe-*)": {"values": ["--region", "--profile"]}}
 {"Shell(mise exec just synth-env)": {"allowPaths": ["/tmp"]}}
-{"Shell(git status)": {"values": ["-C"], "allowPaths": ["/var/log"]}}
+{"Shell(git status)": {"values": ["-C"], "allowPaths": ["/var/log"], "reason": "Safe inspection"}}
 ```
 
+- `reason` — a non-empty string surfaced as the rationale when the rule fires. It works on named
+  tools, `Shell(...)`, `Bash(...)`, and `Python(readonly)` rules.
 - `values` — declares which flags consume the next token (same as inline `values(...)`).
 - `allowPaths` — directories where file redirects are allowed when this rule matches. See [Redirect allowlisting](#redirect-allowlisting).
 
-The older `{"rule": "Shell(...)", "values": [...]}` form is still parsed but no longer written on save.
+The older wrapper form (`{"rule": "Shell(...)"}` with optional `values`, `allowPaths`, or `reason`)
+is still parsed but no longer written on save.
+
+A rule-as-key object must contain exactly one rule key. Multi-key objects are rejected rather than
+partially parsed, because ignoring a sibling field could hide a policy typo or unsupported option.
 
 #### `BashOption` — bash command + flag
 
@@ -262,7 +305,7 @@ What is *not* bypassed for the fallback-allowed builtins:
 
 - **Redirects** are evaluated independently. `echo foo > out.txt` still surfaces an Ask via the redirect rule (write-to-file), because `>` is a side effect even though `echo` isn't.
 - **Pipe aggregation** still applies. `echo foo | weird_cmd` still escalates to Ask under "Allow + NoOpinion → Ask" if `weird_cmd` is unrecognised.
-- **Anything with real side effects** stays under user rules: `cd`, `export`, `kill`, `source`, etc. are parsed as regular commands and require an explicit `Bash(<name>:*)` rule. Command-introducing wrappers (`bash -c`, `eval`, `command`, `exec`, `env`, `nice`, …) are decomposed to the inner command where possible, so you rule the inner command, not the wrapper; wrappers that can't be safely decomposed prompt under bypass instead of being allowed.
+- **Anything with real side effects** stays under user rules: `cd`, `export`, `kill`, `source`, etc. are parsed as regular commands and require an explicit `Bash(<name>:*)` rule. Command-introducing wrappers (`bash -c`, `eval`, `command`, `exec`, `env`, `nice`, …) are decomposed to the inner command where possible, so you rule the inner command, not the wrapper; recognized wrappers that cannot be decomposed safely ask in normal mode. Explicit bypass modes have separate semantics described in [SECURITY.md](../SECURITY.md#bypass-surfaces).
 
 See [Architecture: Inert command names](architecture.md#inert-command-names) for the rationale.
 

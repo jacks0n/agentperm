@@ -18,7 +18,7 @@ It prints the verdict, a per-segment breakdown, and which policy files were cons
 says `allow` but the agent still prompted, the problem is in the hook wiring — continue below.
 If `why` says `ask` or `no-opinion`, the rationale tells you which segment needs a rule.
 
-### 1. Is the hook actually being called?
+### 1. The agent prompted but the trace is empty
 
 Enable the trace and reproduce:
 
@@ -30,6 +30,10 @@ cat /tmp/agentperm-trace.log
 ```
 
 For the env var to reach agentperm from inside the agent's hook, you need to either (a) set it in your shell **before** launching the agent, or (b) edit the hook command in `~/.claude/settings.json` (or equivalent) to prefix the agentperm call with `AGENTPERM_TRACE=/path/to/log`.
+
+The trace contains raw hook payloads and may contain secrets. Use a private file, remove it after
+diagnosis, and do not attach an unredacted line to an issue. It has no built-in rotation, retention,
+redaction, or tamper protection; see [CLI: diagnostic traces](cli.md#diagnostic-traces).
 
 If the log is empty after a prompt, **the hook wasn't called.** That means:
 - The prompt came from the agent's own pre-hook checks (e.g. Claude's "cd outside the working directory" guard), which run before permission hooks and aren't suppressed by bypass mode
@@ -106,14 +110,18 @@ The rationale names the exact rule that allowed it. Remember that **`deny` beats
 ### Did a directory policy widen things?
 
 agentperm loads the global policy and every `.agent-permissions.jsonc` from the filesystem root to
-the command's working directory — `agentperm why` lists every file it consulted. Rules union across
-all levels. To narrow at a more specific level, add `deny` rules — there's no "remove from
-upstream" form. A policy file checked into a repo you cloned deserves review like any other
-tooling config: see [SECURITY.md](../SECURITY.md).
+the command's working directory—`agentperm why` lists every file it consulted. Every matching Deny
+applies. For Ask and Allow, the nearest matching file wins, so a directory Allow can explain an
+unexpectedly silent operation and a directory Ask can narrow a global Allow. A policy file checked
+into a cloned repository deserves review like any other tooling config; see
+[SECURITY.md](../SECURITY.md).
 
 ### Is bypass mode on?
 
-`Ask` becomes `Allow` under bypass. If you actually want to be prompted for something even in bypass mode, the only way is `Deny` — there's no "Ask wins over bypass" mode.
+Claude host bypass makes agentperm return NoOpinion for every result, including Deny. Pane bypass is
+different: it changes Ask and NoOpinion to Allow while preserving Deny. If a command ran despite a
+deny, check which bypass is active and inspect the trace's `coercion` field. See
+[Security: bypass surfaces](../SECURITY.md#bypass-surfaces).
 
 ## "How do I remove agentperm?"
 
@@ -150,7 +158,7 @@ Include:
 2. The exact command that prompted (or didn't)
 3. Your `.agent-permissions.jsonc` (redact anything sensitive)
 4. The output of `agentperm why "<the command>"`
-5. A trace log line for the offending invocation (set `AGENTPERM_TRACE` and reproduce)
+5. A redacted trace log line for the offending invocation (set `AGENTPERM_TRACE` and reproduce)
 
 Issue tracker: <https://github.com/jacks0n/agentperm/issues>
 

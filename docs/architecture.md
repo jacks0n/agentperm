@@ -2,13 +2,18 @@
 
 ## Premise
 
-Every coding agent (Claude Code, Codex, OpenCode, Gemini CLI, Kiro) has its own permission system. They all do roughly the same job — match a tool call against an allow / ask / deny list — but their grammars differ, none of them parse compound shell commands well, and you end up maintaining separate configs that drift out of sync.
+Every coding agent (Claude Code, Codex, OpenCode, Gemini CLI, Kiro) has its own permission system.
+Their grammars and hook contracts differ, and command-string matching does not provide one reusable
+decision across compound shell syntax. agentperm centralizes that decision without pretending the
+hosts have identical enforcement capabilities; those differences are listed in the
+[capability matrix](capabilities.md).
 
 agentperm replaces those configs with one policy file plus a small adapter per agent. Each adapter knows how to install a hook into its agent and how to parse the agent's hook payload into a uniform `Request`. Decision-making and shell parsing live in one place.
 
 ## Domain model
 
-The whole system is built on three sum types and a small set of value objects, defined in `src/agentperm/domain.py` and re-exported from `agentperm`.
+The system is built from a small set of sum-typed domain objects defined in
+`src/agentperm/domain.py` and re-exported from `agentperm`.
 
 ### Decision
 
@@ -22,17 +27,25 @@ class Decision(StrEnum):
 
 A `Verdict` is a `Decision` plus a human-readable rationale. `NoOpinion` means "the policy doesn't speak to this" — agentperm returns an empty payload and the host agent falls back to its native permission flow.
 
-Strictness ordering: `Deny > Ask > Allow > NoOpinion`. The strictest verdict wins when aggregating per-segment results.
+Aggregation strictness is `Deny > Ask > Allow > NoOpinion`; this combines segments or compound
+children after policy-layer precedence has selected each child verdict.
 
 ### Request
 
 ```python
 class Request: ...
-@dataclass(frozen=True) class ShellRequest(Request): pipeline: Pipeline
-@dataclass(frozen=True) class ToolRequest(Request): tool: str
+@dataclass(frozen=True) class ShellRequest(Request): pipeline: Pipeline; cwd: Path | None
+@dataclass(frozen=True) class ToolRequest(Request): tool: str; arguments: ToolArguments; cwd: Path | None
+@dataclass(frozen=True) class CompoundRequest(Request): requests: tuple[Request, ...]
+@dataclass(frozen=True) class RejectedRequest(Request): rationale: str
 ```
 
-Every adapter parses its native hook payload into one of these two types. `ShellRequest` carries a parsed `Pipeline`; `ToolRequest` carries the tool name (e.g. `"Read"`, `"WebFetch"`, `"mcp__memory__lookup"`).
+Every adapter parses its native hook payload into these semantic types. `ShellRequest` carries a
+parsed `Pipeline`; `ToolRequest` carries a canonical tool capability (e.g. `"Edit"`, `"Write"`,
+`"WebFetch"`). `CompoundRequest` represents one native operation with several semantic effects;
+the strictest child verdict wins. `RejectedRequest` fails closed when a mutation payload cannot be
+translated safely. Before policy evaluation, the CLI recursively attaches the hook cwd to every
+path-bearing child so scoped rules behave identically for single and compound operations.
 
 ### Rule
 
@@ -52,11 +65,12 @@ wildcard or `mcp__memory__*` prefix.
 
 ### Policy
 
-`Policy` is `(deny, ask, allow)` plus feature-specific policy objects. Decisions are evaluated in
-deny, ask, allow order; the first matching rule wins. Runtime discovery folds the global policy and
-every filesystem-ancestor policy through `Policy.merged_with`. Rule-like settings union and
-deduplicate; override-style settings are applied from root toward the working directory so the
-nearest value wins. Discovery therefore does not need feature-specific logic when `Policy` grows.
+`Policy` is `(deny, ask, allow)` plus feature-specific policy objects. Runtime discovery folds the
+global policy and every filesystem-ancestor policy through `Policy.merged_with`. Deny rules union
+into a non-overridable floor. Ask and Allow retain layer order: the nearest layer is evaluated first,
+with Ask before Allow within that layer. A project Allow can therefore whitelist a global Ask, while
+no Allow can bypass any Deny. Python call decisions use the same model; redirection values use the
+nearest configured value.
 
 ## Decision flow
 
@@ -69,7 +83,7 @@ adapter.parse_event   →  Request | None
        ▼
 policy.decide(request)
        │
-       ▼  (per-segment for ShellRequest)
+       ▼  (per-segment or per-child)
 aggregate(verdicts)   →  Verdict
        │
        ▼
@@ -90,6 +104,23 @@ For a compound like `cat foo | head -60`, agentperm produces a `Verdict` per seg
 - **Allow + NoOpinion → Ask.** If at least one segment is allowed but another is unrecognized, the result escalates to `Ask`. This is the rule that prevents "I have a rule for `cat`" from silently allowing `cat foo | unknown_command`.
 - **All Allow → Allow.** Every segment matched an allow rule.
 - **All NoOpinion → NoOpinion.** No rule speaks; the host's native flow takes over.
+
+`CompoundRequest` uses the same aggregation for semantic file operations, including
+Allow + NoOpinion → Ask. `RejectedRequest` always denies because a claimed mutation that cannot be
+translated cannot be scoped safely.
+
+### Semantic file mutations
+
+Adapters translate native mutation vocabulary at the boundary so policy evaluation never needs to
+know whether a host called an operation `replace`, `NotebookEdit`, or `apply_patch`. Direct edits and
+writes become `ToolRequest("Edit" | "Write", arguments, cwd)`. A patch is parsed by the shared
+`adapters/apply_patch.py` translator into a `CompoundRequest`: add → Write, update/delete → Edit,
+move → source Edit plus destination Write.
+
+Only the patch envelope and complete target list are relevant to permissions; the host remains
+responsible for validating and applying hunks. Unknown structural markers and incomplete operations
+produce `RejectedRequest`, preventing a new patch dialect from silently bypassing scoped rules. The
+[capability matrix](capabilities.md#semantic-file-operations) records the exact host mappings.
 
 ### Redirect policy
 
@@ -161,7 +192,7 @@ def coerce_for_pane_bypass(verdict, env):
 
 Differences from Claude bypass:
 
-- **`Deny` still bites.** Pane bypass is agentperm' own "skip prompts for this pane" toggle, so it suppresses `Ask`/`NoOpinion` but still enforces your deny list — unlike Claude's bypass, where agentperm defers entirely.
+- **`Deny` still bites.** Pane bypass is agentperm's own "skip prompts for this pane" toggle, so it suppresses `Ask`/`NoOpinion` but still enforces your deny list — unlike Claude's bypass, where agentperm defers entirely.
 - Coerces both `Ask` *and* `NoOpinion`. Codex falls through to its native prompt on the empty `{}` envelope that `NoOpinion` produces, so leaving it alone would defeat bypass for any unknown command.
 - Returns a structured `Coercion` record alongside the verdict, recorded in `$AGENTPERM_TRACE` as a top-level `coercion` field. The original verdict is recoverable.
 - Reads from the process environment (`os.environ`) rather than the hook payload — works for any adapter, not just Claude.
@@ -190,6 +221,19 @@ echo  printf           write to fds; redirects evaluated separately
 The contract is "nothing agentperm does should turn an inert shell primitive into a permission prompt." Anything with real side effects — `cd`, `export`, `kill`, `eval`, etc. — stays under user rules.
 
 ## Shell parsing
+
+Shell parsing and `Shell(...)` matching are deliberately separate. A rule is never tested against
+the raw command string:
+
+```text
+hook command -> Tree-sitter Bash -> executable segments -> argv normalization -> per-segment verdict -> strictest wins
+```
+
+This is why a reviewed command remains recognizable when it moves into a pipe or `&&` chain, is
+wrapped in `bash -lc`, uses another safe ordering for global flags, or spells a value as either
+`--flag value` or `--flag=value`. It is also why an unknown or denied command hidden later in the
+same shell program cannot inherit the first command's allow verdict. The exact argv normalization
+and matching rules are specified in [Shell pattern DSL](pattern-dsl.md#5-matching-semantics).
 
 Shell parsing lives in one function: `parse_pipeline(command: str) -> Pipeline`. It hands the string to Tree-sitter's Bash grammar and walks the AST to extract `Segment(argv, redirects)` tuples. The parser handles:
 
@@ -246,6 +290,7 @@ src/agentperm/
 ├── shell.py              Tree-sitter Bash → Pipeline (parse_pipeline, segment extraction)
 ├── shellpattern.py       Shell(...) DSL parser + matcher
 ├── pythoncode.py         Shallow AST analysis for inline Python (Python(readonly))
+├── adapters/             Host adapters and shared apply_patch translation
 ├── rules.py              Rule parsing: string/dict → Rule objects
 ├── policy.py             Policy file I/O (load, save, merge)
 ├── cli.py                CLI entry point (install, uninstall, import, init, validate, why, check, edit)

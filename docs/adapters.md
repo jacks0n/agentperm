@@ -1,6 +1,9 @@
 # Adapter notes
 
-Each agent has its own hook protocol, payload shape, and verdict envelope. The adapters in `src/agentperm/adapters/` translate between them and agentperm's uniform `Request` / `Verdict` types.
+Each agent has its own hook protocol, payload shape, and verdict envelope. The adapters in
+`src/agentperm/adapters/` translate between them and agentperm's uniform `Request` / `Verdict`
+types. For the user-facing comparison, start with the [capability matrix](capabilities.md); this
+document is the wire-level contract for maintainers.
 
 ## Claude Code
 
@@ -47,13 +50,13 @@ Claude Code concatenates hooks across user (`~/.claude/settings.json`), project 
 
 ## Codex CLI
 
-**Hooks:** `PreToolUse` (matcher `Bash`) and `PermissionRequest` (matcher `Bash|apply_patch|mcp__.*`) in `~/.codex/hooks.json`. In rulesync mode, both events are merged into `codexcli.hooks.{preToolUse,permissionRequest}` of `~/.rulesync/hooks.json` with matcher `.*`.
+**Hooks:** `PreToolUse` (matcher `Bash|apply_patch`) and `PermissionRequest` (matcher `Bash|apply_patch|mcp__.*`) in `~/.codex/hooks.json`. In rulesync mode, both events are merged into `codexcli.hooks.{preToolUse,permissionRequest}` of `~/.rulesync/hooks.json` with matcher `.*`.
 
 Codex requires `[features].hooks = true` in `~/.codex/config.toml`. `install` sets this automatically in direct mode; in rulesync mode, it's rulesync's responsibility — agentperm does not touch `config.toml`. `uninstall` strips the hook entries but leaves the feature flag: it is inert without entries, and other tools may rely on it.
 
 ### Two events, two roles
 
-- **`PreToolUse`:** fires before *every* Bash tool call. agentperm only emits a verdict here if the decision is `Deny` — this is the fast-path for hard denies. Allow / Ask / NoOpinion fall through to Codex's normal permission flow.
+- **`PreToolUse`:** fires before matching Bash and `apply_patch` calls. agentperm only emits a verdict here if the decision is `Deny` — this is the fast-path for hard denies. Allow / Ask / NoOpinion fall through to Codex's normal permission flow. Codex added `apply_patch` hook support in 0.123.0; rerun `agentperm install` after upgrading agentperm so the matcher is refreshed.
 - **`PermissionRequest`:** fires when Codex would otherwise prompt the user. Here agentperm can emit `allow` (silently approve) or `deny` (silently reject); other decisions fall through to the prompt.
 
 This split mirrors Codex's design: `PreToolUse` is for vetoes, `PermissionRequest` is for approvals.
@@ -93,9 +96,27 @@ Codex's allow-list lives in `.rules` files using a `prefix_rule(pattern=[...], d
 
 **Plugin:** `~/.config/opencode/plugins/agentperm.js`. OpenCode runs JavaScript plugins; agentperm ships a tiny shim that shells out to the Python binary. The plugin is always installed directly regardless of mode — rulesync has no schema for `permission.ask` plugins. The shim's `const bridge = "..."` is filled in with the absolute path to `agentperm` resolved at install time, so GUI launches with sparse `PATH` still find it. `uninstall` deletes the shim, but only when its content is recognizably agentperm's own; anything else stays put with a warning.
 
-**Plugin event:** `permission.ask`.
+**Plugin events:** `tool.execute.before` and `permission.ask`. The pre-execution event runs for every
+tool and throws on `Deny`, which blocks edits even when OpenCode's native permission is configured
+to allow them. The permission event remains as the approval/deny integration for calls that enter
+OpenCode's native permission flow.
 
-**Payload shape (synthetic — assembled by the plugin):**
+`tool.execute.before` is deliberately deny-only: Allow, Ask, and NoOpinion leave execution flow
+untouched. `permission.ask` emits Allow, Ask, or Deny to the host when its native permission flow is
+active. Patch payloads are translated from `tool_input.patchText`; an unparseable mutation is denied
+at the pre-execution stage.
+
+**Pre-execution payload (synthetic — assembled by the plugin):**
+```json
+{
+  "cwd": "<directory>",
+  "hook_event_name": "tool.execute.before",
+  "tool_name": "bash" | "edit" | "write" | "apply_patch" | "<tool>",
+  "tool_input": { "command": "...", "filePath": "...", "patchText": "..." }
+}
+```
+
+**Permission payload (synthetic — assembled by the plugin):**
 ```json
 {
   "cwd": "<directory>",
@@ -164,6 +185,9 @@ OpenCode names tools in lowercase (`bash`, `read`, `grep`). agentperm maps these
 
 Unlike the other adapters, Kiro does not use a JSON stdout envelope. agentperm writes the rationale to stderr and exits with code 2 to block, or exits 0 to allow. `NoOpinion` and `Allow` both exit 0; `Ask` and `Deny` both exit 2.
 
+A shell event with no string `tool_input.command` becomes an unparseable Shell request. Its Ask
+verdict therefore exits 2 instead of silently treating the event as an empty operation.
+
 ### Tool name canonicalization
 
 Kiro uses lowercase tool names with aliases. agentperm maps them to its capitalized policy names:
@@ -172,7 +196,7 @@ Kiro uses lowercase tool names with aliases. agentperm maps them to its capitali
 |---|---|
 | `shell`, `execute_bash`, `execute_cmd` | `Bash` |
 | `read`, `fs_read`, `fsRead` | `Read` |
-| `write`, `fs_write`, `fsWrite` | `Write` |
+| `write`, `fs_write`, `fsWrite` | compound `Edit` + `Write` |
 | `glob` | `Glob` |
 | `grep` | `Grep` |
 | `web_search` | `WebSearch` |
@@ -218,6 +242,19 @@ The standalone hook file at `~/.kiro/hooks/agentperm.json`:
 ```
 
 Custom Kiro CLI agents also receive an embedded `hooks.preToolUse` entry with the glob matcher `"*"`. Both global agents in `$KIRO_HOME/agents` and project agents in the current Git workspace's `.kiro/agents` directory are updated. Project-scope standalone hooks can be placed at `.kiro/hooks/agentperm.json` in a workspace root.
+
+## Semantic file-operation translation
+
+Claude preserves native `Edit` and `Write` and maps `NotebookEdit` to `Edit`. Codex and OpenCode
+translate apply-patch add/update/delete/move markers into compound `Write`/`Edit` requests. Gemini
+maps `replace` to `Edit` and `write_file` to `Write`. Kiro's combined write aliases become both
+`Edit` and `Write` because the host does not distinguish create from replace.
+
+The CLI attaches the hook cwd to every child request. Scoped path matching normalizes traversal and
+resolves existing symlinks. An apply-patch payload with an invalid envelope, unknown marker, empty
+path, invalid move, or no operation becomes `RejectedRequest` and denies. See
+[Capabilities: semantic file operations](capabilities.md#semantic-file-operations) for the compact
+user-facing mapping.
 
 ## Adapter contract
 

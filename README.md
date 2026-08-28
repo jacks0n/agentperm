@@ -1,9 +1,12 @@
 # agentperm
 
-One permission policy for [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+**Stop approving the same safe command because a flag moved or it entered a pipe.**
+
+agentperm gives [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
 [Codex CLI](https://github.com/openai/codex), [OpenCode](https://opencode.ai),
-[Gemini CLI](https://github.com/google-gemini/gemini-cli), and [Kiro](https://kiro.dev) —
-and the only one that actually parses the command before deciding.
+[Gemini CLI](https://github.com/google-gemini/gemini-cli), and [Kiro](https://kiro.dev) one local
+permission policy. It parses shell programs, evaluates every command, and applies the strictest
+result. You review intent once instead of maintaining five fragile string allowlists.
 
 [![PyPI](https://img.shields.io/pypi/v/agentperm)](https://pypi.org/project/agentperm/)
 [![Python](https://img.shields.io/pypi/pyversions/agentperm)](https://pypi.org/project/agentperm/)
@@ -14,132 +17,189 @@ https://github.com/user-attachments/assets/9abcd24d-147c-4323-a1c3-970544e0d86a
 
 [GIF fallback](https://raw.githubusercontent.com/jacks0n/agentperm/main/docs/media/demo.gif)
 
-Coding agents prompt you constantly because their permission matchers are string prefixes:
-allow `cat` and allow `head`, and `cat README.md | head -20` still prompts — the pipe defeats
-the match. And you maintain that allowlist five times, once per agent, in five different formats.
-agentperm installs as a hook in all five agents and parses each command the way bash does —
-pipes, `&&` chains, subshells, redirects, `bash -c` wrappers, quoting tricks — deciding every
-segment against one shared policy. Not a sandbox — an intent layer. Fewer prompts, consistently.
+## One command, fully understood
 
-## Before / after
-
-You allow three harmless commands:
+This policy allows read-only AWS inspection, `jq`, and `git status`:
 
 ```jsonc
 {
   "version": 1,
   "permissions": {
-    "allow": ["Shell(cat)", "Shell(head)", "Shell(git status)"],
-    "deny":  ["Shell(sudo)"]
+    "allow": [
+      "Shell(aws values(--region, --profile) ec2 describe-* only(--region, --profile))",
+      "Shell(jq !-*)",
+      "Shell(git values(-C) status only(-C, --short))"
+    ]
   }
 }
 ```
 
-| The agent runs | Native matcher | agentperm |
-|---|---|---|
-| `cat README.md` | no prompt | no prompt |
-| `cat README.md \| head -20` | **prompts** | no prompt — both segments allowed |
-| `git status && cat notes.txt` | varies by agent | no prompt — both sides allowed |
-| `cat foo \| ./deploy.sh` | prompts | still prompts — one unknown segment |
-| `sudo ls` | depends on config | **denied**, in every agent |
-
-The strictest segment always wins: one unrecognized command in a compound means a prompt, and a
-`deny` written once bites everywhere.
-
-## vs. native permissions
-
-| | Native allowlists | agentperm |
-|---|---|---|
-| Decides each segment of `a \| b` | one opaque string | yes — tree-sitter-bash parse |
-| One policy across all five agents | re-declare 5× | one `.agent-permissions.jsonc` |
-| Flag-aware rules (`push` yes, `--force` no) | prefix match only | yes |
-| Sees through quoting, `\r\m`, `bash -c`, `$( )` | no | normalized and decomposed before matching |
-| Gates `>` / `>>` redirect targets | no | ask by default + path allowlist |
-| Inspects `python -c` source | no | read-only AST check |
-| Sandboxes execution | no | **no — not a sandbox** |
-
-Your native settings aren't replaced — they keep working underneath as a fast path, and agentperm
-only adds opinions on top.
-
-## Quickstart
+Now an agent can run this without a prompt:
 
 ```sh
-uv tool install agentperm   # or: pipx install agentperm
-agentperm install           # hook into all five agents (preview with --dry-run)
-agentperm init              # create ~/.agent-permissions.jsonc from starter templates
-agentperm import            # optional: absorb the allowlists you already maintain
+bash -lc 'aws --profile dev ec2 describe-instances --region ap-southeast-2 | jq ".Reservations[]" && git -C . status --short'
 ```
 
-`init` composes bundled templates — `agentperm init --list` shows them all
-(`aws-read-only`, `gh-read-only`, `docker-read-only`, `python-checks`, …). Verify it worked
-without touching an agent:
+agentperm unwraps `bash -lc`, splits the pipe and `&&`, and checks `aws`, `jq`, and `git`
+independently. Move `--profile` or `--region` before or after the AWS subcommand, or use
+`--region=value`: the same reviewed rule still matches.
 
+The rule does not become broad just because it is flexible. Add `--endpoint-url`, change
+`describe-*` to a mutating operation, or insert an unknown pipeline stage and the compound prompts.
+A deny anywhere denies the whole operation.
+
+That structural evaluation is the difference: agentperm understands pipelines, command and process
+substitutions, redirects, executable paths, quoting, supported wrappers, flag clusters, and declared
+flag values. It matches normalized commands—not one opaque shell string.
+
+## Try it
+
+Requires Python 3.12+ on macOS or Linux.
+
+```sh
+uv tool install agentperm                 # or: pipx install agentperm
+agentperm install --dry-run && agentperm install
+agentperm init
 ```
+
+`install --dry-run` shows every hook file before anything changes. `init` builds
+`~/.agent-permissions.jsonc` from conservative starter templates. Check a decision without running
+an agent:
+
+```console
 $ agentperm why "git status | head -5"
-allow — allow by rule 'Shell(git {status,log,diff,show,...} values(-C))'
+allow — allow by rule 'Shell(git {status,log,diff,show,blame,shortlog,describe,reflog} values(-C))'
   git status  → allow (...)
-  head -5  → allow (...)
+  head -5     → allow (...)
 ```
 
-Then run your agent as normal: `git status | head -5` no longer prompts.
-Requires Python 3.12+, macOS or Linux.
+Then use your agent normally. Existing native settings stay in place and continue to participate in
+the host's permission flow. See [Getting started](docs/getting-started.md) for installation modes,
+starter policies, and the first safe customization.
 
-## Writing rules
+## What one policy can express
 
-Rules go in `allow`, `ask`, or `deny`; deny beats ask beats allow. Four rules, four features:
+- **Shell structure:** each command in pipes, chains, substitutions, control flow, and supported
+  wrappers is evaluated independently.
+- **Useful permutations:** declare value-taking flags once; their order and `--flag=value` spelling
+  can vary without widening the rule.
+- **Precise constraints:** alternate command paths, require or forbid flags, reject extra operands,
+  and allow only reviewed flags.
+- **Semantic file controls:** write `Edit(src/**)` and `Write(dist/**)` once. Agent-specific edit,
+  write, notebook, and patch operations map to those capabilities.
+- **Scoped tools:** match tools by name, prefix, URL domain, or normalized path, including cwd,
+  traversal, and existing symlinks.
+- **Read-only inline Python:** `Python(readonly)` parses literal `python -c` and heredoc source with
+  Python's AST, allowing inspection while surfacing recognized mutations and dynamic effects.
+- **Layered policy:** combine a global policy with directory policies. Global Deny is an immutable
+  floor; for Ask and Allow, the nearest matching policy wins, so a project can whitelist a global
+  prompt without weakening a deny.
+- **Explainable decisions:** `why`, custom rule reasons, validation, and opt-in JSONL traces show why
+  a decision happened.
+- **Portable setup:** install directly or through Rulesync, and import supported native policies.
+
+The complete per-agent differences are in the [capability matrix](docs/capabilities.md).
+
+## Rules in 60 seconds
+
+Rules live in `permissions.allow`, `permissions.ask`, or `permissions.deny`:
 
 ```jsonc
-"Shell(git {status,log,diff} !-*)"   // {a,b} alternation; !-* rejects all flags
-"Shell(git push !--force)"           // allow push, forbid one flag
-"Shell(git stash {list,show} !...)"  // !... = exact: no extra operands
-"Shell(aws values(--region) s3 ls)"  // values() declares flags that consume a value
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      "Shell(git {status,log,diff} !-*)",
+      "Shell(aws values(--region) s3 ls only(--region))",
+      "Read(src/**)",
+      "Python(readonly)"
+    ],
+    "ask": [
+      "Shell(git push)"
+    ],
+    "deny": [
+      {"Edit(generated/**)": {"reason": "Generated file; update its source instead."}},
+      {"Write(generated/**)": {"reason": "Generated file; update its source instead."}},
+      "Shell(git push --force)",
+      "Shell(sudo)"
+    ]
+  }
+}
 ```
 
-Non-shell tools match by name: `"Read"`, `"mcp__memory__*"`, `"WebFetch(domain:github.com)"`,
-`"Edit(src/**)"`. Inline Python can be allowed when provably read-only: `"Python(readonly)"`.
-Full grammar: [Shell pattern DSL](https://github.com/jacks0n/agentperm/blob/main/docs/pattern-dsl.md) ·
-everything else: [policy reference](https://github.com/jacks0n/agentperm/blob/main/docs/policy-reference.md).
-After editing, `agentperm validate` catches typos the tolerant loader would otherwise skip silently.
+Useful Shell forms:
 
-## Global + per-directory policies
+| Form | Meaning |
+|---|---|
+| `{status,log,diff}` | one of these command-path tokens |
+| `describe-*` | glob within one token |
+| `values(--region)` | `--region` consumes the following token |
+| `only(--region, --profile)` | reject every other flag |
+| `!--force` | reject this flag |
+| `!-*` | reject every flag |
+| `!...` | reject trailing operands |
 
-`~/.agent-permissions.jsonc` sets global defaults; any directory can add its own
-`.agent-permissions.jsonc`, and agentperm merges every policy from the filesystem root to the
-command's working directory. Rules union; deny wins across all levels, so a repo can add allows
-but can never weaken your global denies. `agentperm edit --local` creates the repo-root file.
+Run `agentperm validate` after editing. The [policy reference](docs/policy-reference.md) covers the
+whole file format; the [Shell pattern DSL](docs/pattern-dsl.md) is the exact grammar and matching
+specification.
 
-> **Review checked-in policy files.** A cloned repo can ship a `.agent-permissions.jsonc` whose
-> allows take effect when an agent runs inside it — treat it like `.vscode/tasks.json`. See
-> [SECURITY.md](https://github.com/jacks0n/agentperm/blob/main/SECURITY.md) for the threat model.
+## How decisions compose
 
-## Pane bypass (Zellij)
+agentperm returns `allow`, `ask`, `deny`, or `no-opinion`. After policy-layer precedence selects a
+verdict for each operation, the strictest result within a compound request wins:
 
-A bundled [WASM plugin](https://github.com/jacks0n/agentperm/tree/main/zellij-plugin) adds a
-per-pane "skip prompts" toggle that is safer than `--dangerously-skip-permissions`: asks become
-allows in that pane only, and deny rules still bite.
+```text
+deny > ask > allow > no-opinion
+```
 
-## What it doesn't do
+An otherwise allowed pipeline with one unknown command becomes Ask. A multi-file patch with one
+denied destination becomes Deny. `no-opinion` lets the host continue its native flow.
 
-- **No sandbox.** It decides allow / ask / deny; it doesn't contain what runs.
-- **No replacing native settings.** Those keep working as a fast path.
-- **No MCP server management.** Use [Rulesync](https://github.com/dyoshikawa/rulesync) or native config for that.
-- **No repo-policy trust gating yet** — see [SECURITY.md](https://github.com/jacks0n/agentperm/blob/main/SECURITY.md).
+Policies load from `~/.agent-permissions.jsonc` and then from every directory between the filesystem
+root and the command's working directory. Deny matches across every layer. For Ask and Allow, the
+nearest policy with a matching rule wins; within one file, Ask precedes Allow. A cloned repository
+can therefore bring its own allows, so review checked-in policy files like `.envrc` or
+`.vscode/tasks.json`.
 
-## Uninstall
+## Security boundary
 
-`agentperm uninstall` removes every hook the installer wrote and nothing else; policy files stay
-yours. Then `uv tool uninstall agentperm`.
+agentperm is a **permission intent layer, not a sandbox**. It does not contain processes, prove what
+an allowed program will do, or see execution paths a host does not send through hooks. Host bypass
+mode can bypass agentperm entirely. Use OS isolation when containment matters and read
+[SECURITY.md](SECURITY.md) before treating policies as a security control.
 
-## Docs
+- It adds decisions to native permission flows; it does not replace host settings.
+- It does not configure or isolate MCP servers.
+- Directory policies are not trust-gated: a cloned repository can add allows and override global
+  Ask rules, though it cannot weaken any Deny.
+- Shell and Python analysis classify reviewed intent; they do not prove program behavior.
 
-[Getting started](https://github.com/jacks0n/agentperm/blob/main/docs/getting-started.md) ·
-[CLI reference](https://github.com/jacks0n/agentperm/blob/main/docs/cli.md) ·
-[Policy reference](https://github.com/jacks0n/agentperm/blob/main/docs/policy-reference.md) ·
-[Pattern DSL](https://github.com/jacks0n/agentperm/blob/main/docs/pattern-dsl.md) ·
-[Troubleshooting](https://github.com/jacks0n/agentperm/blob/main/docs/troubleshooting.md) ·
-[All docs](https://github.com/jacks0n/agentperm/tree/main/docs) ·
-[Changelog](https://github.com/jacks0n/agentperm/blob/main/CHANGELOG.md) ·
-[Contributing](https://github.com/jacks0n/agentperm/blob/main/CONTRIBUTING.md)
+Traces are also diagnostic—not a production audit system. They are off by default, may contain raw
+commands and secrets, and have no built-in redaction, rotation, retention, or tamper protection.
+See [CLI: diagnostic traces](docs/cli.md#diagnostic-traces).
+
+There is no SQL syntax analyzer today. SQL clients can be constrained with Shell rules, but
+agentperm does not distinguish `SELECT` from mutating SQL inside a query string.
+
+## Zellij pane bypass
+
+The bundled [Zellij plugin](zellij-plugin/) adds a per-pane “skip prompts” toggle. It turns Ask and
+NoOpinion into Allow for that pane while preserving Deny, making it narrower than a host-wide
+“dangerously skip permissions” mode.
+
+## Documentation
+
+- [Getting started](docs/getting-started.md) — install, initialize, and verify a policy.
+- [Capability matrix](docs/capabilities.md) — exact coverage and behavior by agent.
+- [Policy reference](docs/policy-reference.md) — schema, semantic tools, hierarchy, and redirects.
+- [Shell pattern DSL](docs/pattern-dsl.md) — complete matching grammar and limitations.
+- [CLI reference](docs/cli.md) — commands, hook installation, traces, and exit behavior.
+- [Troubleshooting](docs/troubleshooting.md) — symptom-led diagnosis and fixes.
+- [Architecture](docs/architecture.md) and [adapter notes](docs/adapters.md) — contributor internals.
+- [Changelog](CHANGELOG.md) and [contributing guide](CONTRIBUTING.md) — releases and development.
+
+`agentperm uninstall` removes only hooks written by agentperm; policy files remain yours. Then remove
+the package with `uv tool uninstall agentperm` or `pipx uninstall agentperm`.
 
 ## License
 

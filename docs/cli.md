@@ -22,14 +22,16 @@ agentperm install [--mode auto|rulesync|direct] [--dry-run]
 
 `install` runs in one of two modes; `--mode auto` (the default) picks based on whether `~/.rulesync/` exists.
 
-**Rulesync mode** — when `~/.rulesync/` exists, hook entries are merged into `~/.rulesync/hooks.json` under each agent's block (`claudecode`, `codexcli`, `geminicli`). You re-run `rulesync` afterwards to regenerate per-tool configs from this source of truth. The OpenCode plugin shim is still installed directly (rulesync has no schema for `permission.ask` plugins), and the Codex `[features].hooks` flag is rulesync's responsibility, not agentperm's.
+**Rulesync mode** — when `~/.rulesync/` exists, hook entries are merged into `~/.rulesync/hooks.json` under each agent's block (`claudecode`, `codexcli`, `geminicli`). You re-run `rulesync` afterwards to regenerate per-tool configs from this source of truth. OpenCode and Kiro are still installed directly because Rulesync has no matching integration schema. The Codex `[features].hooks` flag is Rulesync's responsibility, not agentperm's.
 
 **Direct mode** — bypasses rulesync entirely:
 
 - **Claude Code:** appends a `PreToolUse` hook to `~/.claude/settings.json` (matcher `*`). Strips any spurious agentperm entry that ended up in `PermissionRequest` (Claude doesn't fire that event).
-- **Codex CLI:** appends `PreToolUse` (matcher `Bash`) and `PermissionRequest` (matcher `Bash|apply_patch|mcp__.*`) hooks to `~/.codex/hooks.json`, and enables `[features].hooks = true` in `~/.codex/config.toml`.
+- **Codex CLI:** appends `PreToolUse` (matcher `Bash|apply_patch`) and `PermissionRequest` (matcher `Bash|apply_patch|mcp__.*`) hooks to `~/.codex/hooks.json`, and enables `[features].hooks = true` in `~/.codex/config.toml`.
 - **Gemini CLI:** appends a `BeforeTool` hook to `~/.gemini/settings.json` (matcher `.*`).
-- **OpenCode:** writes `~/.config/opencode/plugins/agentperm.js` — always, regardless of mode.
+- **OpenCode:** writes `~/.config/opencode/plugins/agentperm.js` with pre-execution and permission hooks — always, regardless of mode.
+- **Kiro:** merges `PreToolUse` into existing global and workspace custom-agent files and writes
+  `~/.kiro/hooks/agentperm.json`; this is direct in every mode.
 
 ### Flags
 
@@ -167,12 +169,13 @@ here. Exits 2 if a discovered policy file fails to load.
 Runtime decision endpoint. Reads the agent's hook payload from stdin, writes a verdict envelope to stdout. **You don't run this manually** — `install` wires it up. To ask "what would the policy decide?", use [`why`](#why).
 
 ```sh
-agentperm check --agent <claude|codex|opencode|gemini|kiro> --event <event-name>
+agentperm check --agent <auto|claude|codex|opencode|gemini|kiro> --event <event-name>
 ```
 
 Arguments:
 
-- `--agent` (required): which adapter to use to parse the payload and format the verdict
+- `--agent` (required): which adapter parses the payload and formats the verdict. `auto` infers from
+  event and known tool names; installed hooks use an explicit agent.
 - `--event` (required): the agent-specific event name, e.g. `PreToolUse`, `PermissionRequest`, `permission.ask`
 
 Behavior:
@@ -182,23 +185,41 @@ Behavior:
 3. Load the global policy plus every policy from the filesystem root through the payload cwd
 4. Decide → aggregate → coerce for permission mode → emit verdict envelope on stdout
 
-Failure modes (all fail open with empty `{}` so the agent's native flow takes over):
+Failure behavior is deliberately split:
 
-- Malformed JSON → empty
-- Payload doesn't match an expected shape → empty
-- Policy file is broken (parse error) → emits `Ask` with rationale `"policy load failed: ..."` to surface the problem to the user
+- Malformed JSON, a non-object payload, or a payload the selected adapter cannot parse → empty `{}`;
+  the host's native flow takes over.
+- A discovered policy file that cannot load → an `Ask` verdict with rationale
+  `"policy load failed: ..."`; the broken policy is visible instead of silently bypassed.
+- A mutation payload recognized as a patch but not safely translatable → `Deny`; scoped file rules
+  cannot be trusted without a complete target list.
+- A Kiro shell payload without a command → `Ask`, which Kiro represents as a blocking exit code 2.
 
-### Tracing
+### Diagnostic traces
 
-Set `AGENTPERM_TRACE` to a writable path to log every invocation:
+Set `AGENTPERM_TRACE` to a writable path to append one raw JSON object per hook invocation:
 
 ```sh
 export AGENTPERM_TRACE=/tmp/agentperm-trace.log
 ```
 
-Each invocation appends one JSON line: `{ agent, event, payload, verdict, note }`. Useful when debugging "why did this prompt me?" — see [Troubleshooting](troubleshooting.md).
+Each line contains `agent`, `event`, the full `payload`, `verdict` when one was reached, and a
+diagnostic `note` when parsing or loading stopped early. Pane bypass adds a `coercion` object with
+the original decision.
 
-When the verdict was overridden by [pane bypass](#pane-bypass), the line also carries a `coercion` object: `{ by: "zellij_pane_bypass", pane_id, session, original_decision, original_rationale }`. Use that field to reconstruct what the policy *would* have decided absent the bypass.
+This is a debugging trace, not a production audit trail:
+
+- It can contain raw commands, file contents or patches, prompts, URLs, tokens, and other secrets
+  present in agent tool payloads.
+- agentperm provides no redaction, rotation, retention, indexing, access control, integrity signing,
+  or tamper protection.
+- Concurrent hooks append independently, so ordering and completeness are not guaranteed.
+- Trace-write failures are ignored to avoid breaking permission hooks.
+
+Choose a private path with appropriate OS permissions, arrange rotation yourself, and unset the
+variable after diagnosis. Start the agent from the shell where the variable is set so hooks inherit
+it. For development checkouts, `<repo>/.env` is also loaded without overriding an existing process
+variable. See [Troubleshooting](troubleshooting.md#1-the-agent-prompted-but-the-trace-is-empty).
 
 ### Pane bypass
 
@@ -243,11 +264,12 @@ After editing, run [`validate`](#validate) to catch typos before they cost you p
 
 | Code | Meaning |
 |---|---|
-| `0` | Normal — the command ran to completion. For `check`, this is independent of the verdict; the verdict itself is on stdout. |
+| `0` | Normal completion. JSON-envelope adapters report policy verdicts on stdout; Kiro uses 0 for Allow/NoOpinion. |
 | `1` | `validate` found errors, or `install`/`uninstall` failed for at least one adapter. |
-| `2` | Usage or configuration error — argument parse failure, unknown `init` template, `edit`/`init` `--local` outside a git worktree, or `why` with an unloadable policy. |
+| `2` | Usage/configuration error, `why` with an unloadable policy, or Kiro Ask/Deny (its hook protocol uses exit codes). |
 
-`check` does not signal "deny" via exit code; it always emits its decision via the stdout envelope. This matches every adapter's expectation that a non-zero exit means "the hook itself failed", not "policy denied." (Kiro is the one exception by design: its protocol *is* exit codes — see [adapters](adapters.md#kiro-cli--ide).)
+Claude, Codex, OpenCode, and Gemini do not signal Deny through the process exit code; their verdict
+is the stdout envelope. Kiro is the deliberate exception—see [adapter notes](adapters.md#kiro-cli--ide).
 
 ---
 

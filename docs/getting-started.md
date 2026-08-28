@@ -1,133 +1,150 @@
 # Getting started
 
-From nothing to "my agents stopped prompting me for read-only commands" in about ten minutes.
-Requires Python 3.12+, macOS or Linux.
+Go from installation to a verified policy in a few minutes. Requires Python 3.12+ on macOS or Linux.
 
-## 1. Install the tool
+## 1. Install and preview
 
 ```sh
 uv tool install agentperm   # or: pipx install agentperm
-```
-
-## 2. Hook it into your agents
-
-Preview what would change, then do it:
-
-```sh
 agentperm install --dry-run
 agentperm install
 ```
 
-`install` wires an `agentperm check` hook into every agent it finds config for — Claude Code,
-Codex CLI, OpenCode, Gemini CLI, and Kiro. Your native permission settings are not modified; they
-keep working underneath as a fast path. If you use [Rulesync](https://github.com/dyoshikawa/rulesync),
-entries are merged into `~/.rulesync/hooks.json` instead ([details](cli.md#install)).
+The dry run prints files agentperm would change. `install` adds hooks for the supported agents it
+finds; it does not replace their native permission settings. In auto mode it uses Rulesync when
+`~/.rulesync/` exists, otherwise it writes native hook configuration directly. OpenCode's plugin is
+always installed directly. See [CLI: install](cli.md#install) for exact paths and modes.
 
-At this point nothing behaves differently yet: with no policy file, agentperm has no opinion and
-every agent falls back to its native flow.
+With no policy, agentperm returns no opinion and the host continues its native flow.
 
-## 3. Create a policy from templates
+## 2. Create a starter policy
 
 ```sh
 agentperm init
 ```
 
-This writes `~/.agent-permissions.jsonc` from three bundled templates: `safety-baseline` (deny
-`sudo` and friends, ask on `sed -i`, gate `>` redirects), `file-inspection` (read-only file, text,
-and system commands), and `git-read-only`. See what else is available and add what fits your work:
+This creates `~/.agent-permissions.jsonc` from three readable templates:
+
+- `safety-baseline` denies commands such as `sudo`, asks on destructive flags, and gates file
+  redirects.
+- `file-inspection` covers common read-only file, text, and system inspection.
+- `git-read-only` covers inspection-oriented Git commands.
+
+Existing rules remain intact when templates are added again; new entries are reported with their
+source template. If an existing policy is rewritten during a merge, hand-written comments are not
+preserved.
 
 ```sh
 agentperm init --list
 agentperm init aws-read-only gh-read-only python-checks
 ```
 
-Templates merge: rules you already have are left alone, new ones append, and each addition is
-reported with the template it came from. Every template is a readable policy file in
-[`src/agentperm/templates/`](../src/agentperm/templates/) — good reference material for writing
-your own rules. Complete real-world setups live in [`examples/`](../examples/).
+Bundled templates live in [`src/agentperm/templates/`](../src/agentperm/templates/); larger examples
+live in [`examples/`](../examples/).
 
-## 4. Watch a prompt disappear
+## 3. Verify before trusting it
 
-Ask agentperm what it now decides, no agent required:
-
-```sh
+```console
 $ agentperm why "git status | head -5"
 allow — allow by rule 'Shell(git {status,log,diff,show,blame,shortlog,describe,reflog} values(-C))'
   git status  → allow (...)
-  head -5  → allow (...)
-policy files: /Users/you/.agent-permissions.jsonc
+  head -5     → allow (...)
 ```
 
-Then run your agent as normal and have it execute the same compound. Before: a permission prompt,
-because native matchers treat `git status | head -5` as one opaque string that no allowlist entry
-matches. Now: it just runs — agentperm parsed the pipe and found both segments allowed.
+`why` evaluates the merged policy without running the command. It also exposes the important
+compound rule: all segments must be safe. One unknown segment prompts; one deny blocks everything.
+Once the result is Allow, ask your agent to run the same command: the installed hook now evaluates
+the pipeline as two reviewed segments instead of one opaque string.
 
-The strictest segment always wins. One unknown command in a compound still prompts:
-
-```sh
-$ agentperm why "cat foo | ./deploy.sh"
+```console
+$ agentperm why "cat README.md | ./deploy.sh"
 ask — compound includes unrecognized segment: no rule matched './deploy.sh'
-```
 
-And a deny is a deny, everywhere, in every agent:
-
-```sh
 $ agentperm why "sudo rm -rf /"
 deny — deny by rule 'Shell(sudo)'
 ```
 
-## 5. Grow the policy from real prompts
+## 4. Add one deliberate rule
 
-The working loop, whenever an agent prompts you for something you consider harmless:
+Open the global policy:
 
-1. `agentperm why "<the command>"` — the rationale names the segment that needs a rule.
-2. `agentperm edit` — add one rule. A tour of the syntax, one feature at a time:
+```sh
+agentperm edit
+```
 
-   ```jsonc
-   "Shell(terraform {plan,show,validate})",   // {a,b} alternation on subcommands
-   "Shell(sed !{-i,--in-place})",             // ! forbids specific flags
-   "Shell(git stash {list,show} !... !-*)",   // !... = no extra operands, !-* = no other flags
-   "Shell(aws values(--region) s3 ls)"        // values() declares flags that consume a value
-   ```
+Add rules to `allow`, `ask`, or `deny`. Within one file, Deny wins over Ask, which wins over Allow.
 
-   The full language: [Shell pattern DSL](pattern-dsl.md). Everything else the file can express —
-   dict rules, redirect allowlisting, `Python(readonly)` — is in the
-   [policy reference](policy-reference.md).
+```jsonc
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      "Shell(terraform {plan,show,validate} !-*)",
+      "Read(src/**)"
+    ],
+    "deny": [
+      {"Edit(generated/**)": {"reason": "Edit the schema and regenerate this directory."}},
+      {"Write(generated/**)": {"reason": "Edit the schema and regenerate this directory."}}
+    ]
+  }
+}
+```
 
-3. `agentperm validate` — catches what the tolerant loader would let slide: a typo like
-   `"Shel(git status)"` doesn't error at runtime, it just silently never matches.
+`Edit` and `Write` are semantic operations shared across agents. For example, patch updates map to
+Edit and patch additions map to Write. The [capability matrix](capabilities.md) lists exact host
+mappings and limitations.
 
-## 6. Import what your agents already allow
+Validate before returning to your agent:
 
-If you've been maintaining native allowlists, pull them in rather than re-writing them:
+```sh
+agentperm validate
+agentperm why "terraform validate"
+```
+
+The runtime loader is intentionally tolerant of unknown shapes; `validate` catches misspellings such
+as `Shel(...)` that would otherwise never match.
+
+## 5. Grow from real prompts
+
+When a command prompts unexpectedly:
+
+1. Run `agentperm why "<command>"`.
+2. Add the narrowest rule covering the reviewed intent.
+3. Run `agentperm validate` and `why` again.
+
+Common forms:
+
+```jsonc
+"Shell(git {status,log,diff} !-*)"         // alternation; no flags
+"Shell(git push !--force)"                 // forbid one flag
+"Shell(git stash {list,show} !... !-*)"    // no extra operands or flags
+"Shell(aws values(--region) s3 ls)"        // value flag may move
+"WebFetch(domain:github.com)"              // URL field and subdomains
+"Edit(src/**)"                             // normalized path from request cwd
+```
+
+Use the [Shell pattern DSL](pattern-dsl.md) for shell rules and the
+[policy reference](policy-reference.md) for every other setting.
+
+## Optional: import native policies
 
 ```sh
 agentperm import
 ```
 
-This reads Claude's `settings.json`, Codex's `*.rules`, OpenCode's `permission` block, and Kiro's
-agent files, appending anything your policy doesn't already contain. Native configs are left
-untouched ([details and limits](cli.md#import)).
+Import reads supported Claude, Codex, OpenCode, and Kiro rules into the global policy without
+modifying native configuration. Gemini import is not available. Review imported legacy
+`Bash(...)` rules and narrow them where appropriate.
 
-## Where the files live
+## Policy locations and trust
 
-- `~/.agent-permissions.jsonc` — global policy, applies everywhere.
-- `<any directory>/.agent-permissions.jsonc` — at decision time, agentperm merges the global file
-  with every policy between the filesystem root and the command's working directory. Rules union
-  across levels; `deny` beats `ask` beats `allow` across all of them, so a repo can add its own
-  allows but can never weaken your global denies. `agentperm edit --local` creates the current
-  repo's root policy.
+- `~/.agent-permissions.jsonc` applies globally.
+- A `.agent-permissions.jsonc` in any ancestor of the request cwd adds directory policy.
+- `agentperm edit --local` targets the current Git repository root.
 
-**Trust note:** a repository you clone can ship a `.agent-permissions.jsonc`, and its `allow`
-rules take effect when an agent runs inside it. Review checked-in policy files like you'd review
-`.vscode/tasks.json` — see [SECURITY.md](../SECURITY.md) for the full threat model.
+Deny rules union across every file and cannot be overridden. For Ask and Allow, the nearest matching
+policy wins: a project Allow can intentionally whitelist a global Ask, and a project Ask can narrow a
+global Allow. Review checked-in policies like `.envrc`. See [SECURITY.md](../SECURITY.md).
 
-## Something's wrong?
-
-`agentperm why` and the [troubleshooting guide](troubleshooting.md) cover the common cases:
-still prompting, allowed something it shouldn't have, install did nothing. Removing agentperm is
-one command: [`agentperm uninstall`](cli.md#uninstall).
-
----
-
-Back to the [docs index](README.md).
+If behavior differs from `why`, continue with [Troubleshooting](troubleshooting.md). To remove hooks
+without deleting policy files, run `agentperm uninstall`.

@@ -14,6 +14,49 @@ and express alternation, required/forbidden flags, flag whitelisting, and value 
 It matches **argv shape, not command intent** (see §6). It is an ergonomics and
 intent-expression layer, *not* a sandbox.
 
+### Where the DSL sits
+
+`Shell(...)` patterns never match the raw hook string directly. Evaluation has two distinct stages:
+
+```text
+shell source
+  -> parse and unwrap pipes, chains, substitutions, redirects, and supported wrappers
+  -> normalize each command's operands, flags, clusters, and declared flag values
+  -> match every command against Shell(...) rules
+  -> aggregate extracted commands: deny > ask > allow > no-opinion
+```
+
+For example, given these allow rules:
+
+```jsonc
+"Shell(aws values(--region, --profile) ec2 describe-* only(--region, --profile))"
+"Shell(jq !-*)"
+"Shell(git values(-C) status only(-C, --short))"
+```
+
+this single hook command:
+
+```sh
+bash -lc 'aws --profile dev ec2 describe-instances --region ap-southeast-2 | jq ".Reservations[]" && git -C . status --short'
+```
+
+is first reduced to three independently evaluated argv vectors:
+
+```text
+aws  --profile dev  ec2 describe-instances  --region ap-southeast-2
+jq   .Reservations[]
+git  -C .  status  --short
+```
+
+The AWS rule also matches `aws ec2 describe-instances --region=ap-southeast-2 --profile dev`:
+declared value flags are removed from the positional path wherever they occur, while `only(...)`
+rejects every unreviewed flag. If any extracted command is denied, the entire shell program is
+denied; if one is unknown, an otherwise allowed compound becomes `Ask`.
+
+The shell constructs handled before DSL matching are specified in
+[Architecture: Shell parsing](architecture.md#shell-parsing). The rest of this document specifies
+the second stage: normalization and matching of one extracted argv vector.
+
 ## 2. Quick start
 
 ```jsonc
@@ -149,7 +192,7 @@ flag constraints, and all other terms.
 For longer lists of value-bearing flags, the dict form keeps the pattern readable:
 
 ```jsonc
-{"rule": "Shell(aws ec2 describe-*)", "values": ["--region", "--profile", "--output", "--endpoint-url"]}
+{"Shell(aws ec2 describe-*)": {"values": ["--region", "--profile", "--output", "--endpoint-url"]}}
 ```
 
 Dict `values` merge with any inline `values(...)` in the pattern. Both forms produce the same
@@ -421,8 +464,10 @@ Two independent knobs, both permissive by default:
 
 ### 5.6 Precedence across rules
 
-Unchanged: `deny` > `ask` > `allow`. A single pattern cannot express "allow a prefix *except*
-one of its extensions" (set difference) — use the deny list (see §3 Cookbook).
+Within one policy file, `deny` > `ask` > `allow`. Across files, every matching Deny applies; Ask and
+Allow are checked from the nearest policy back to the global policy. A project Allow can therefore
+whitelist a global Ask, but cannot bypass a Deny. A single pattern cannot express "allow a prefix
+*except* one of its extensions" (set difference)—use the deny list (see §3 Cookbook).
 
 ### 5.7 Matching algorithm
 
@@ -527,16 +572,22 @@ class ShellPattern(Rule):
     extra_values: frozenset[str] # values supplied by the structured dict form
 ```
 
-String rules serialize as their `Shell(...)` string. A structured rule with external `values`
-serializes as `{"rule": "Shell(...)", "values": [...]}` so its arity hints survive policy
-round-trips. `ShellPattern` coexists with the legacy positional `BashCommand` matcher.
+String rules serialize as their `Shell(...)` string. A structured rule with external `values`,
+`allowPaths`, or `reason` serializes canonically with the rule as the key:
+
+```jsonc
+{"Shell(aws ec2 describe-*)": {"values": ["--region"], "reason": "Read-only inventory"}}
+```
+
+The legacy `{"rule": "Shell(...)", ...}` input form remains readable, but agentperm does not write
+it. `ShellPattern` coexists with the legacy positional `BashCommand` matcher.
 `exact` and `closed_flags` are independent booleans — either, both, or neither can be set.
 
 ## 9. Out of scope (v1) / future
 
 - **Per-subcommand flag scoping** — separate flag constraints for `git` (global) vs `stash`
   vs `push` in `git stash push --foo`. v1 treats flags as one flat set (§6).
-- **Path confinement** — an `under:<root>` term that resolves an operand and checks it stays
+- **Shell-operand path confinement** — an `under:<root>` term that resolves an operand and checks it stays
   under a root (with `..` / symlink handling).
 - **Numeric / regex value constraints** on flag values.
 
