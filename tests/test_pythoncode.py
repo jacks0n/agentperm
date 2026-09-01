@@ -65,6 +65,22 @@ PY
     assert _decide(command).decision is Decision.Allow
 
 
+def test_readonly_file_search_with_exception_handling_allows():
+    command = """python - <<'PY'
+from pathlib import Path
+for p in Path('.venv').rglob('*'):
+    if p.is_file() and p.suffix in {'.json', '.js', '.py', '.md'}:
+        try:
+            text = p.read_text(errors='ignore')
+        except OSError:
+            continue
+        if 'reportExplicitAny' in text or 'max-module-lines' in text:
+            print(p)
+PY
+"""
+    assert _decide(command).decision is Decision.Allow
+
+
 def test_multiline_python_c_import_list_allows():
     command = '''python -c "
 from agentperm import (

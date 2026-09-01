@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import subprocess
 from collections.abc import Iterator, Sequence
@@ -38,7 +39,109 @@ class PolicyFile:
 
 
 def load_policy_file(path: Path) -> PolicyFile:
+    """Load one policy document without following its ``include`` entries."""
     return parse_policy_text(path.read_text(), str(path))
+
+
+def load_policy_layer(path: Path) -> PolicyFile:
+    """Load ``path`` and all recursive includes as one logical policy layer.
+
+    Included documents are applied in declaration order, with glob matches in
+    lexical order, followed by the including document. Permission lists union
+    within the layer, so splitting a file never changes Ask/Allow precedence.
+    """
+    sources = _load_policy_sources(path)
+    return PolicyFile(
+        policy=_combine_same_layer(tuple(source.policy for _, source in sources)),
+        raw=sources[-1][1].raw,
+    )
+
+
+def resolve_policy_paths(path: Path) -> tuple[Path, ...]:
+    """Every document contributing to ``path``, includes first and root last."""
+    return tuple(source_path for source_path, _ in _load_policy_sources(path))
+
+
+def _load_policy_sources(path: Path) -> tuple[tuple[Path, PolicyFile], ...]:
+    loaded: set[Path] = set()
+    active: list[tuple[Path, Path]] = []
+    sources: list[tuple[Path, PolicyFile]] = []
+
+    def visit(candidate: Path) -> None:
+        source_path = candidate.expanduser().absolute()
+        identity = source_path.resolve()
+        active_identities = [item_identity for item_identity, _ in active]
+        if identity in active_identities:
+            start = active_identities.index(identity)
+            cycle = [*(item_path for _, item_path in active[start:]), source_path]
+            raise PolicyError("include cycle: " + " -> ".join(str(item) for item in cycle))
+        if identity in loaded:
+            return
+        try:
+            policy_file = load_policy_file(source_path)
+        except OSError as error:
+            raise PolicyError(f"{source_path}: unreadable ({error})") from error
+
+        active.append((identity, source_path))
+        for pattern in _include_patterns(policy_file.raw, source_path):
+            for included in _expand_include(pattern, source_path):
+                visit(included)
+        active.pop()
+        loaded.add(identity)
+        sources.append((source_path, policy_file))
+
+    visit(path)
+    return tuple(sources)
+
+
+def _include_patterns(data: JsonObject, source: Path) -> tuple[str, ...]:
+    raw = data.get("include")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, str) and item.strip() for item in raw):
+        raise PolicyError(f"{source}: include must be an array of non-empty path or glob strings")
+    return tuple(item for item in raw if isinstance(item, str))
+
+
+def _expand_include(pattern: str, source: Path) -> tuple[Path, ...]:
+    expanded = Path(pattern).expanduser()
+    absolute_pattern = expanded if expanded.is_absolute() else source.parent / expanded
+    matches = tuple(
+        sorted(
+            (Path(match) for match in glob.glob(str(absolute_pattern), recursive=True, include_hidden=True)),
+            key=lambda match: str(match),
+        )
+    )
+    files = tuple(match for match in matches if match.is_file())
+    if not files:
+        raise PolicyError(f"{source}: include {pattern!r} matched no files")
+    return files
+
+
+def _combine_same_layer(policy_files: tuple[Policy, ...]) -> Policy:
+    def union_rules(groups: Iterator[Rule]) -> tuple[Rule, ...]:
+        return tuple(dict.fromkeys(groups))
+
+    redirection = RedirectionPolicy()
+    python_deny: set[str] = set()
+    python_ask: set[str] = set()
+    python_allow: set[str] = set()
+    for policy in policy_files:
+        redirection = redirection.merged_with(policy.redirection)
+        python_deny.update(policy.python_calls.deny)
+        python_ask.update(policy.python_calls.ask)
+        python_allow.update(policy.python_calls.allow)
+    return Policy(
+        deny=union_rules(rule for policy in policy_files for rule in policy.deny),
+        ask=union_rules(rule for policy in policy_files for rule in policy.ask),
+        allow=union_rules(rule for policy in policy_files for rule in policy.allow),
+        redirection=redirection,
+        python_calls=PythonCallPolicy(
+            deny=frozenset(python_deny),
+            ask=frozenset(python_ask),
+            allow=frozenset(python_allow),
+        ),
+    )
 
 
 def parse_policy_text(text: str, source: str) -> PolicyFile:
@@ -119,10 +222,11 @@ def _rules_from_list(raw: JsonValue) -> Iterator[Rule]:
 def save_policy_file(path: Path, policy_file: PolicyFile) -> None:
     raw: JsonObject = dict(policy_file.raw)
     raw.setdefault("version", 1)
+    # Aliases (Edit → Write) can make two written rules identical; keep the first-listed one.
     raw["permissions"] = {
-        "allow": [r.serialize() for r in policy_file.policy.allow],
-        "ask": [r.serialize() for r in policy_file.policy.ask],
-        "deny": [r.serialize() for r in policy_file.policy.deny],
+        "allow": [r.serialize() for r in dict.fromkeys(policy_file.policy.allow)],
+        "ask": [r.serialize() for r in dict.fromkeys(policy_file.policy.ask)],
+        "deny": [r.serialize() for r in dict.fromkeys(policy_file.policy.deny)],
     }
     calls = policy_file.policy.python_calls
     python_raw = raw.get("python")
@@ -190,7 +294,12 @@ def _policy_paths(cwd: Path | None) -> tuple[Path, ...]:
 
 def existing_policy_paths(cwd: Path | None = None) -> tuple[Path, ...]:
     """The policy files runtime discovery would actually load for ``cwd``, in merge order."""
-    return tuple(path for path in _policy_paths(cwd) if path.exists())
+    return tuple(
+        source
+        for path in _policy_paths(cwd)
+        if path.exists()
+        for source in resolve_policy_paths(path)
+    )
 
 
 def merged_policy(cwd: Path | None = None, *, local_root: Path | None = None) -> Policy:
@@ -206,7 +315,7 @@ def merged_policy(cwd: Path | None = None, *, local_root: Path | None = None) ->
     for path in _policy_paths(search_from):
         if not path.exists():
             continue
-        policy = policy.merged_with(load_policy_file(path).policy)
+        policy = policy.merged_with(load_policy_layer(path).policy)
     return policy
 
 

@@ -8,10 +8,13 @@ read-only unless a user rule or the built-in mutation catalogue says otherwise.
 from __future__ import annotations
 
 import ast
+import fnmatch
 import re
 from dataclasses import dataclass
 
-from .domain import Decision, PythonCallPolicy, Segment, Verdict
+from .domain import Decision, PythonCallPolicy, PythonSqlPattern, Segment, Verdict
+from .sql.domain import CapturedSql, SqlCaptureKind, SqlOrigin
+from .sql.service import SqlPolicyService
 
 _MAX_SOURCE_BYTES = 100_000
 _MAX_AST_NODES = 10_000
@@ -74,8 +77,8 @@ _ALLOWED_EXPRESSIONS = (
 )
 _ALLOWED_HELPERS = (
     ast.arguments, ast.arg, ast.keyword, ast.alias, ast.withitem, ast.comprehension,
-    ast.match_case, ast.pattern, ast.TypeIgnore, ast.operator, ast.unaryop, ast.boolop,
-    ast.cmpop, ast.expr_context,
+    ast.ExceptHandler, ast.match_case, ast.pattern, ast.TypeIgnore, ast.operator,
+    ast.unaryop, ast.boolop, ast.cmpop, ast.expr_context,
 )
 
 
@@ -85,7 +88,14 @@ class _InlineSource:
     problem: str = ""
 
 
-def analyze_python_segment(segment: Segment, calls: PythonCallPolicy) -> Verdict | None:
+def analyze_python_segment(
+    segment: Segment,
+    calls: PythonCallPolicy,
+    *,
+    sql_patterns: tuple[tuple[Decision, PythonSqlPattern], ...] = (),
+    sql_service: SqlPolicyService | None = None,
+    require_sql_capture: bool = False,
+) -> Verdict | None:
     """Return a verdict for inline Python, or ``None`` for unrelated command shapes."""
     extracted = _extract_inline_source(segment)
     if extracted is None:
@@ -99,8 +109,10 @@ def analyze_python_segment(segment: Segment, calls: PythonCallPolicy) -> Verdict
         tree = ast.parse(source, mode="exec")
     except (SyntaxError, ValueError) as error:
         return Verdict(Decision.Ask, f"inline Python is not parseable: {error}")
-    analyzer = _Analyzer(calls)
+    analyzer = _Analyzer(calls, sql_patterns, sql_service)
     analyzer.visit(tree)
+    if require_sql_capture and not analyzer.matched_sql_pattern:
+        return None
     return analyzer.verdict
 
 
@@ -134,14 +146,32 @@ def _extract_inline_source(segment: Segment) -> _InlineSource | None:
         if segment.stdin_dynamic:
             return _InlineSource(None, "python heredoc contains shell expansion")
         return _InlineSource(segment.stdin_source)
+
+    # Python reads stdin when no script/module/command is supplied, so the
+    # explicit ``-`` is optional for a literal heredoc (``python <<'PY'``).
+    # Keep bare interactive ``python`` outside the analyzer: without captured
+    # stdin there is no static source to inspect.
+    if segment.stdin_source is not None and all(arg in _SAFE_INTERPRETER_FLAGS for arg in args):
+        if segment.stdin_dynamic:
+            return _InlineSource(None, "python heredoc contains shell expansion")
+        return _InlineSource(segment.stdin_source)
     return None
 
 
 class _Analyzer(ast.NodeVisitor):
-    def __init__(self, calls: PythonCallPolicy) -> None:
+    def __init__(
+        self,
+        calls: PythonCallPolicy,
+        sql_patterns: tuple[tuple[Decision, PythonSqlPattern], ...],
+        sql_service: SqlPolicyService | None,
+    ) -> None:
         self.calls = calls
+        self.sql_patterns = sql_patterns
+        self.sql_service = sql_service
         self.aliases: dict[str, str] = {}
+        self.string_constants: dict[str, str] = {}
         self.node_count = 0
+        self.matched_sql_pattern = False
         self.verdict = Verdict(Decision.Allow, "inline Python AST is read-only")
 
     def visit(self, node: ast.AST) -> None:
@@ -226,6 +256,10 @@ class _Analyzer(ast.NodeVisitor):
             resolved = self._call_target(value)
             if resolved is not None:
                 self.aliases[target.id] = resolved
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                self.string_constants[target.id] = value.value
+            else:
+                self.string_constants.pop(target.id, None)
 
     def visit_For(self, node: ast.For) -> None:
         self._visit_for(node.target, node.iter, node.body, node.orelse)
@@ -256,20 +290,73 @@ class _Analyzer(ast.NodeVisitor):
         if target is None:
             self._record(Decision.Ask, "dynamic Python call target cannot be classified")
         else:
-            configured = self.calls.decision_for(target)
-            if configured is Decision.Deny:
-                self._record(Decision.Deny, f"Python call denied by policy: {target}")
-            elif configured is Decision.Ask:
-                self._record(Decision.Ask, f"Python call requires approval by policy: {target}")
-            elif configured is not Decision.Allow:
-                problem = self._builtin_call_problem(node, target)
-                if problem:
-                    self._record(Decision.Ask, problem)
+            sql_pattern = next(
+                (
+                    (decision, pattern)
+                    for decision, pattern in self.sql_patterns
+                    if fnmatch.fnmatchcase(target, pattern.target)
+                ),
+                None,
+            )
+            if sql_pattern is not None:
+                self._visit_sql_call(node, target, *sql_pattern)
+            else:
+                configured = self.calls.decision_for(target)
+                if configured is Decision.Deny:
+                    self._record(Decision.Deny, f"Python call denied by policy: {target}")
+                elif configured is Decision.Ask:
+                    self._record(Decision.Ask, f"Python call requires approval by policy: {target}")
+                elif configured is not Decision.Allow:
+                    problem = self._builtin_call_problem(node, target)
+                    if problem:
+                        self._record(Decision.Ask, problem)
         self.visit(node.func)
         for argument in node.args:
             self.visit(argument)
         for keyword in node.keywords:
             self.visit(keyword.value)
+
+    def _visit_sql_call(
+        self,
+        node: ast.Call,
+        target: str,
+        decision: Decision,
+        pattern: PythonSqlPattern,
+    ) -> None:
+        self.matched_sql_pattern = True
+        if decision is Decision.Deny:
+            self._record(Decision.Deny, pattern.rationale or f"Python SQL call denied by policy: {target}")
+            return
+        argument: ast.expr | None = None
+        if pattern.position is not None and len(node.args) > pattern.position:
+            argument = node.args[pattern.position]
+        elif pattern.keyword is not None:
+            argument = next((keyword.value for keyword in node.keywords if keyword.arg == pattern.keyword), None)
+        text = self._literal_string(argument)
+        if text is None:
+            self._record(Decision.Ask, f"SQL argument for Python call {target} is not a static string")
+            return
+        if decision is Decision.Ask:
+            self._record(Decision.Ask, pattern.rationale or f"Python SQL call requires approval by policy: {target}")
+        if self.sql_service is None:
+            self._record(Decision.Ask, f"no SQL policy is configured for Python call {target}")
+            return
+        captured = CapturedSql(
+            text,
+            pattern.profile,
+            SqlOrigin(SqlCaptureKind.PythonArgument, target),
+        )
+        sql_verdict = self.sql_service.decide(captured)
+        self._record(sql_verdict.decision, sql_verdict.rationale)
+        if decision is Decision.Allow and sql_verdict.decision is Decision.Allow and pattern.rationale:
+            self.verdict = Verdict(Decision.Allow, pattern.rationale)
+
+    def _literal_string(self, node: ast.expr | None) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            return self.string_constants.get(node.id)
+        return None
 
     def _call_target(self, node: ast.expr) -> str | None:
         if isinstance(node, ast.Name):

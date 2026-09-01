@@ -337,6 +337,23 @@ class AnyRest(PathTerm):
     pass
 
 
+@dataclass(frozen=True)
+class SqlCapture(PathTerm):
+    """One positional SQL string captured for semantic evaluation."""
+
+    profile: str | None = None
+
+
+@dataclass(frozen=True)
+class NestedShellCapture(PathTerm):
+    """One shell-source operand parsed as a nested shell program."""
+
+
+@dataclass(frozen=True)
+class NestedExecCapture(PathTerm):
+    """The remaining operands interpreted as a nested executable invocation."""
+
+
 class Disposition(Enum):
     Required = "required"
     Forbidden = "forbidden"
@@ -359,6 +376,9 @@ class ShellPattern(Rule):
     closed_flags: bool
     exact: bool
     value_flags: frozenset[str]
+    sql_value_captures: tuple[tuple[str | None, tuple[str, ...]], ...] = ()
+    stdin_sql_profile: str | None = None
+    captures_stdin_sql: bool = False
     extra_values: frozenset[str] = frozenset()
     allow_paths: tuple[str, ...] = ()
     rationale: str = field(default="", compare=False)
@@ -391,6 +411,26 @@ class ShellPattern(Rule):
         return {shell_str: opts}
 
 
+@dataclass(frozen=True)
+class PythonSqlPattern(Rule):
+    """A statically resolved Python call carrying SQL in one argument."""
+
+    target: str
+    profile: str | None = None
+    position: int | None = None
+    keyword: str | None = None
+    rationale: str = field(default="", compare=False)
+
+    def __post_init__(self) -> None:
+        if (self.position is None) == (self.keyword is None):
+            raise ValueError("PythonSqlPattern requires exactly one argument locator")
+
+    def serialize(self) -> str | JsonObject:
+        placeholder = "<SQL>" if self.profile is None else f"<SQL:{self.profile}>"
+        argument = placeholder if self.position == 0 else f"{self.keyword}={placeholder}"
+        return _serialize_rule_metadata(f"Python({self.target}({argument}))", self.rationale)
+
+
 _URL_ARG_KEYS = frozenset({"url", "uri", "href"})
 _PATH_ARG_KEYS = frozenset({"path", "file_path", "filepath", "paths", "file_paths", "notebook_path", "absolute_path"})
 _MAX_ARG_NODES = 1000
@@ -406,7 +446,7 @@ class NamedTool(Rule):
 
     - ``WebFetch(domain:github.com)`` — a URL field (``url`` / ``uri`` / ``href``) whose
       host is ``github.com`` or a subdomain.
-    - ``Read(/etc/**)`` / ``Edit(src/*)`` — a path field (``path`` / ``file_path`` / …)
+    - ``Read(/etc/**)`` / ``Write(src/*)`` — a path field (``path`` / ``file_path`` / …)
       matching the glob: ``*`` within one segment, ``**`` across ``/``.
     - bare name / ``(*)`` / ``()`` — matches the tool regardless of input.
     """
@@ -641,10 +681,20 @@ _INERT_COMMAND_NAMES: frozenset[str] = frozenset(
         "true",
         "false",
         ":",  # status setters / no-op
+        "break",  # loop control in the current shell
         "continue",  # loop control in the current shell
+        "export",  # in-process variable export only
         "read",  # in-process variable bind only
+        "unset",  # in-process variable/function removal only
         "echo",
         "printf",  # output to fds; redirects evaluated separately
+    }
+)
+
+_INERT_COMMAND_SHAPES: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("set", "+a"),  # disable automatic export of subsequently assigned variables
+        ("set", "-a"),  # enable automatic export of subsequently assigned variables
     }
 )
 
@@ -663,6 +713,17 @@ class Policy:
             raise PolicyError("Python(readonly) is only valid in permissions.allow")
 
     def decide(self, request: Request) -> Verdict:
+        from .sql.domain import SqlRequest, SqlRule
+
+        if isinstance(request, SqlRequest):
+            from .sql.service import SqlPolicyService
+
+            rules = tuple(
+                (decision, rule)
+                for decision, rule in self.all_rules()
+                if isinstance(rule, SqlRule)
+            )
+            return SqlPolicyService(rules).decide(request.sql)
         if isinstance(request, ShellRequest):
             return self._decide_shell(request.pipeline, request.cwd)
         if isinstance(request, ToolRequest):
@@ -726,7 +787,7 @@ class Policy:
     def _decide_segment(self, segment: Segment, cwd: Path | None = None) -> Verdict:
         from .shell import evaluate_redirects
 
-        command_verdict, _ = self._match_bash(segment)
+        command_verdict, _ = self._match_bash(segment, cwd)
         rule_paths: list[str] = []
         for decision, rule in self.all_rules():
             if (
@@ -745,8 +806,9 @@ class Policy:
         )
         return _stricter(redirect_verdict, command_verdict)
 
-    def _match_bash(self, segment: Segment) -> tuple[Verdict, Rule | None]:
-        from .shell import ALL_EXEC_WRAPPERS, is_command_lookup, is_opaque_shell_command
+    def _match_bash(self, segment: Segment, cwd: Path | None = None) -> tuple[Verdict, Rule | None]:
+        from .shell import ALL_EXEC_WRAPPERS, is_command_lookup, is_opaque_shell_command, parse_pipeline
+        from .shellpattern import match_shell_pattern_details
 
         argv0 = basename(segment.argv[0]) if segment.argv else None
         if argv0 in _SYNTHETIC_INERT_MARKERS:
@@ -755,13 +817,36 @@ class Policy:
         matched_rule: Rule | None = None
         for decision, rule in self.all_rules():
             if isinstance(rule, ShellPattern):
-                matches = rule.matches(
+                match = match_shell_pattern_details(
+                    rule,
                     segment,
                     ambiguous_option_values=decision is not Decision.Allow,
                 )
-            else:
-                matches = isinstance(rule, BashCommand | BashOption) and rule.matches(segment)
-            if matches:
+                if match is None:
+                    continue
+                base = Verdict(decision, _format_rule(rule, decision))
+                semantic_verdicts: list[Verdict] = []
+                if match.sql:
+                    from .sql.domain import SqlRule
+                    from .sql.service import SqlPolicyService
+
+                    sql_rules = tuple(
+                        (sql_decision, sql_rule)
+                        for sql_decision, sql_rule in self.all_rules()
+                        if isinstance(sql_rule, SqlRule)
+                    )
+                    service = SqlPolicyService(sql_rules)
+                    semantic_verdicts.extend(service.decide(captured) for captured in match.sql)
+                semantic_verdicts.extend(
+                    self._decide_shell(parse_pipeline(source), cwd) for source in match.nested_shell
+                )
+                semantic_verdicts.extend(
+                    self._decide_segment(Segment(argv, ()), cwd) for argv in match.nested_exec
+                )
+                shell_verdict = aggregate([base, *semantic_verdicts]) if semantic_verdicts else base
+                matched_rule = rule
+                break
+            elif isinstance(rule, BashCommand | BashOption) and rule.matches(segment):
                 shell_verdict = Verdict(decision, _format_rule(rule, decision))
                 matched_rule = rule
                 break
@@ -775,13 +860,32 @@ class Policy:
             ),
             None,
         )
-        if python_rule is not None:
+        python_patterns = tuple(
+            (decision, rule)
+            for decision, rule in self.all_rules()
+            if isinstance(rule, PythonSqlPattern)
+        )
+        if python_rule is not None or python_patterns:
             from .pythoncode import analyze_python_segment
+            from .sql.domain import SqlRule
+            from .sql.service import SqlPolicyService
 
-            python_verdict = analyze_python_segment(segment, self.python_calls)
+            sql_rules = tuple(
+                (decision, rule)
+                for decision, rule in self.all_rules()
+                if isinstance(rule, SqlRule)
+            )
+            python_verdict = analyze_python_segment(
+                segment,
+                self.python_calls,
+                sql_patterns=python_patterns,
+                sql_service=SqlPolicyService(sql_rules),
+                require_sql_capture=python_rule is None,
+            )
             if (
                 python_verdict is not None
                 and python_verdict.decision is Decision.Allow
+                and python_rule is not None
                 and python_rule.rationale
             ):
                 python_verdict = Verdict(Decision.Allow, python_rule.rationale)
@@ -796,6 +900,8 @@ class Policy:
             return Verdict(Decision.Ask, f"unanalyzable command wrapper {segment.argv[0]!r}"), None
         if segment.argv and "$" in segment.argv[0]:
             return Verdict(Decision.Ask, f"dynamic command name {segment.argv[0]!r}"), None
+        if segment.argv in _INERT_COMMAND_SHAPES:
+            return Verdict(Decision.Allow, "inert shell setup"), None
         if argv0 in _INERT_COMMAND_NAMES:
             return Verdict(Decision.Allow, "inert shell builtin"), None
         return Verdict(Decision.NoOpinion, f"no rule matched {segment.argv[0] if segment.argv else '<empty>'!r}"), None

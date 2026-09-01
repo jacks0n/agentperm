@@ -32,6 +32,7 @@ from .domain import (
     Policy,
     PythonCallPolicy,
     PythonReadonly,
+    PythonSqlPattern,
     RedirectionPolicy,
     RejectedRequest,
     Request,
@@ -54,16 +55,19 @@ from .policy import (
     existing_policy_paths,
     git_toplevel,
     load_policy_file,
+    load_policy_layer,
     load_template,
     merge_templates_into,
     merged_policy,
     parse_policy_text,
     render_templates,
+    resolve_policy_paths,
     save_policy_file,
     write_default_policy,
 )
 from .rules import parse_rule
 from .shell import parse_pipeline
+from .sql import CapturedSql, SqlDialect, SqlDocumentFormat, SqlEffect, SqlPolicyService, SqlRequest, SqlRule
 from .validate import Finding, validate_policy_file, validate_policy_text
 
 __all__ = [
@@ -74,6 +78,7 @@ __all__ = [
     "AgentName",
     "BashCommand",
     "BashOption",
+    "CapturedSql",
     "ClaudeAdapter",
     "CodexAdapter",
     "CompoundRequest",
@@ -93,6 +98,7 @@ __all__ = [
     "PolicyFile",
     "PythonCallPolicy",
     "PythonReadonly",
+    "PythonSqlPattern",
     "RedirectionPolicy",
     "RejectedRequest",
     "Request",
@@ -100,6 +106,12 @@ __all__ = [
     "Segment",
     "ShellPattern",
     "ShellRequest",
+    "SqlDialect",
+    "SqlDocumentFormat",
+    "SqlEffect",
+    "SqlPolicyService",
+    "SqlRequest",
+    "SqlRule",
     "Template",
     "TemplateMerge",
     "ToolRequest",
@@ -112,6 +124,7 @@ __all__ = [
     "existing_policy_paths",
     "git_toplevel",
     "load_policy_file",
+    "load_policy_layer",
     "load_template",
     "main",
     "merge_templates_into",
@@ -121,6 +134,7 @@ __all__ = [
     "parse_policy_text",
     "parse_rule",
     "render_templates",
+    "resolve_policy_paths",
     "save_policy_file",
     "validate_policy_file",
     "validate_policy_text",

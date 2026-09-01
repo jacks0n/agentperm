@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      "Shell(git status values(-C))",
+      "Shell({:,alias,cd,echo,exit,false,popd,printf,pushd,pwd,test,true,type})",
+      "Shell({ag,awk,cat,cmp,comm,cut,diff,du,egrep,fgrep,file,find,fold,grep,gsed,head,jq,less,locate,ls,more,nl,readlink,realpath,rg,sed,sort,stat,tail,tr,tree,uniq,wc,xargs,zipinfo})",
+      "Shell({date,df,dig,env,free,help,host,hostname,htop,id,ifconfig,info,iostat,lsof,man,mdfind,mdls,netstat,nslookup,pgrep,ping,printenv,ps,ss,top,traceroute,uname,uptime,vmstat,w,whatis,whereis,which,who,whoami})"
+    ],
+    "ask": [],
+    "deny": []
+  },
+  "shell": {
+    "redirection": {
+      "stderrToDevNull": "allow"
+    }
+  }
+}

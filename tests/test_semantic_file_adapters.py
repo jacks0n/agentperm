@@ -1,4 +1,8 @@
-"""Semantic file-operation mappings at native adapter boundaries."""
+"""Semantic file-operation mappings at native adapter boundaries.
+
+Every native file mutation is one capability, ``Write``: creating, overwriting, and editing a
+file are not separable permissions, because a write to an existing path overwrites it.
+"""
 
 from __future__ import annotations
 
@@ -11,30 +15,37 @@ from agentperm import (
     CodexAdapter,
     CompoundRequest,
     GeminiAdapter,
+    JsonObject,
     KiroAdapter,
     RejectedRequest,
     ToolRequest,
 )
 
 
-@pytest.mark.parametrize("tool_name", ["Edit", "Write"])
-def test_claude_preserves_semantic_file_tool_names(tool_name: str) -> None:
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("Write", {"file_path": "/workspace/generated.py", "content": "new"}),
+        ("Edit", {"file_path": "/workspace/generated.py", "old_string": "old", "new_string": "new"}),
+        (
+            "MultiEdit",
+            {"file_path": "/workspace/generated.py", "edits": [{"old_string": "old", "new_string": "new"}]},
+        ),
+    ],
+)
+def test_claude_maps_every_file_mutation_tool_to_write(tool_name: str, tool_input: JsonObject) -> None:
     request = ClaudeAdapter().parse_event(
-        {
-            "tool_name": tool_name,
-            "tool_input": {"file_path": "/workspace/generated.py"},
-            "cwd": "/workspace",
-        },
+        {"tool_name": tool_name, "tool_input": tool_input, "cwd": "/workspace"},
         "PreToolUse",
     )
 
     assert isinstance(request, ToolRequest)
-    assert request.tool == tool_name
+    assert request.tool == "Write"
     assert ("file_path", "/workspace/generated.py") in request.arguments
     assert request.cwd == Path("/workspace")
 
 
-def test_claude_maps_notebook_edit_to_semantic_edit() -> None:
+def test_claude_maps_notebook_edit_to_write() -> None:
     request = ClaudeAdapter().parse_event(
         {
             "tool_name": "NotebookEdit",
@@ -44,22 +55,28 @@ def test_claude_maps_notebook_edit_to_semantic_edit() -> None:
     )
 
     assert isinstance(request, ToolRequest)
-    assert request.tool == "Edit"
+    assert request.tool == "Write"
     assert ("notebook_path", "/workspace/generated.ipynb") in request.arguments
 
 
+def test_claude_leaves_non_mutating_tools_untouched() -> None:
+    request = ClaudeAdapter().parse_event(
+        {"tool_name": "Read", "tool_input": {"file_path": "/workspace/generated.py"}},
+        "PreToolUse",
+    )
+
+    assert isinstance(request, ToolRequest)
+    assert request.tool == "Read"
+
+
 @pytest.mark.parametrize(
-    ("native_name", "semantic_name", "path_field"),
+    ("native_name", "path_field"),
     [
-        ("replace", "Edit", "file_path"),
-        ("write_file", "Write", "file_path"),
+        ("replace", "file_path"),
+        ("write_file", "file_path"),
     ],
 )
-def test_gemini_maps_file_tools_to_semantic_operations(
-    native_name: str,
-    semantic_name: str,
-    path_field: str,
-) -> None:
+def test_gemini_maps_file_tools_to_write(native_name: str, path_field: str) -> None:
     request = GeminiAdapter().parse_event(
         {
             "tool_name": native_name,
@@ -70,13 +87,13 @@ def test_gemini_maps_file_tools_to_semantic_operations(
     )
 
     assert isinstance(request, ToolRequest)
-    assert request.tool == semantic_name
+    assert request.tool == "Write"
     assert (path_field, "/workspace/generated.py") in request.arguments
     assert request.cwd == Path("/workspace")
 
 
 @pytest.mark.parametrize("native_name", ["write", "fs_write", "fsWrite"])
-def test_kiro_combined_write_requires_edit_and_write_capabilities(native_name: str) -> None:
+def test_kiro_write_aliases_map_to_write(native_name: str) -> None:
     request = KiroAdapter().parse_event(
         {
             "tool_name": native_name,
@@ -86,20 +103,13 @@ def test_kiro_combined_write_requires_edit_and_write_capabilities(native_name: s
         "preToolUse",
     )
 
-    assert isinstance(request, CompoundRequest)
-    assert len(request.requests) == 2
-    edit, write = request.requests
-    assert isinstance(edit, ToolRequest)
-    assert isinstance(write, ToolRequest)
-    assert edit.tool == "Edit"
-    assert write.tool == "Write"
-    assert edit.arguments == write.arguments
-    assert ("path", "generated/client.py") in edit.arguments
-    assert edit.cwd == Path("/workspace")
-    assert write.cwd == Path("/workspace")
+    assert isinstance(request, ToolRequest)
+    assert request.tool == "Write"
+    assert ("path", "generated/client.py") in request.arguments
+    assert request.cwd == Path("/workspace")
 
 
-def test_codex_apply_patch_maps_each_mutation_to_semantic_operations() -> None:
+def test_codex_apply_patch_maps_every_mutation_to_write() -> None:
     request = CodexAdapter().parse_event(
         {
             "tool_name": "apply_patch",
@@ -120,11 +130,12 @@ def test_codex_apply_patch_maps_each_mutation_to_semantic_operations() -> None:
         "PreToolUse",
     )
 
+    # A move contributes both its source and its destination.
     assert isinstance(request, CompoundRequest)
     assert request.requests == (
-        ToolRequest("Edit", (("file_path", "generated/old.py"),)),
+        ToolRequest("Write", (("file_path", "generated/old.py"),)),
         ToolRequest("Write", (("file_path", "generated/new.py"),)),
-        ToolRequest("Edit", (("file_path", "generated/stale.py"),)),
+        ToolRequest("Write", (("file_path", "generated/stale.py"),)),
         ToolRequest("Write", (("file_path", "generated/index.py"),)),
     )
 

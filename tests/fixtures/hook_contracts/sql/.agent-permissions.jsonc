@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "permissions": {
+    "allow": [
+      {
+        "SQL(postgres-reporting)": {
+          "dialect": "postgres",
+          "effects": {"only": ["read"]}
+        }
+      },
+      {
+        "SQL(oracle-reporting)": {
+          "dialect": "oracle",
+          "format": "sqlplus",
+          "effects": {"only": ["read"]}
+        }
+      },
+      "Shell(source *)",
+      "Shell(psql values(-h,-p,-U,-d,-v,-P) sqlvalues(<SQL:postgres-reporting>,-c))",
+      "Shell(docker exec ... bash <SHELL> -l -c)",
+      "Shell(sqlplus stdin(<SQL:oracle-reporting>))",
+      "Python(query_db(<SQL:postgres-reporting>))"
+    ],
+    "ask": [],
+    "deny": [
+      {
+        "SQL(blocked-function)": {
+          "dialect": "postgres",
+          "functions": {"any": ["dangerous_extension_function"]}
+        }
+      }
+    ]
+  }
+}

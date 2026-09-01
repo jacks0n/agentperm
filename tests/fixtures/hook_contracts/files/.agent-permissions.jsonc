@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "permissions": {
+    "allow": ["Write(src/**)"],
+    "ask": [],
+    "deny": [
+      {"Write(generated/**)": {"reason": "Generated file; run the generator instead."}}
+    ]
+  }
+}

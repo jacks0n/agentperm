@@ -216,6 +216,20 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
     if node.type == "redirected_statement":
         yield from _build_redirected_segment(node, source)
         return
+    if node.type == "pipeline":
+        groups = tuple(tuple(_extract_segments(child, source)) for child in node.named_children)
+        if groups and all(len(group) == 1 for group in groups):
+            segments = [group[0] for group in groups]
+            for index in range(1, len(segments)):
+                literal = _literal_stdout(segments[index - 1])
+                current = segments[index]
+                if literal is not None and current.stdin_source is None:
+                    segments[index] = Segment(current.argv, current.redirects, literal, False)
+            yield from segments
+        else:
+            for group in groups:
+                yield from group
+        return
     if node.type in ("command_substitution", "process_substitution"):
         # A bare substitution standing where a command is expected — e.g. a
         # ``case $(rm -rf /) in …`` subject. The substitution runs; extract its
@@ -326,6 +340,18 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
                 yield from _extract_substitution_segments(child, source)
         return
     raise _UnsupportedShellError(f"unsupported shell node {node.type!r}")
+
+
+def _literal_stdout(segment: Segment) -> str | None:
+    """Return output for deliberately small, deterministic producer shapes."""
+    if not segment.argv:
+        return None
+    command = basename(segment.argv[0])
+    if command == "echo" and len(segment.argv) == 2:
+        return segment.argv[1] + "\n"
+    if command == "printf" and len(segment.argv) >= 3 and segment.argv[1] == "%s\\n":
+        return "".join(f"{value}\n" for value in segment.argv[2:])
+    return None
 
 
 def _build_segment(command_node: Node, source: bytes) -> tuple[Segment, tuple[Segment, ...]]:

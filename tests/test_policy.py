@@ -35,9 +35,11 @@ from agentperm import (
     coerce_for_pane_bypass,
     coerce_for_permission_mode,
     load_policy_file,
+    load_policy_layer,
     merged_policy,
     parse_pipeline,
     parse_rule,
+    resolve_policy_paths,
     save_policy_file,
 )
 
@@ -149,14 +151,14 @@ def test_named_tool_prefix_glob():
 
 
 def test_named_tool_reason_round_trips_and_is_verbatim_rationale():
-    raw: JsonObject = {"Edit(generated/**)": {"reason": "Generated file; update its source and rerun the generator."}}
+    raw: JsonObject = {"Write(generated/**)": {"reason": "Generated file; update its source and rerun the generator."}}
     rule = parse_rule(raw)
     assert isinstance(rule, NamedTool)
     assert rule.rationale == "Generated file; update its source and rerun the generator."
     assert rule.serialize() == raw
 
     policy = Policy(deny=(rule,))
-    verdict = policy.decide(ToolRequest("Edit", (("file_path", "generated/client.py"),)))
+    verdict = policy.decide(ToolRequest("Write", (("file_path", "generated/client.py"),)))
     assert verdict == Verdict(
         Decision.Deny,
         "Generated file; update its source and rerun the generator.",
@@ -170,17 +172,17 @@ def test_legacy_rule_wrapper_reason_is_accepted_and_serializes_canonically():
 
 
 def test_reason_metadata_does_not_affect_rule_equality_or_merge():
-    first = NamedTool("Edit", "generated/**", rationale="First reason")
-    duplicate = NamedTool("Edit", "generated/**", rationale="Second reason")
+    first = NamedTool("Write", "generated/**", rationale="First reason")
+    duplicate = NamedTool("Write", "generated/**", rationale="Second reason")
     assert first == duplicate
     assert Policy(deny=(first,)).merged_with(Policy(deny=(duplicate,))).deny == (first,)
 
 
 def test_reasonless_rule_serialization_and_automatic_rationale_are_unchanged():
-    rule = NamedTool("Edit", "generated/**")
-    assert rule.serialize() == "Edit(generated/**)"
-    verdict = Policy(deny=(rule,)).decide(ToolRequest("Edit", (("file_path", "generated/client.py"),)))
-    assert verdict.rationale == "deny by rule 'Edit(generated/**)'"
+    rule = NamedTool("Write", "generated/**")
+    assert rule.serialize() == "Write(generated/**)"
+    verdict = Policy(deny=(rule,)).decide(ToolRequest("Write", (("file_path", "generated/client.py"),)))
+    assert verdict.rationale == "deny by rule 'Write(generated/**)'"
 
 
 @pytest.mark.parametrize(
@@ -239,8 +241,8 @@ def test_named_tool_no_specifier_ignores_arguments():
 
 def test_relative_tool_path_rule_matches_absolute_request_from_hook_cwd(tmp_path: Path):
     generated = tmp_path / "generated/client.py"
-    verdict = Policy(deny=(NamedTool("Edit", "generated/**"),)).decide(
-        ToolRequest("Edit", (("file_path", str(generated)),), cwd=tmp_path)
+    verdict = Policy(deny=(NamedTool("Write", "generated/**"),)).decide(
+        ToolRequest("Write", (("file_path", str(generated)),), cwd=tmp_path)
     )
     assert verdict.decision is Decision.Deny
 
@@ -263,9 +265,9 @@ def test_deny_tool_path_rule_cannot_be_bypassed_through_symlink(tmp_path: Path):
     outside.mkdir()
     (generated / "linked").symlink_to(outside, target_is_directory=True)
 
-    verdict = Policy(deny=(NamedTool("Edit", "generated/**"),)).decide(
+    verdict = Policy(deny=(NamedTool("Write", "generated/**"),)).decide(
         ToolRequest(
-            "Edit",
+            "Write",
             (("file_path", "generated/linked/client.py"),),
             cwd=tmp_path,
         )
@@ -280,9 +282,9 @@ def test_allow_tool_path_rule_does_not_follow_symlink_outside_scope(tmp_path: Pa
     outside.mkdir()
     (generated / "linked").symlink_to(outside, target_is_directory=True)
 
-    verdict = Policy(allow=(NamedTool("Edit", "generated/**"),)).decide(
+    verdict = Policy(allow=(NamedTool("Write", "generated/**"),)).decide(
         ToolRequest(
-            "Edit",
+            "Write",
             (("file_path", "generated/linked/client.py"),),
             cwd=tmp_path,
         )
@@ -291,17 +293,30 @@ def test_allow_tool_path_rule_does_not_follow_symlink_outside_scope(tmp_path: Pa
 
 
 def test_compound_request_uses_strictest_semantic_file_verdict():
+    # One patch touching an allowed source file and a denied generated file is denied as a whole.
     request = CompoundRequest(
         (
-            ToolRequest("Edit", (("file_path", "generated/client.py"),)),
+            ToolRequest("Write", (("file_path", "src/app.py"),)),
             ToolRequest("Write", (("file_path", "generated/client.py"),)),
         )
     )
     verdict = Policy(
-        deny=(NamedTool("Edit", "generated/**", rationale="Regenerate this file."),),
-        allow=(NamedTool("Write", "generated/**"),),
+        deny=(NamedTool("Write", "generated/**", rationale="Regenerate this file."),),
+        allow=(NamedTool("Write", "src/**"),),
     ).decide(request)
     assert verdict == Verdict(Decision.Deny, "Regenerate this file.")
+
+
+def test_compound_request_with_an_unscoped_file_asks():
+    request = CompoundRequest(
+        (
+            ToolRequest("Write", (("file_path", "src/app.py"),)),
+            ToolRequest("Write", (("file_path", "docs/x.md"),)),
+        )
+    )
+    verdict = Policy(allow=(NamedTool("Write", "src/**"),)).decide(request)
+    assert verdict.decision is Decision.Ask
+    assert verdict.rationale.startswith("compound includes unrecognized segment")
 
 
 def test_rejected_native_request_is_denied_before_policy_matching():
@@ -355,8 +370,8 @@ def test_named_tool_glob_specifier_matches_path_field():
     assert rule.matches("Read", (("file_path", "/etc/ssl/cert.pem"),)) is True  # ** crosses /
     assert rule.matches("Read", (("file_path", "/home/user/x"),)) is False
     # `*` stays within one segment; the same mechanism scopes any tool, not just Read
-    assert NamedTool("Edit", "src/*").matches("Edit", (("file_path", "src/main.py"),)) is True
-    assert NamedTool("Edit", "src/*").matches("Edit", (("file_path", "src/sub/secret"),)) is False
+    assert NamedTool("Write", "src/*").matches("Write", (("file_path", "src/main.py"),)) is True
+    assert NamedTool("Write", "src/*").matches("Write", (("file_path", "src/sub/secret"),)) is False
 
 
 def test_named_tool_glob_normalizes_path_traversal():
@@ -367,9 +382,9 @@ def test_named_tool_glob_normalizes_path_traversal():
 
 def test_named_tool_glob_ignores_path_in_non_path_field():
     # Path-like text in a non-path field (e.g. an edit's old_string) must NOT match.
-    rule = NamedTool("Edit", "src/**")
+    rule = NamedTool("Write", "src/**")
     args = (("file_path", "/etc/passwd"), ("old_string", "import src.app"))
-    assert rule.matches("Edit", args) is False
+    assert rule.matches("Write", args) is False
 
 
 def test_named_tool_specifier_requires_name_match():
@@ -720,6 +735,77 @@ def test_merged_policies_union_rules_without_duplicates():
     assert prefixes == {("ls",), ("cat",), ("rg",)}
 
 
+def test_policy_layer_recursively_merges_globs_in_lexical_order(tmp_path: Path) -> None:
+    parts = tmp_path / "parts"
+    nested = parts / "nested"
+    nested.mkdir(parents=True)
+    (nested / "tools.jsonc").write_text(
+        '{"permissions":{"allow":["Shell(git push origin)"]}}'
+    )
+    (parts / "10-base.jsonc").write_text(
+        """{
+            "include": ["nested/*.jsonc"],
+            "permissions": {"allow": ["Read"]},
+            "shell": {"redirection": {"stdoutToFile": "deny"}}
+        }"""
+    )
+    (parts / "20-prompts.jsonc").write_text(
+        """{
+            "permissions": {"ask": ["Shell(git push)"]},
+            "shell": {"redirection": {"stdoutToFile": "ask"}}
+        }"""
+    )
+    root = tmp_path / POLICY_FILENAME
+    root.write_text(
+        """{
+            "version": 1,
+            "include": ["parts/**/*.jsonc"],
+            "shell": {"redirection": {"stdoutToFile": "allow"}}
+        }"""
+    )
+
+    assert resolve_policy_paths(root) == (
+        nested / "tools.jsonc",
+        parts / "10-base.jsonc",
+        parts / "20-prompts.jsonc",
+        root,
+    )
+    policy = load_policy_layer(root).policy
+    assert policy.decide(ShellRequest(parse_pipeline("git push origin main"))).decision is Decision.Ask
+    assert policy.decide(ToolRequest("Read")).decision is Decision.Allow
+    assert policy.redirection.stdout_to_file is Decision.Allow
+
+
+def test_policy_layer_deduplicates_files_matched_by_overlapping_globs(tmp_path: Path) -> None:
+    parts = tmp_path / "parts"
+    parts.mkdir()
+    shared = parts / "shared.jsonc"
+    shared.write_text('{"permissions":{"allow":["Read"]}}')
+    root = tmp_path / POLICY_FILENAME
+    root.write_text('{"include":["parts/*.jsonc","parts/shared.jsonc"]}')
+
+    assert resolve_policy_paths(root) == (shared, root)
+    assert load_policy_layer(root).policy.allow == (NamedTool("Read"),)
+
+
+def test_policy_layer_rejects_unmatched_include_glob(tmp_path: Path) -> None:
+    root = tmp_path / POLICY_FILENAME
+    root.write_text('{"include":["parts/*.jsonc"]}')
+
+    with pytest.raises(PolicyError, match="matched no files"):
+        load_policy_layer(root)
+
+
+def test_policy_layer_rejects_recursive_include_cycle(tmp_path: Path) -> None:
+    first = tmp_path / "first.jsonc"
+    second = tmp_path / "second.jsonc"
+    first.write_text('{"include":["second.jsonc"]}')
+    second.write_text('{"include":["first.jsonc"]}')
+
+    with pytest.raises(PolicyError, match=r"include cycle:.*first\.jsonc.*second\.jsonc.*first\.jsonc"):
+        load_policy_layer(first)
+
+
 def test_more_specific_allow_overrides_ancestor_ask() -> None:
     global_policy = Policy(ask=(BashCommand(("git", "push")),))
     project_policy = Policy(allow=(BashCommand(("git", "push", "origin")),))
@@ -892,14 +978,33 @@ def test_inert_builtins_allowed_when_no_rule_matches():
         "true",
         "false",
         ":",
+        "break",
         "continue",
+        "export FOO=bar",
         "read line",
+        "unset FOO",
         'printf "%s" hi',
         "[ -f x ]",
         "[[ -f x ]]",
         "(( 1 + 1 ))",
     ):
         assert _decide(policy, command).decision is Decision.Allow, command
+
+
+def test_break_in_loop_does_not_require_a_user_rule():
+    policy = Policy(allow=(BashCommand(("echo",)),))
+    command = "for item in a b; do echo $item; if true; then break; fi; done"
+
+    assert _decide(policy, command).decision is Decision.Allow
+
+
+def test_export_mode_toggles_are_intrinsic_but_other_set_forms_are_not():
+    policy = Policy()
+
+    assert _decide(policy, "set -a").decision is Decision.Allow
+    assert _decide(policy, "set +a").decision is Decision.Allow
+    assert _decide(policy, "set").decision is Decision.NoOpinion
+    assert _decide(policy, "set -x").decision is Decision.NoOpinion
 
 
 def test_user_deny_overrides_inert_builtin():
@@ -912,6 +1017,12 @@ def test_user_ask_overrides_inert_builtin():
     """An explicit ``ask`` rule on an inert builtin takes precedence over the inert fallback."""
     policy = Policy(ask=(BashCommand(("printf",)),))
     assert _decide(policy, 'printf "%s" hi').decision is Decision.Ask
+
+
+@pytest.mark.parametrize("command", ("export FOO=bar", "unset FOO"))
+def test_user_deny_overrides_inert_variable_builtin(command: str):
+    policy = Policy(deny=(BashCommand((command.split()[0],)),))
+    assert _decide(policy, command).decision is Decision.Deny
 
 
 def test_echo_with_redirect_still_asks():
@@ -1548,3 +1659,62 @@ def test_atomic_write_sets_owner_only_permissions(tmp_path: Path, exists_before:
     atomic_write(path, '{"version": 1}\n')
     mode = stat.S_IMODE(path.stat().st_mode)
     assert mode == 0o600
+
+
+# --- Edit(...) is a deprecated alias for Write(...) ------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "specifier", "rationale"),
+    [
+        ("Edit", None, ""),
+        ("Edit(*)", None, ""),
+        ("Edit(generated/**)", "generated/**", ""),
+        ({"Edit(generated/**)": {"reason": "Regenerate."}}, "generated/**", "Regenerate."),
+        ({"rule": "Edit(generated/**)", "reason": "Regenerate."}, "generated/**", "Regenerate."),
+    ],
+)
+def test_edit_rule_is_a_deprecated_alias_for_write(raw: str | JsonObject, specifier: str | None, rationale: str):
+    rule = parse_rule(raw)
+    assert isinstance(rule, NamedTool)
+    assert rule.name == "Write"
+    assert rule.specifier == specifier
+    assert rule.rationale == rationale
+    canonical = "Write" if specifier is None else f"Write({specifier})"
+    assert rule == parse_rule(canonical)
+    # The alias is never written back: import/init/save all emit the canonical spelling.
+    assert rule.serialize() == (canonical if not rationale else {canonical: {"reason": rationale}})
+
+
+def test_tool_name_alias_is_exact_and_case_sensitive():
+    assert parse_rule("edit") == NamedTool("edit")
+    assert parse_rule("Edit*") == NamedTool("Edit*")
+    assert parse_rule("NotebookEdit(**/*.ipynb)") == NamedTool("NotebookEdit", "**/*.ipynb")
+
+
+def test_edit_and_write_rules_dedupe_after_alias():
+    edit = parse_rule({"Edit(generated/**)": {"reason": "first"}})
+    write = parse_rule({"Write(generated/**)": {"reason": "second"}})
+    assert edit is not None and write is not None
+    merged = Policy(deny=(edit,)).merged_with(Policy(deny=(write,)))
+    assert merged.deny == (edit,)
+    assert merged.deny[0].rationale == "first"
+
+
+def test_edit_only_deny_governs_every_write_to_its_scope():
+    # The original bug: an Edit-only deny let a native overwrite through as no-opinion.
+    rule = parse_rule({"Edit(generated/**)": {"reason": "Generated — run the generator."}})
+    assert rule is not None
+    verdict = Policy(deny=(rule,)).decide(ToolRequest("Write", (("file_path", "generated/client.py"),)))
+    assert verdict == Verdict(Decision.Deny, "Generated — run the generator.")
+
+
+def test_save_policy_file_collapses_aliased_duplicates(tmp_path: Path):
+    path = tmp_path / ".agent-permissions.jsonc"
+    edit = parse_rule({"Edit(generated/**)": {"reason": "first"}})
+    write = parse_rule({"Write(generated/**)": {"reason": "second"}})
+    assert edit is not None and write is not None
+    save_policy_file(path, PolicyFile(policy=Policy(deny=(edit, write))))
+
+    saved = json.loads(path.read_text())
+    assert saved["permissions"]["deny"] == [{"Write(generated/**)": {"reason": "first"}}]

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "permissions": {
+    "allow": [],
+    "ask": ["Shell(echo)"],
+    "deny": []
+  }
+}

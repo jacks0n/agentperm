@@ -45,6 +45,7 @@ classifiers = [
 ]
 dependencies = [
     "pyjson5>=2.0,<3",
+    "sqlglot>=30.0,<31",
     "tomlkit>=0.13,<0.14",
     "tree-sitter>=0.25,<0.26",
     "tree-sitter-bash>=0.25,<0.26",

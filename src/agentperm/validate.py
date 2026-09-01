@@ -16,9 +16,9 @@ import pyjson5
 
 from .domain import JsonObject, JsonValue, NamedTool, narrow_json
 from .errors import PolicyError
-from .rules import parse_rule
+from .rules import TOOL_NAME_ALIASES, parse_rule
 
-_TOP_LEVEL_KEYS = frozenset({"version", "permissions", "shell", "python"})
+_TOP_LEVEL_KEYS = frozenset({"version", "include", "permissions", "shell", "python"})
 _PERMISSION_KEYS = ("allow", "ask", "deny")
 _REDIRECTION_DECISION_KEYS = frozenset({"stderrToDevNull", "stdoutToDevNull", "stdoutToFile", "appendToFile"})
 _REDIRECTION_KEYS = _REDIRECTION_DECISION_KEYS | {"allowPaths"}
@@ -56,6 +56,13 @@ def validate_policy_text(text: str) -> list[Finding]:
     if version is not None and version != 1:
         findings.append(Finding("warning", f"unsupported version {version!r} (expected 1)"))
 
+    include = data.get("include")
+    if include is not None and (
+        not isinstance(include, list)
+        or not all(isinstance(item, str) and item.strip() for item in include)
+    ):
+        findings.append(Finding("error", "'include' must be an array of non-empty path or glob strings"))
+
     findings.extend(_validate_permissions(data))
     findings.extend(_validate_redirection(data))
     findings.extend(_validate_python_calls(data))
@@ -85,30 +92,63 @@ def _validate_permissions(data: JsonObject) -> list[Finding]:
 
 
 def _validate_rule(entry: JsonValue, where: str) -> list[Finding]:
-    metadata_findings = _validate_rule_metadata(entry, where)
+    findings = _validate_rule_metadata(entry, where)
     try:
         rule = parse_rule(entry)
     except PolicyError as error:
-        return [*metadata_findings, Finding("error", f"{where}: {error}")]
+        return [*findings, Finding("error", f"{where}: {error}")]
     if rule is None:
         # The loader would skip this entry without a sound — the rule you wrote
         # protects (or allows) nothing.
         return [
-            *metadata_findings,
+            *findings,
             Finding("error", f"{where}: unparseable rule {_show(entry)} (silently ignored at runtime)"),
         ]
-    if isinstance(rule, NamedTool) and rule.specifier is not None and " " in rule.specifier:
+    if isinstance(rule, NamedTool):
+        findings.extend(_named_tool_findings(entry, rule, where))
+    return findings
+
+
+def _named_tool_findings(entry: JsonValue, rule: NamedTool, where: str) -> list[Finding]:
+    findings: list[Finding] = []
+    written = _rule_text(entry)
+    spelled = written.strip().split("(", 1)[0] if written is not None else None
+    if spelled is not None and spelled in TOOL_NAME_ALIASES:
+        # ``Edit(...)`` still parses, but only as an alias of the canonical capability.
+        # ``import``/``init`` rewrite it on save; nudge hand-edited files the same way.
+        findings.append(
+            Finding(
+                "warning",
+                f"{where}: {_show(entry)} uses the deprecated {spelled!r} rule name "
+                f"(an alias for {rule.name!r}) — rewrite it as {_show(rule.serialize())}",
+            )
+        )
+    if rule.specifier is not None and " " in rule.specifier:
         # ``Shel(git status)`` parses as NamedTool("Shel", "git status") — a real
         # tool specifier never contains a space, so this is almost surely a typo.
-        return [
-            *metadata_findings,
+        findings.append(
             Finding(
                 "warning",
                 f"{where}: {_show(entry)} matches a tool literally named {rule.name!r} — "
                 f"did you mean Shell(...) or Bash(...)?",
-            ),
-        ]
-    return metadata_findings
+            )
+        )
+    return findings
+
+
+def _rule_text(entry: JsonValue) -> str | None:
+    """The rule as written: a bare string, the legacy ``{"rule": ...}`` value, or the
+    rule-as-key key. ``None`` for shapes that carry no rule string."""
+    if isinstance(entry, str):
+        return entry
+    if not isinstance(entry, dict):
+        return None
+    rule = entry.get("rule")
+    if isinstance(rule, str):
+        return rule
+    if "tool" not in entry and len(entry) == 1:
+        return next(iter(entry))
+    return None
 
 
 def _validate_rule_metadata(entry: JsonValue, where: str) -> list[Finding]:

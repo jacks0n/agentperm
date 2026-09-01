@@ -54,6 +54,15 @@ def test_unknown_keys_warn() -> None:
     assert any("'denied'" in m for m in warnings)
 
 
+def test_include_accepts_paths_and_globs() -> None:
+    assert validate_policy_text('{"include": ["parts/core.jsonc", "parts/*.jsonc"]}') == []
+
+
+@pytest.mark.parametrize("include", ['"parts/*.jsonc"', "{}", '["", 42]'])
+def test_invalid_include_shape_is_an_error(include: str) -> None:
+    assert any("include" in message for message in _messages(f'{{"include": {include}}}', "error"))
+
+
 def test_bad_redirect_decision_is_an_error() -> None:
     text = '{"shell": {"redirection": {"stdoutToFile": "allw"}}}'
     assert any("allow/ask/deny" in m for m in _messages(text, "error"))
@@ -87,8 +96,30 @@ def test_invalid_rule_reason_is_an_error_without_making_rule_unparseable(entry: 
 
 
 def test_valid_rule_reason_has_no_finding() -> None:
-    text = '{"permissions": {"deny": [{"Edit(generated/**)": {"reason": "Generated file"}}]}}'
+    text = '{"permissions": {"deny": [{"Write(generated/**)": {"reason": "Generated file"}}]}}'
     assert validate_policy_text(text) == []
+
+
+@pytest.mark.parametrize(
+    ("entry", "rewrite"),
+    [
+        ('"Edit"', '"Write"'),
+        ('"Edit(generated/**)"', '"Write(generated/**)"'),
+        (
+            '{"Edit(generated/**)": {"reason": "Generated"}}',
+            '{"Write(generated/**)": {"reason": "Generated"}}',
+        ),
+        (
+            '{"rule": "Edit(generated/**)", "reason": "Generated"}',
+            '{"Write(generated/**)": {"reason": "Generated"}}',
+        ),
+    ],
+)
+def test_deprecated_edit_rule_warns_with_rewrite(entry: str, rewrite: str) -> None:
+    text = f'{{"permissions": {{"deny": [{entry}]}}}}'
+    warnings = _messages(text, "warning")
+    assert any("deprecated 'Edit' rule name" in m and m.endswith(rewrite) for m in warnings)
+    assert _messages(text, "error") == []
 
 
 def test_multi_key_rule_as_key_object_is_an_error() -> None:
@@ -127,6 +158,42 @@ def test_cli_validate_warnings_alone_exit_zero(tmp_path: Path) -> None:
     warned = tmp_path / "warned.jsonc"
     warned.write_text('{"version": 1, "permissions": {"allow": ["Shel(git status)"]}}')
     assert main(["validate", str(warned)]) == 0
+
+
+def test_cli_validate_deprecated_edit_is_a_warning_only(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    aliased = tmp_path / "aliased.jsonc"
+    aliased.write_text('{"version": 1, "permissions": {"allow": ["Edit(src/**)"]}}')
+    assert main(["validate", str(aliased)]) == 0
+    out = capsys.readouterr().out
+    assert "warning:" in out
+    assert '"Write(src/**)"' in out
+
+
+def test_cli_validate_explicit_root_follows_includes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    included = tmp_path / "included.jsonc"
+    included.write_text('{"permissions":{"allow":[""]}}')
+    root = tmp_path / "root.jsonc"
+    root.write_text('{"include":["included*.jsonc"]}')
+
+    assert main(["validate", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert str(included) in out
+    assert "silently ignored" in out
+
+
+def test_cli_validate_reports_unmatched_include_glob(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root.jsonc"
+    root.write_text('{"include":["missing/*.jsonc"]}')
+
+    assert main(["validate", str(root)]) == 1
+    assert "matched no files" in capsys.readouterr().out
 
 
 def test_cli_validate_defaults_to_discovered_files(

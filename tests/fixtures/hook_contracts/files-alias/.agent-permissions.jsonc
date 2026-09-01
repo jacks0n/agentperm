@@ -1,0 +1,11 @@
+// Deprecated `Edit(...)` spelling: must decide exactly like the `files/` fixture.
+{
+  "version": 1,
+  "permissions": {
+    "allow": ["Edit(src/**)"],
+    "ask": [],
+    "deny": [
+      {"Edit(generated/**)": {"reason": "Generated file; run the generator instead."}}
+    ]
+  }
+}

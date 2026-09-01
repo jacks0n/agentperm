@@ -16,7 +16,7 @@ _ENVIRONMENT_ID = "*** Environment ID: "
 
 
 def parse_apply_patch_request(patch: str, cwd: Path | None = None) -> Request:
-    """Parse Codex/OpenCode patch targets into canonical Edit/Write requests.
+    """Parse Codex/OpenCode patch targets into canonical ``Write`` requests.
 
     The host validates patch contents independently.  agentperm only needs the
     complete set of target paths, but it validates the outer envelope and hunk
@@ -42,13 +42,13 @@ def parse_apply_patch_request(patch: str, cwd: Path | None = None) -> Request:
             path = line.removeprefix(_DELETE_FILE)
             if not path:
                 return RejectedRequest("apply_patch contains an empty delete path")
-            requests.append(ToolRequest("Edit", (("file_path", path),), cwd=cwd))
+            requests.append(ToolRequest("Write", (("file_path", path),), cwd=cwd))
             active_update = False
         elif line.startswith(_UPDATE_FILE):
             path = line.removeprefix(_UPDATE_FILE)
             if not path:
                 return RejectedRequest("apply_patch contains an empty update path")
-            requests.append(ToolRequest("Edit", (("file_path", path),), cwd=cwd))
+            requests.append(ToolRequest("Write", (("file_path", path),), cwd=cwd))
             active_update = True
         elif line.startswith(_MOVE_TO):
             path = line.removeprefix(_MOVE_TO)

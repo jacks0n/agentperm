@@ -5,8 +5,22 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from .domain import BashCommand, BashOption, JsonObject, JsonValue, NamedTool, PythonReadonly, Rule, ShellPattern
+from .domain import (
+    BashCommand,
+    BashOption,
+    JsonObject,
+    JsonValue,
+    NamedTool,
+    PythonReadonly,
+    PythonSqlPattern,
+    Rule,
+    ShellPattern,
+)
 from .errors import PolicyError
+
+# Deprecated capability spellings, normalised at parse time so loaders, importers,
+# serializers, and dedupe only ever see the canonical name.
+TOOL_NAME_ALIASES = {"Edit": "Write"}
 
 
 def parse_rule(raw: JsonValue) -> Rule | None:
@@ -22,7 +36,9 @@ def _parse_string_rule(text: str) -> Rule | None:
     if text == "Python(readonly)":
         return PythonReadonly()
     if text.startswith("Python("):
-        raise PolicyError(f"unsupported Python rule: {text!r}")
+        return _parse_python_sql_rule(text)
+    if text.startswith("SQL("):
+        raise PolicyError("SQL rules require an object containing at least 'dialect'")
     if text.startswith("Shell("):
         if not text.endswith(")"):
             raise PolicyError(f"malformed Shell rule (missing closing parenthesis): {text!r}")
@@ -47,14 +63,14 @@ def _parse_string_rule(text: str) -> Rule | None:
                 f"{text!r} is silently dead — shell commands are matched by "
                 f"Bash(cmd:*) or Shell(...) rules, not a bare tool name"
             )
-        return NamedTool(name, None if spec in ("", "*") else spec)
+        return NamedTool(TOOL_NAME_ALIASES.get(name, name), None if spec in ("", "*") else spec)
     if text == "Bash":
         raise PolicyError(
             "bare 'Bash' is silently dead — shell commands are matched by "
             "Bash(cmd:*) or Shell(...) rules, not a bare tool name"
         )
     if text:
-        return NamedTool(text)
+        return NamedTool(TOOL_NAME_ALIASES.get(text, text))
     return None
 
 
@@ -115,11 +131,15 @@ def _reason_from_metadata(data: JsonObject) -> str:
 def _parse_metadata_rule(rule_str: str, metadata: JsonObject) -> Rule | None:
     if rule_str.startswith("Shell("):
         return _parse_shell_dict_rule(rule_str, metadata)
+    if rule_str.startswith("SQL("):
+        return _parse_sql_rule(rule_str, metadata)
     rule = _parse_string_rule(rule_str)
     if rule is None:
         return None
     rationale = _reason_from_metadata(metadata)
     if isinstance(rule, PythonReadonly):
+        return replace(rule, rationale=rationale)
+    if isinstance(rule, PythonSqlPattern):
         return replace(rule, rationale=rationale)
     if isinstance(rule, BashCommand):
         return replace(rule, rationale=rationale)
@@ -128,13 +148,106 @@ def _parse_metadata_rule(rule_str: str, metadata: JsonObject) -> Rule | None:
     return rule
 
 
+def _parse_python_sql_rule(text: str) -> PythonSqlPattern:
+    matched = re.fullmatch(r"Python\(([^()]+)\(([^()]*)\)\)", text)
+    if matched is None:
+        raise PolicyError(f"unsupported Python rule: {text!r}")
+    target = matched.group(1).strip()
+    argument = matched.group(2).strip()
+    if not target or not re.fullmatch(r"[A-Za-z_*][A-Za-z0-9_.*]*", target):
+        raise PolicyError(f"invalid Python call target {target!r}")
+    keyword: str | None = None
+    placeholder = argument
+    if "=" in argument:
+        keyword_text, placeholder = (part.strip() for part in argument.split("=", 1))
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", keyword_text):
+            raise PolicyError(f"invalid Python keyword argument {keyword_text!r}")
+        keyword = keyword_text
+    profile = _sql_profile(placeholder)
+    return PythonSqlPattern(
+        target=target,
+        profile=profile,
+        position=None if keyword is not None else 0,
+        keyword=keyword,
+    )
+
+
+def _sql_profile(placeholder: str) -> str | None:
+    if placeholder == "<SQL>":
+        return None
+    matched = re.fullmatch(r"<SQL:([A-Za-z0-9_-]+)>", placeholder)
+    if matched is None:
+        raise PolicyError(f"expected <SQL> or <SQL:name>, got {placeholder!r}")
+    return matched.group(1)
+
+
+def _parse_sql_rule(rule_str: str, metadata: JsonObject) -> Rule:
+    from .sql.domain import SqlDialect, SqlDocumentFormat, SqlRule, SqlSelector, SqlSelectorMode
+
+    matched = re.fullmatch(r"SQL\(([A-Za-z0-9_-]+)\)", rule_str)
+    if matched is None:
+        raise PolicyError(f"invalid SQL rule name in {rule_str!r}")
+    allowed_keys = frozenset({"dialect", "format", "effects", "statements", "relations", "functions", "reason"})
+    unknown_keys = set(metadata) - allowed_keys
+    if unknown_keys:
+        raise PolicyError(f"{rule_str}: unknown fields {sorted(unknown_keys)!r}")
+    dialect_raw = metadata.get("dialect")
+    if not isinstance(dialect_raw, str):
+        raise PolicyError(f"{rule_str}: 'dialect' must be a string")
+    try:
+        dialect = SqlDialect(dialect_raw.lower())
+    except ValueError as error:
+        raise PolicyError(f"{rule_str}: unsupported SQL dialect {dialect_raw!r}") from error
+    format_raw = metadata.get("format", "plain")
+    if not isinstance(format_raw, str):
+        raise PolicyError(f"{rule_str}: 'format' must be a string")
+    try:
+        document_format = SqlDocumentFormat(format_raw.lower())
+    except ValueError as error:
+        raise PolicyError(f"{rule_str}: unsupported SQL format {format_raw!r}") from error
+
+    mode_by_key = {
+        "any": SqlSelectorMode.Some,
+        "all": SqlSelectorMode.Every,
+        "only": SqlSelectorMode.Exclusive,
+    }
+
+    def selector(key: str) -> SqlSelector | None:
+        raw = metadata.get(key)
+        if raw is None:
+            return None
+        if not isinstance(raw, dict) or len(raw) != 1:
+            raise PolicyError(f"{rule_str}: '{key}' must contain exactly one of any/all/only")
+        mode_raw, patterns_raw = next(iter(raw.items()))
+        mode = mode_by_key.get(mode_raw)
+        if mode is None:
+            raise PolicyError(f"{rule_str}: unknown {key} selector {mode_raw!r}")
+        if not isinstance(patterns_raw, list) or not patterns_raw:
+            raise PolicyError(f"{rule_str}: {key}.{mode_raw} must be a non-empty string array")
+        if not all(isinstance(item, str) and item.strip() for item in patterns_raw):
+            raise PolicyError(f"{rule_str}: {key}.{mode_raw} must be a non-empty string array")
+        patterns = tuple(item.strip() for item in patterns_raw if isinstance(item, str))
+        return SqlSelector(mode, patterns)
+
+    return SqlRule(
+        name=matched.group(1),
+        dialect=dialect,
+        document_format=document_format,
+        effects=selector("effects"),
+        statements=selector("statements"),
+        relations=selector("relations"),
+        functions=selector("functions"),
+        rationale=_reason_from_metadata(metadata),
+    )
+
+
 def _parse_dict_rule(data: JsonObject) -> Rule | None:
     # Legacy {"rule": "...", ...} form.
     rule_str = data.get("rule")
     if isinstance(rule_str, str):
         return _parse_metadata_rule(rule_str.strip(), data)
 
-    # Canonical rule-as-key form: {"Edit(path)": {"reason": "..."}}.
+    # Canonical rule-as-key form: {"Write(path)": {"reason": "..."}}.
     if "rule" not in data and "tool" not in data:
         if len(data) != 1:
             return None

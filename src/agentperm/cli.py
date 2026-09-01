@@ -37,11 +37,13 @@ from .policy import (
     existing_policy_paths,
     git_toplevel,
     load_policy_file,
+    load_policy_layer,
     load_template,
     merge_templates_into,
     merged_policy,
     parse_policy_text,
     render_templates,
+    resolve_policy_paths,
     save_policy_file,
     write_default_policy,
 )
@@ -277,7 +279,8 @@ def _cmd_import() -> int:
     if not policy_path.exists():
         write_default_policy(policy_path)
     policy_file = load_policy_file(policy_path)
-    seen: set[tuple[Decision, Rule]] = {(d, r) for d, r in policy_file.policy.all_rules()}
+    policy_layer = load_policy_layer(policy_path)
+    seen: set[tuple[Decision, Rule]] = {(d, r) for d, r in policy_layer.policy.all_rules()}
     new_by_decision: dict[Decision, list[Rule]] = {Decision.Allow: [], Decision.Ask: [], Decision.Deny: []}
     for adapter in ADAPTERS.values():
         for decision, rule in adapter.import_native_rules():
@@ -293,6 +296,8 @@ def _cmd_import() -> int:
         deny=policy_file.policy.deny + tuple(new_by_decision[Decision.Deny]),
         ask=policy_file.policy.ask + tuple(new_by_decision[Decision.Ask]),
         allow=policy_file.policy.allow + tuple(new_by_decision[Decision.Allow]),
+        redirection=policy_file.policy.redirection,
+        python_calls=policy_file.policy.python_calls,
     )
     save_policy_file(policy_path, PolicyFile(updated, policy_file.raw))
     for decision, rules in new_by_decision.items():
@@ -604,12 +609,27 @@ def _cmd_why(*, command: str) -> int:
 
 
 def _cmd_validate(*, paths: list[str]) -> int:
-    targets = [Path(p) for p in paths] if paths else list(existing_policy_paths(Path.cwd()))
+    errors = 0
+    if paths:
+        targets: list[Path] = []
+        for supplied in (Path(path) for path in paths):
+            try:
+                targets.extend(resolve_policy_paths(supplied))
+            except PolicyError as error:
+                print(f"{supplied}:\n  error: {error}")
+                errors += 1
+    else:
+        try:
+            targets = list(existing_policy_paths(Path.cwd()))
+        except PolicyError as error:
+            print(f"error: {error}")
+            return 1
     if not targets:
+        if errors:
+            return 1
         print("no policy files found — run `agentperm init` to create one")
         return 0
-    errors = 0
-    for target in targets:
+    for target in dict.fromkeys(targets):
         findings = validate_policy_file(target)
         if not findings:
             print(f"{target}: ok")

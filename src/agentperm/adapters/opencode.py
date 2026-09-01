@@ -203,7 +203,7 @@ _OPENCODE_TOOL_NAMES = {
     "read": "Read",
     "grep": "Grep",
     "glob": "Glob",
-    "edit": "Edit",
+    "edit": "Write",
     "write": "Write",
     "webfetch": "WebFetch",
     "websearch": "WebSearch",

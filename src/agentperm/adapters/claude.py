@@ -33,6 +33,8 @@ from .base import (
     strip_rulesync_hooks,
 )
 
+_CLAUDE_WRITE_TOOL_NAMES = frozenset({"Edit", "MultiEdit", "NotebookEdit", "Write"})
+
 
 class ClaudeAdapter(AgentAdapter):
     name = AgentName.Claude
@@ -71,10 +73,9 @@ class ClaudeAdapter(AgentAdapter):
             tool_input = payload.get("tool_input")
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""), cwd=cwd)
-        # Claude's notebook mutation tool is an edit operation in agentperm's
-        # semantic namespace.  Keep native Edit/Write names unchanged while
-        # hiding this agent-specific spelling from policy authors.
-        semantic_name = "Edit" if tool_name == "NotebookEdit" else tool_name
+        # Every native file-mutation tool is one capability: a Write to an existing
+        # path overwrites it, so create/overwrite/edit are not separable permissions.
+        semantic_name = "Write" if tool_name in _CLAUDE_WRITE_TOOL_NAMES else tool_name
         return ToolRequest(semantic_name, tool_arguments(payload.get("tool_input")), cwd=cwd)
 
     def write_verdict(

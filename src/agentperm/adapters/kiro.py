@@ -14,7 +14,6 @@ from typing import ClassVar
 from ..domain import (
     AgentName,
     BashCommand,
-    CompoundRequest,
     Decision,
     InstallMode,
     JsonArray,
@@ -73,16 +72,6 @@ class KiroAdapter(AgentAdapter):
                 )
             return ShellRequest(parse_pipeline(command), cwd=cwd)
         arguments = tool_arguments(tool_input)
-        if tool_name in _KIRO_WRITE_TOOL_NAMES:
-            # Kiro exposes creation and modification through one native write
-            # tool. Evaluate both semantic capabilities so either policy can
-            # guard the operation without exposing Kiro's implementation detail.
-            return CompoundRequest(
-                (
-                    ToolRequest("Edit", arguments, cwd=cwd),
-                    ToolRequest("Write", arguments, cwd=cwd),
-                )
-            )
         return ToolRequest(kiro_tool_name(tool_name), arguments, cwd=cwd)
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> int:
@@ -300,8 +289,6 @@ def kiro_tool_name(name: str) -> str:
         "use_subagent": "Subagent",
     }.get(name, name)
 
-
-_KIRO_WRITE_TOOL_NAMES = frozenset({"write", "fs_write", "fsWrite"})
 
 
 KIRO_TOOL_NAMES = frozenset(

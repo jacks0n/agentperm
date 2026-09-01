@@ -21,7 +21,7 @@ def test_tool_execute_before_parses_tool_name_and_input() -> None:
     )
 
     assert request == ToolRequest(
-        "Edit",
+        "Write",
         (
             ("filePath", "generated/client.ts"),
             ("oldString", "old"),
@@ -64,7 +64,7 @@ def test_tool_execute_before_translates_apply_patch_semantics() -> None:
 
     assert isinstance(request, CompoundRequest)
     assert request.requests == (
-        ToolRequest("Edit", (("file_path", "generated/old.ts"),), cwd=Path("/workspace")),
+        ToolRequest("Write", (("file_path", "generated/old.ts"),), cwd=Path("/workspace")),
         ToolRequest("Write", (("file_path", "generated/new.ts"),), cwd=Path("/workspace")),
         ToolRequest("Write", (("file_path", "generated/manifest.json"),), cwd=Path("/workspace")),
     )
@@ -87,7 +87,7 @@ def test_legacy_permission_hook_translates_apply_patch_when_patch_text_is_availa
     )
 
     assert isinstance(request, CompoundRequest)
-    assert request.requests == (ToolRequest("Edit", (("file_path", "generated/client.ts"),), cwd=Path("/workspace")),)
+    assert request.requests == (ToolRequest("Write", (("file_path", "generated/client.ts"),), cwd=Path("/workspace")),)
 
 
 @pytest.mark.parametrize("tool_input", [{}, {"patchText": "not a patch"}])

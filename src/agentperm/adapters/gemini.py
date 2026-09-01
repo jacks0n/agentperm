@@ -91,7 +91,7 @@ def _gemini_tool_name(name: str) -> str:
         "list_directory": "LS",
         "web_fetch": "WebFetch",
         "google_web_search": "WebSearch",
-        "replace": "Edit",
+        "replace": "Write",
         "write_file": "Write",
     }.get(name, name)
 

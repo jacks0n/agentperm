@@ -3,25 +3,31 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass
 
 from .domain import (
     AnyRest,
     Disposition,
     FlagConstraint,
+    NestedExecCapture,
+    NestedShellCapture,
     OneOf,
     PathTerm,
     Segment,
     ShellPattern,
+    SqlCapture,
     Word,
     basename,
 )
+from .sql.domain import CapturedSql, SqlCaptureKind, SqlOrigin
 
 # ---------------------------------------------------------------------------
 # Tokenizer
 # ---------------------------------------------------------------------------
 
 _NAMECHAR = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+_DYNAMIC_SHELL_SQL = re.compile(r"`|(?<!\$)\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^}]+\}|\(|\(\()")
 _ESCAPABLE = frozenset("*{},!?-()\\ ")
 _CLOSER_FOR = {"{": "}", "(": ")"}
 _OPENER_FOR = {"}": "{", ")": "("}
@@ -254,6 +260,9 @@ def parse_shell_pattern(pattern: str) -> ShellPattern:
     has_only = False
     has_values = False
     has_open_wildcard = False
+    sql_value_captures: list[tuple[str | None, tuple[str, ...]]] = []
+    captures_stdin_sql = False
+    stdin_sql_profile: str | None = None
 
     for token in tokens:
         text = token.text
@@ -289,6 +298,53 @@ def parse_shell_pattern(pattern: str) -> ShellPattern:
             if sigil is not None:
                 raise PolicyError(f"'{sigil}--' is invalid at position {start}")
             path_terms.append(Word("--"))
+            continue
+
+        is_sql, sql_profile = _sql_placeholder_profile(remainder)
+        if is_sql:
+            if sigil is not None:
+                raise PolicyError(f"'{sigil}{remainder}' is invalid at position {start}")
+            path_terms.append(SqlCapture(sql_profile))
+            continue
+
+        if remainder == "<SHELL>":
+            if sigil is not None:
+                raise PolicyError(f"'{sigil}<SHELL>' is invalid at position {start}")
+            path_terms.append(NestedShellCapture())
+            continue
+
+        if remainder == "<EXEC>":
+            if sigil is not None:
+                raise PolicyError(f"'{sigil}<EXEC>' is invalid at position {start}")
+            path_terms.append(NestedExecCapture())
+            continue
+
+        if remainder.startswith("stdin(") and remainder.endswith(")"):
+            if sigil is not None or captures_stdin_sql:
+                raise PolicyError(f"invalid or repeated stdin(...) at position {start}")
+            is_sql, profile = _sql_placeholder_profile(remainder[6:-1])
+            if not is_sql:
+                raise PolicyError(f"stdin(...) requires <SQL> or <SQL:name> at position {start}")
+            captures_stdin_sql = True
+            stdin_sql_profile = profile
+            continue
+
+        if remainder.startswith("sqlvalues(") and remainder.endswith(")"):
+            if sigil is not None:
+                raise PolicyError(f"'{sigil}sqlvalues(...)' is invalid at position {start}")
+            members = _split_set_members(remainder[10:-1])
+            is_sql, profile = _sql_placeholder_profile(members[0])
+            if not is_sql:
+                raise PolicyError(f"sqlvalues(...) must begin with <SQL> or <SQL:name> at position {start}")
+            flags = tuple(members[1:])
+            if not flags:
+                raise PolicyError(f"sqlvalues(...) requires at least one flag at position {start}")
+            for flag in flags:
+                if not is_flag(flag):
+                    raise PolicyError(f"non-flag member {flag!r} in sqlvalues(...) at position {start}")
+                validate_flag_name(flag, start)
+                value_flags.add(flag)
+            sql_value_captures.append((profile, flags))
             continue
 
         # Step 3: -* or !-*
@@ -405,6 +461,13 @@ def parse_shell_pattern(pattern: str) -> ShellPattern:
         raise PolicyError("pattern must contain at least one command term")
     if closed_flags and has_open_wildcard:
         raise PolicyError("closed flag constraint contradicts explicit open flag wildcard '-*'")
+    if any(isinstance(term, NestedExecCapture) for term in path_terms[:-1]):
+        raise PolicyError("<EXEC> must be the final positional term")
+    if any(isinstance(term, NestedExecCapture) for term in path_terms):
+        if any(not isinstance(term, (Word, OneOf, NestedExecCapture)) for term in path_terms):
+            raise PolicyError("<EXEC> requires a fixed positional prefix")
+        if flag_constraints or flag_sets or value_flags:
+            raise PolicyError("<EXEC> cannot be combined with outer option matching")
 
     return ShellPattern(
         raw=pattern,
@@ -414,7 +477,20 @@ def parse_shell_pattern(pattern: str) -> ShellPattern:
         closed_flags=closed_flags,
         exact=exact,
         value_flags=frozenset(value_flags),
+        sql_value_captures=tuple(sql_value_captures),
+        stdin_sql_profile=stdin_sql_profile,
+        captures_stdin_sql=captures_stdin_sql,
     )
+
+
+def _sql_placeholder_profile(text: str) -> tuple[bool, str | None]:
+    if text == "<SQL>":
+        return True, None
+    if text.startswith("<SQL:") and text.endswith(">"):
+        profile = text[5:-1]
+        if profile and all(ch.isalnum() or ch in "_-" for ch in profile):
+            return True, profile
+    return False, None
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +540,12 @@ def split_and_normalize(
             return
         flag_atoms.update(f"-{ch}" for ch in value[1:])
 
+    def attached_value(value: str) -> str:
+        """Normalize quotes retained inside a shell ``--flag='value'`` word."""
+        if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
+            return value[1:-1]
+        return value
+
     if not argv:
         return operands, flag_atoms, flag_values
 
@@ -504,7 +586,7 @@ def split_and_normalize(
                 eq_pos = arg.index("=")
                 atom = arg[:eq_pos]
                 flag_atoms.add(atom)
-                flag_values.setdefault(atom, []).append(arg[eq_pos + 1:])
+                flag_values.setdefault(atom, []).append(attached_value(arg[eq_pos + 1:]))
                 previous_unknown_flag = False
             else:
                 flag_atoms.add(arg)
@@ -549,7 +631,7 @@ def split_and_normalize(
                     if rest:
                         if rest.startswith("="):
                             rest = rest[1:]
-                        flag_values.setdefault(atom, []).append(rest)
+                        flag_values.setdefault(atom, []).append(attached_value(rest))
                     elif i + 1 < len(argv):
                         i += 1
                         consumed = argv[i]
@@ -599,6 +681,11 @@ def _match_path(
             memo[key] = result
             return result
 
+        if isinstance(term, NestedExecCapture):
+            result = frozenset({len(operands)}) if oi < len(operands) else frozenset()
+            memo[key] = result
+            return result
+
         if oi >= len(operands):
             memo[key] = frozenset()
             return frozenset()
@@ -611,7 +698,10 @@ def _match_path(
             actual = operands[oi] if oi != 0 or "/" in glob else basename(operands[oi])
             return fnmatch.fnmatch(actual, glob)
 
-        if isinstance(term, Word):
+        if isinstance(term, (SqlCapture, NestedShellCapture)):
+            matched = rec(pi + 1, oi + 1)
+            result = matched | skipped
+        elif isinstance(term, Word):
             matched = rec(pi + 1, oi + 1) if matches_glob(term.glob) else frozenset()
             result = matched | skipped
         elif isinstance(term, OneOf):
@@ -693,3 +783,76 @@ def match_shell_pattern(
             return False
 
     return True
+
+
+@dataclass(frozen=True)
+class ShellPatternMatch:
+    sql: tuple[CapturedSql, ...]
+    nested_shell: tuple[str, ...]
+    nested_exec: tuple[tuple[str, ...], ...]
+
+
+def match_shell_pattern_details(
+    pattern: ShellPattern,
+    segment: Segment,
+    *,
+    ambiguous_option_values: bool = False,
+) -> ShellPatternMatch | None:
+    """Match argv and return semantic values captured by the pattern."""
+    if not match_shell_pattern(pattern, segment, ambiguous_option_values=ambiguous_option_values):
+        return None
+    operands, _, flag_values = split_and_normalize(segment.argv, pattern.value_flags)
+    sql: list[CapturedSql] = []
+    nested_shell: list[str] = []
+    nested_exec: list[tuple[str, ...]] = []
+
+    # Capturing patterns are intentionally deterministic: a gap before a capture
+    # consumes the smallest prefix that permits the suffix to match.
+    oi = 0
+    for index, term in enumerate(pattern.path):
+        if isinstance(term, AnyRest):
+            remaining = len(pattern.path) - index - 1
+            oi = max(oi, len(operands) - remaining)
+        elif isinstance(term, NestedExecCapture):
+            nested_exec.append(segment.argv[len(pattern.path) - 1 :])
+            oi = len(operands)
+        elif isinstance(term, SqlCapture):
+            if oi >= len(operands):
+                return None
+            if _DYNAMIC_SHELL_SQL.search(operands[oi]):
+                return None
+            sql.append(CapturedSql(operands[oi], term.profile, SqlOrigin(SqlCaptureKind.Argument, f"argv[{oi}]")))
+            oi += 1
+        elif isinstance(term, NestedShellCapture):
+            if oi >= len(operands):
+                return None
+            nested_shell.append(operands[oi])
+            oi += 1
+        else:
+            oi += 1
+
+    for profile, flags in pattern.sql_value_captures:
+        captured_count = 0
+        for flag in flags:
+            for value in flag_values.get(flag, ()):
+                if value is None:
+                    return None
+                if _DYNAMIC_SHELL_SQL.search(value):
+                    return None
+                sql.append(CapturedSql(value, profile, SqlOrigin(SqlCaptureKind.OptionValue, flag)))
+                captured_count += 1
+        if captured_count == 0:
+            return None
+    if pattern.captures_stdin_sql:
+        if segment.stdin_source is None or segment.stdin_dynamic:
+            return None
+        if _DYNAMIC_SHELL_SQL.search(segment.stdin_source):
+            return None
+        sql.append(
+            CapturedSql(
+                segment.stdin_source,
+                pattern.stdin_sql_profile,
+                SqlOrigin(SqlCaptureKind.Stdin, "stdin"),
+            )
+        )
+    return ShellPatternMatch(tuple(sql), tuple(nested_shell), tuple(nested_exec))
