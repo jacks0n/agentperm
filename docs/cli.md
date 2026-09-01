@@ -123,7 +123,9 @@ agentperm validate [path ...]
 ```
 
 With no arguments, checks every file runtime discovery would load from the current directory
-(the global policy plus each `.agent-permissions.jsonc` between the filesystem root and here).
+(the global policy plus each `.agent-permissions.jsonc` between the filesystem root and here),
+including recursively included files and deterministic glob matches. Explicit paths are also
+treated as policy roots and their includes are followed.
 
 Reported as **errors** (exit 1):
 
@@ -131,12 +133,15 @@ Reported as **errors** (exit 1):
 - entries the loader would silently skip — an unparseable rule protects (or allows) nothing
 - redirect decisions that aren't `allow`/`ask`/`deny` (silently ignored at runtime)
 - malformed `allowPaths` or `python.calls` entries
+- malformed includes, unmatched include globs, unreadable fragments, and include cycles
 
 Reported as **warnings** (exit 0 if there are no errors):
 
 - unknown keys anywhere in the file (`"permisions"`, `"denied"`, …)
 - rules like `"Shel(git status)"` that parse as a named-tool rule which never matches a shell
   command — almost always a mistyped `Shell(...)`
+- `Edit(...)` rules — a deprecated alias for `Write(...)`. They are evaluated as `Write`, and
+  `import`/`init` rewrite them on save; the warning shows the exact replacement
 
 Run it after every hand edit; a broken policy file otherwise only surfaces as every command
 prompting with `"policy load failed"`.

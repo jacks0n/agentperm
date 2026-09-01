@@ -41,7 +41,7 @@ class Request: ...
 ```
 
 Every adapter parses its native hook payload into these semantic types. `ShellRequest` carries a
-parsed `Pipeline`; `ToolRequest` carries a canonical tool capability (e.g. `"Edit"`, `"Write"`,
+parsed `Pipeline`; `ToolRequest` carries a canonical tool capability (e.g. `"Write"`,
 `"WebFetch"`). `CompoundRequest` represents one native operation with several semantic effects;
 the strictest child verdict wins. `RejectedRequest` fails closed when a mutation payload cannot be
 translated safely. Before policy evaluation, the CLI recursively attaches the hook cwd to every
@@ -112,10 +112,10 @@ translated cannot be scoped safely.
 ### Semantic file mutations
 
 Adapters translate native mutation vocabulary at the boundary so policy evaluation never needs to
-know whether a host called an operation `replace`, `NotebookEdit`, or `apply_patch`. Direct edits and
-writes become `ToolRequest("Edit" | "Write", arguments, cwd)`. A patch is parsed by the shared
-`adapters/apply_patch.py` translator into a `CompoundRequest`: add → Write, update/delete → Edit,
-move → source Edit plus destination Write.
+know whether a host called an operation `replace`, `NotebookEdit`, or `apply_patch`. Every direct
+create, overwrite, or edit becomes `ToolRequest("Write", arguments, cwd)`. A patch is parsed by the
+shared `adapters/apply_patch.py` translator into a `CompoundRequest` with one `Write` per target:
+add, update, and delete each contribute their path; a move contributes its source and destination.
 
 Only the patch envelope and complete target list are relevant to permissions; the host remains
 responsible for validating and applying hunks. Unknown structural markers and incomplete operations
@@ -211,14 +211,15 @@ A small set of shell builtins / synthetic AST tokens have no possible OS-level s
 
 # real builtins — actual commands with no OS-level side effect
 true  false  :         status setters / no-op
-continue               loop control in the current shell
+break  continue        loop control in the current shell
 read                   binds shell variable from stdin (process-local)
+export  unset          variable/function state in the current shell
 echo  printf           write to fds; redirects evaluated separately
 ```
 
 `_match_bash` allows the **synthetic markers** *before* user rules are consulted — they aren't real commands, so a user rule can't meaningfully target them. The **real builtins** are allowed only as a *fallback* when no user rule matches, so an explicit `deny` / `ask` / `allow` rule on one of them (e.g. `deny: Bash(echo:*)`) still takes precedence. Redirect verdicts apply per-segment via `_decide_segment`, so `echo foo > out` correctly surfaces an Ask via the redirect rule, and pipe aggregation still escalates `echo foo | unknown` to Ask.
 
-The contract is "nothing agentperm does should turn an inert shell primitive into a permission prompt." Anything with real side effects — `cd`, `export`, `kill`, `eval`, etc. — stays under user rules.
+The contract is "nothing agentperm does should turn an inert shell primitive into a permission prompt." Anything with real side effects — `cd`, `kill`, `eval`, etc. — stays under user rules. Substitutions inside an inert builtin are still extracted and evaluated independently.
 
 ## Shell parsing
 
@@ -230,8 +231,8 @@ hook command -> Tree-sitter Bash -> executable segments -> argv normalization ->
 ```
 
 This is why a reviewed command remains recognizable when it moves into a pipe or `&&` chain, is
-wrapped in `bash -lc`, uses another safe ordering for global flags, or spells a value as either
-`--flag value` or `--flag=value`. It is also why an unknown or denied command hidden later in the
+wrapped in `bash -lc` or `zsh -c`, uses another safe ordering for global flags, or spells a value as
+either `--flag value` or `--flag=value`. It is also why an unknown or denied command hidden later in the
 same shell program cannot inherit the first command's allow verdict. The exact argv normalization
 and matching rules are specified in [Shell pattern DSL](pattern-dsl.md#5-matching-semantics).
 
@@ -249,7 +250,7 @@ Shell parsing lives in one function: `parse_pipeline(command: str) -> Pipeline`.
 - **Declarations:** `export FOO=bar`, `local`, `declare`, `readonly`, `typeset` → yielded as a normal segment with the keyword as argv[0] so `Bash(export:*)` rules match
 - **Redirects:** `>`, `>>`, `<`, `2>`, `2>&1`, `&>`, `>|`, `&>>`, `<&` — captured as `Redirect(fd, op, target, is_fd_dup)`. A process/command-substitution target (`> $(…)`, `< <(…)`) is decomposed: the inner command becomes its own segment, and a write to a runtime-computed name still asks. `<<EOF` heredocs and `<<<` herestrings are dropped (input-only, no file write); substitutions inside them are still extracted
 - **Environment prefixes:** `FOO=bar ls -la` — Tree-sitter marks `FOO=bar` as a `variable_assignment` and `_build_segment` skips it
-- **`bash -c "..."`:** the inner command is recursively re-parsed via `parse_pipeline`, and its segments replace the wrapper (bundled or split no-arg flags before `-c` are handled: `bash -lc`, `bash -l -c`). A `-c` form we can't safely locate the command in (`bash --norc -c`, `bash -o emacs -c`) returns `Ask` (in normal mode) rather than an opaque allow
+- **Shell `-c` wrappers:** `bash`, `sh`, and `zsh` are recognized by basename, including absolute paths. A statically visible inner program is recursively parsed with the same Bash-compatible grammar and replaces the wrapper; unsupported shell-specific syntax asks. `-c` must end its bundle and may follow no-argument short-flag clusters drawn from `efilmnpstuvx` (`zsh -lc`, `bash -l -c`, `zsh -i -x -c`); later operands remain shell positional parameters rather than inner-command arguments. Ambiguous long or argument-taking options (`bash --norc -c`, `bash -o emacs -c`, `zsh -ocorrect`) and runtime-selected programs (`bash -c "$CMD"`) return `Ask` in normal mode
 - **Exec-prefix wrappers:** `command`, `exec`, `nohup`, `setsid`, `env`, `nice`, `time` are decomposed to their inner command (`env -i FOO=bar git status` → `git status`) so a rule on the real command applies. Wrappers with leading positionals or arg-taking options we don't model (`timeout`, `sudo`, `xargs`, `nice -n N`, …) are left intact and `Ask` in normal mode — an explicit `Bash(<wrapper>:*)` rule still allow-lists them
 - **Path-prefixed commands:** `/usr/bin/ls` matches a `Bash(ls:*)` rule via basename
 
@@ -264,6 +265,12 @@ It refuses to parse:
 agentperm primarily analyzes shell *command structure*. `Python(readonly)` adds deliberately shallow
 AST inspection for literal `python -c` and Python heredoc source, but it does not prove the behavior of
 called functions or inspect other interpreted languages:
+
+- **SQL captures:** SQLGlot is isolated behind `agentperm.sql.parser`; the SQL domain and policy engine
+  never depend on parser AST types. Captures originate in Shell/Python rules, the application service
+  parses once per dialect/document pair, and the resulting effects/references are matched by ordinary
+  deny/ask/allow precedence. Opaque parser fallbacks and dynamic source ask. Database-side behavior
+  such as triggers, view definitions, grants, and function bodies remains outside the proof boundary.
 
 - **Other interpreters and unsupported Python forms:** `perl -e "…"`, `ruby -e`, `node -e`, `awk 'prog'`, `python -m`, scripts, and interactive stdin remain argv-only. Inline Python is inspected only when an allow-side `Python(readonly)` rule is present.
 - **Unrecognized executor prefixes:** the decomposed/​recognized wrapper lists (`command`, `env`, `timeout`, …) are not exhaustive. An executor not on either list (`busybox rm …`, `find . -exec rm …`) is treated as an ordinary command and returns `NoOpinion`.
@@ -290,6 +297,7 @@ src/agentperm/
 ├── shell.py              Tree-sitter Bash → Pipeline (parse_pipeline, segment extraction)
 ├── shellpattern.py       Shell(...) DSL parser + matcher
 ├── pythoncode.py         Shallow AST analysis for inline Python (Python(readonly))
+├── sql/                  SQL domain, document adapters, SQLGlot boundary, policy service
 ├── adapters/             Host adapters and shared apply_patch translation
 ├── rules.py              Rule parsing: string/dict → Rule objects
 ├── policy.py             Policy file I/O (load, save, merge)

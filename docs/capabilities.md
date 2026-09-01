@@ -13,10 +13,10 @@ not available from that host or adapter.
 | Structural Shell rules | ✓ `Bash` | ✓ `Bash` | ✓ `bash` | ✓ shell tools | ✓ shell aliases |
 | Named and scoped tools | ✓ all hooked tools | ◐ hooked Bash, patch, MCP | ✓ all tools | ✓ all tools | ✓ all tools |
 | Scoped `Read` | ✓ | — native Read is not in the installed matcher | ✓ | ✓ | ✓ |
-| Semantic `Edit` | ✓ Edit, NotebookEdit | ✓ patch update/delete/move source | ✓ edit and patch | ✓ replace | ◐ every write checks Edit + Write |
-| Semantic `Write` | ✓ Write | ✓ patch add/move destination | ✓ write and patch | ✓ write_file | ◐ every write checks Edit + Write |
+| Semantic `Write` | ✓ Edit, MultiEdit, NotebookEdit, Write | ✓ patch add/update/delete/move | ✓ edit, write, patch | ✓ replace, write_file | ✓ write aliases |
 | Multi-file/move aggregation | — native calls are individual | ✓ | ✓ for patchText | — native calls are individual | — native call has one path |
 | `Python(readonly)` for shell calls | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Semantic SQL captures in Shell/Python | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Layered policy precedence | ✓ shared engine | ✓ shared engine | ✓ shared engine | ✓ shared engine | ✓ shared engine |
 | Native-policy import | ✓ | ✓ | ✓ | — | ✓ |
 | Direct installation | ✓ | ✓ | ✓ plugin | ✓ | ✓ |
@@ -29,8 +29,8 @@ Layered precedence means every Deny remains effective, while the nearest matchin
 inside one file, Ask precedes Allow.
 
 `Python(readonly)` is syntax-aware: it parses literal inline Python with the standard-library AST.
-There is no equivalent SQL parser; database CLI invocations can use Shell rules, but SQL query text
-is not classified as read-only or mutating.
+SQL captures use SQLGlot plus explicit dialect policy and fail closed on opaque syntax. See
+[Semantic SQL policies](sql-policy.md).
 
 ## Enforcement behavior
 
@@ -51,19 +51,21 @@ denied the action.
 
 ## Semantic file operations
 
-Policies use stable capability names rather than native tool spellings:
+Policies use one stable capability, `Write`, rather than native tool spellings. Any native
+operation that creates, overwrites, edits, deletes, or moves a file is a `Write` on that path:
 
 | Native operation | agentperm request |
 |---|---|
-| Claude `Edit` | `Edit(path)` |
-| Claude `NotebookEdit` | `Edit(notebook_path)` |
-| Claude `Write` | `Write(path)` |
-| Codex/OpenCode patch update or delete | `Edit(file_path)` |
-| Codex/OpenCode patch add | `Write(file_path)` |
-| Codex/OpenCode patch move | source `Edit` + destination `Write` |
-| OpenCode `edit` / `write` | `Edit` / `Write` |
-| Gemini `replace` / `write_file` | `Edit` / `Write` |
-| Kiro `write`, `fs_write`, `fsWrite` | compound `Edit` + `Write` |
+| Claude `Edit`, `MultiEdit`, `Write` | `Write(file_path)` |
+| Claude `NotebookEdit` | `Write(notebook_path)` |
+| Codex/OpenCode patch add, update, or delete | `Write(file_path)` |
+| Codex/OpenCode patch move | source `Write` + destination `Write` |
+| OpenCode `edit` / `write` | `Write` |
+| Gemini `replace` / `write_file` | `Write` |
+| Kiro `write`, `fs_write`, `fsWrite` | `Write` |
+
+`Edit(...)` in a policy is a deprecated alias for `Write(...)`; see the
+[policy reference](policy-reference.md) for its exact behaviour.
 
 Multi-file patches become one compound request. Every child is evaluated and the strictest verdict
 wins. A malformed patch that claims to mutate files but cannot be translated becomes a rejected

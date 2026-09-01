@@ -11,8 +11,8 @@ The string inside `Shell(<pattern>)` is a compact pattern language for matching 
 command. It should read like the command it matches, cover the common cases without noise,
 and express alternation, required/forbidden flags, flag whitelisting, and value constraints.
 
-It matches **argv shape, not command intent** (see §6). It is an ergonomics and
-intent-expression layer, *not* a sandbox.
+Ordinary terms match argv shape. Semantic capture terms can additionally delegate SQL or nested
+commands to their owning analyzers (see §6). The DSL is an intent-expression layer, *not* a sandbox.
 
 ### Where the DSL sits
 
@@ -52,6 +52,11 @@ The AWS rule also matches `aws ec2 describe-instances --region=ap-southeast-2 --
 declared value flags are removed from the positional path wherever they occur, while `only(...)`
 rejects every unreviewed flag. If any extracted command is denied, the entire shell program is
 denied; if one is unknown, an otherwise allowed compound becomes `Ask`.
+
+Built-in nested-shell handling covers statically visible `-c` programs passed to `bash`, `sh`, or
+`zsh`, including safe bundled and split forms such as `-lc` and `-l -c`. Ambiguous option layouts
+and runtime-selected programs prompt rather than being guessed. Inner programs use the same
+supported Bash-compatible grammar regardless of wrapper shell.
 
 The shell constructs handled before DSL matching are specified in
 [Architecture: Shell parsing](architecture.md#shell-parsing). The rest of this document specifies
@@ -202,6 +207,10 @@ as a dict when agentperm saves the policy; inline `values(...)` remains a string
 `values(...)` is deliberately declarative rather than command-aware. agentperm does not carry a
 catalogue of every CLI's option arity, so `Shell(gh values(--repo) pr view)` is required to match
 `gh --repo owner/repo pr view`. `--flag=value` never needs an arity declaration.
+
+SQL option values use the parallel `sqlvalues(<SQL...>,flags...)` term. It declares arity and captures
+every occurrence for semantic SQL evaluation. Positional `<SQL>`, stdin, Python, and wrapper examples
+are documented in [Semantic SQL policies](sql-policy.md).
 
 ### Collapsing verbose allow-lists
 

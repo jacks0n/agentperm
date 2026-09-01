@@ -10,13 +10,51 @@ The policy file is JSON-with-comments (JSON5-compatible). Policies can live at:
 The global policy is loaded first, followed by every policy from the filesystem root through the
 command's working directory. Duplicate paths are loaded once. Deny rules union and always win. Ask
 and Allow use nearest-policy precedence: the closest matching layer wins, with Ask before Allow
-inside one file. Other override-style settings also prefer files closer to the working directory.
+inside one logical layer. Other override-style settings also prefer layers closer to the working
+directory.
+
+## Includes and policy fragments
+
+Any policy file can recursively include other policy files with explicit paths or glob patterns:
+
+```jsonc
+{
+  "version": 1,
+  "include": [
+    ".agent-permissions.d/core.jsonc",
+    ".agent-permissions.d/aws/*.jsonc",
+    ".agent-permissions.d/**/*.local.jsonc"
+  ],
+  "permissions": {
+    "deny": ["Shell(sudo)"]
+  }
+}
+```
+
+Relative entries resolve from the directory containing the file that declares them. Absolute paths
+and `~` are also accepted. Glob entries support `*`, `?`, character ranges such as `[0-9]`, and
+recursive `**`. Matches are loaded in lexical path order; the entries in `include` retain their
+declared order. A path reached more than once within one layer is loaded once, using its resolved
+filesystem identity.
+
+Included permissions and the including file form **one logical policy layer**. All Deny, Ask, and
+Allow lists union, duplicates are removed, and Ask still precedes Allow across the whole layer. A
+split policy therefore decides permissions exactly like the equivalent single file. Override-style
+settings are applied depth-first: later include entries override earlier ones, later glob matches
+override earlier matches, and the including file overrides all of its includes. `allowPaths` values
+union rather than replace.
+
+Includes are fail-safe. An entry that matches no files, an unreadable included file, malformed
+`include` data, or an include cycle fails the policy load. In particular, do not use a glob that
+also matches the file declaring it. `agentperm validate` follows includes and reports each source
+file; `agentperm why` lists every contributing file.
 
 ## Top-level shape
 
 ```jsonc
 {
   "version": 1,
+  "include": [ /* optional paths and globs */ ],
   "permissions": {
     "allow": [ /* rules */ ],
     "ask":   [ /* rules */ ],
@@ -35,8 +73,9 @@ agentperm currently writes schema `version: 1`; `Shell(...)` does not introduce 
 there is no automatic Bash-to-Shell schema migration. The loader currently treats `version` as
 reserved metadata rather than selecting different rule semantics from it.
 
-Within one policy file, the lists are evaluated **deny → ask → allow**. Across files, every Deny is
-checked first; then Ask and Allow are checked from the nearest policy back toward the global policy.
+Within one logical policy layer, including all of its fragments, the lists are evaluated
+**deny → ask → allow**. Across directory layers, every Deny is checked first; then Ask and Allow are
+checked from the nearest policy back toward the global policy.
 The first match wins. Aggregation across compound segments is separate—see
 [Architecture](architecture.md#aggregation).
 
@@ -63,6 +102,9 @@ uv run python - <<'PY'
 import agentperm
 print(type(agentperm), len(agentperm.__all__))
 PY
+python <<'PY'
+print("the explicit stdin dash is optional for a literal heredoc")
+PY
 ```
 
 The source is parsed with Python's standard-library AST without being executed. Imports, local
@@ -76,9 +118,8 @@ It does not perform interprocedural analysis: calling a user-defined function do
 re-evaluate that function's effects. Hidden effects inside an otherwise ordinary call remain outside
 the v1 model. `python -m`, script files, and interactive Python are unaffected.
 
-This is Python analysis, not general query analysis. SQL passed to `psql`, `sqlite3`, `mysql`, a
-Python database driver, or another client is not parsed as SQL. Constrain client argv with Shell
-rules or require approval; agentperm cannot currently prove that a query string is read-only.
+SQL passed to a database client or Python helper is parsed only when a configured semantic capture
+identifies the argument. See [Semantic SQL policies](sql-policy.md).
 
 Call decisions can be customized by exact qualified name:
 
@@ -132,6 +173,12 @@ need a command-specific option catalogue.
 
 The compact syntax supports positional globs and sets, required/forbidden/permitted flags,
 `only(...)`, exact matching, and mid-path gaps. See the complete [Shell pattern DSL](pattern-dsl.md).
+
+SQL-bearing operands can be marked with `<SQL>`, `<SQL:name>`, `stdin(<SQL...>)`, or
+`sqlvalues(<SQL...>,flags...)`. Generic wrapper layouts can mark nested argv with `<EXEC>` or one
+literal nested shell program with `<SHELL>`. These captures add semantic evaluation; they do not add
+a catalogue of clients, flags, environment variables, or helper functions. See
+[Semantic SQL policies](sql-policy.md).
 
 #### `"Bash(<command>:*)"` — legacy positional shell matcher
 
@@ -195,37 +242,42 @@ An optional specifier in parentheses scopes the rule by the tool's input values 
 ```jsonc
 "WebFetch(domain:github.com)" // host is github.com or a subdomain (api.github.com)
 "Read(/etc/**)"               // a file-path argument matches the glob /etc/**
-"Edit(src/*)"                 // same mechanism, any tool
+"Write(src/*)"                // same mechanism, any tool
 "Read(*)"                     // explicit "any input" — identical to bare "Read"
 ```
 
 - **`domain:<host>`** — matches when a **URL field** of the tool input (`url`, `uri`, `href`) has a host equal to `<host>` or a subdomain of it (`github.com` matches `api.github.com`). Host comparison is case-, trailing-dot-, and IDNA-insensitive (Unicode and punycode forms are equivalent); malformed URLs simply don't match.
-- **any other specifier** — a glob matched against the tool's **path fields** (`path`, `file_path`, `paths`, `notebook_path`, `absolute_path`, …). `*` matches within a single path segment; `**` matches across `/` (`Read(/etc/**)` matches `/etc/ssl/cert.pem`, `Edit(src/*)` does not match `src/sub/x`).
+- **any other specifier** — a glob matched against the tool's **path fields** (`path`, `file_path`, `paths`, `notebook_path`, `absolute_path`, …). `*` matches within a single path segment; `**` matches across `/` (`Read(/etc/**)` matches `/etc/ssl/cert.pem`, `Write(src/*)` does not match `src/sub/x`).
 - **`*` or empty** — matches the tool regardless of input (so `Read(*)` and `Read` are equivalent).
 
-Matching is **keyed by field name**, so a specifier only ever checks the authoritative field — `WebFetch(domain:github.com)` will not be satisfied by a `github.com` URL that happens to appear in a `prompt`, and `Edit(src/**)` will not be satisfied by path-like text in `old_string`. Adapters that don't surface those fields only match the name-only forms.
+Matching is **keyed by field name**, so a specifier only ever checks the authoritative field — `WebFetch(domain:github.com)` will not be satisfied by a `github.com` URL that happens to appear in a `prompt`, and `Write(src/**)` will not be satisfied by path-like text in `old_string`. Adapters that don't surface those fields only match the name-only forms.
 
 Relative path specifiers are evaluated from the hook's working directory, whether the agent sends
 a relative or absolute path. `.`/`..` segments and existing symlinks are resolved before matching,
 so a path cannot remain inside a protected glob lexically while resolving outside it.
 
-`Edit` and `Write` are semantic capabilities, not literal host tool names:
+`Write` is a semantic capability, not a literal host tool name. Every native operation that
+creates, overwrites, edits, deletes, or moves a file is evaluated as `Write` on that path:
 
 | Native operation | Semantic request |
 |---|---|
-| Claude Edit / NotebookEdit | `Edit` |
-| Claude Write | `Write` |
-| Codex or OpenCode patch update/delete | `Edit` |
-| Codex or OpenCode patch add | `Write` |
-| Codex or OpenCode patch move | source `Edit` + destination `Write` |
-| OpenCode edit/write | `Edit` / `Write` |
-| Gemini replace/write_file | `Edit` / `Write` |
-| Kiro write aliases | compound `Edit` + `Write` |
+| Claude Edit / MultiEdit / Write | `Write` |
+| Claude NotebookEdit | `Write` (on `notebook_path`) |
+| Codex or OpenCode patch add/update/delete | `Write` |
+| Codex or OpenCode patch move | source `Write` + destination `Write` |
+| OpenCode edit/write | `Write` |
+| Gemini replace/write_file | `Write` |
+| Kiro write aliases | `Write` |
 
 Patch operations are collected into one `CompoundRequest`; the strictest file verdict wins. A
 mutation patch with an invalid envelope, unknown marker, empty target, invalid move, or no file
-operation becomes a rejected request and is denied. Kiro checks both capabilities because its
-single write tool does not reveal whether it will create or replace a file.
+operation becomes a rejected request and is denied.
+
+`Edit(...)` is a deprecated alias for `Write(...)`. It still parses and is evaluated as the same
+rule, `import` and `init` write it back as `Write(...)`, and `agentperm validate` warns with the
+exact replacement. Consequences: an `allow Edit(src/**)` also allows creating files under `src/`;
+when a file lists both spellings for one path they are one rule and the first-listed `reason`
+wins; a `deny` on either spelling always beats an `allow` on the other.
 
 These rules cover native agent file tools, not writes hidden inside arbitrary shell commands. See
 the [capability matrix](capabilities.md#semantic-file-operations) for per-agent coverage.
@@ -238,7 +290,6 @@ Any rule can carry an optional `reason` by using the rule string as the key and 
 as the value. The reason is returned verbatim when the rule fires:
 
 ```jsonc
-{"Edit(generated/**)": {"reason": "Generated file; update its source and rerun the generator."}}
 {"Write(generated/**)": {"reason": "Generated file; update its source and rerun the generator."}}
 {"Shell(aws ec2 describe-*)": {"values": ["--region", "--profile"]}}
 {"Shell(mise exec just synth-env)": {"allowPaths": ["/tmp"]}}
@@ -295,8 +346,9 @@ Two categories of shell input have no OS-level side effect on their own:
 | `[`, `[[` | Synthetic from `test_command` AST node (both emit `("[",)`) | Allowed *before* user rules — not real commands |
 | `((` | Synthetic from arithmetic `compound_statement` | Allowed *before* user rules — not real commands |
 | `true`, `false`, `:` | Status setters / no-op | Allowed as a *fallback* — user rules override |
-| `continue` | Changes loop control only in the current shell | Allowed as a *fallback* — user rules override |
+| `break`, `continue` | Change loop control only in the current shell | Allowed as a *fallback* — user rules override |
 | `read` | Binds shell variable from stdin (process-local) | Allowed as a *fallback* — user rules override |
+| `export`, `unset` | Change variables/functions only in the current shell | Allowed as a *fallback* — user rules override |
 | `echo`, `printf` | Write to fds; redirects evaluated separately | Allowed as a *fallback* — user rules override |
 
 The **synthetic markers** (`[`, `[[`, `((`) aren't real commands, so a user rule can't target them; they are always allowed. A user rule on a **real builtin** still bites — e.g. `deny: Bash(echo:*)` blocks `echo`, because the inert allow for real builtins is only a fallback used when no rule matches.
@@ -305,7 +357,8 @@ What is *not* bypassed for the fallback-allowed builtins:
 
 - **Redirects** are evaluated independently. `echo foo > out.txt` still surfaces an Ask via the redirect rule (write-to-file), because `>` is a side effect even though `echo` isn't.
 - **Pipe aggregation** still applies. `echo foo | weird_cmd` still escalates to Ask under "Allow + NoOpinion → Ask" if `weird_cmd` is unrecognised.
-- **Anything with real side effects** stays under user rules: `cd`, `export`, `kill`, `source`, etc. are parsed as regular commands and require an explicit `Bash(<name>:*)` rule. Command-introducing wrappers (`bash -c`, `eval`, `command`, `exec`, `env`, `nice`, …) are decomposed to the inner command where possible, so you rule the inner command, not the wrapper; recognized wrappers that cannot be decomposed safely ask in normal mode. Explicit bypass modes have separate semantics described in [SECURITY.md](../SECURITY.md#bypass-surfaces).
+- **Substitutions** are evaluated independently. `export FOO=$(unknown-command)` still asks even though `export` itself is inert.
+- **Anything with real side effects** stays under user rules: `cd`, `kill`, `source`, etc. are parsed as regular commands and require an explicit `Bash(<name>:*)` rule. Statically visible `-c` programs passed to `bash`, `sh`, or `zsh` are decomposed, including safe forms such as `-lc` and `-l -c`; ambiguous option layouts and runtime-selected programs ask. Other command-introducing wrappers (`eval`, `command`, `exec`, `env`, `nice`, …) are decomposed where possible, so you rule the inner command, not the wrapper. Explicit bypass modes have separate semantics described in [SECURITY.md](../SECURITY.md#bypass-surfaces).
 
 See [Architecture: Inert command names](architecture.md#inert-command-names) for the rationale.
 

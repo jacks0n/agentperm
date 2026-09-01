@@ -196,7 +196,7 @@ Kiro uses lowercase tool names with aliases. agentperm maps them to its capitali
 |---|---|
 | `shell`, `execute_bash`, `execute_cmd` | `Bash` |
 | `read`, `fs_read`, `fsRead` | `Read` |
-| `write`, `fs_write`, `fsWrite` | compound `Edit` + `Write` |
+| `write`, `fs_write`, `fsWrite` | `Write` |
 | `glob` | `Glob` |
 | `grep` | `Grep` |
 | `web_search` | `WebSearch` |
@@ -245,10 +245,9 @@ Custom Kiro CLI agents also receive an embedded `hooks.preToolUse` entry with th
 
 ## Semantic file-operation translation
 
-Claude preserves native `Edit` and `Write` and maps `NotebookEdit` to `Edit`. Codex and OpenCode
-translate apply-patch add/update/delete/move markers into compound `Write`/`Edit` requests. Gemini
-maps `replace` to `Edit` and `write_file` to `Write`. Kiro's combined write aliases become both
-`Edit` and `Write` because the host does not distinguish create from replace.
+Claude maps `Edit`, `MultiEdit`, `NotebookEdit`, and `Write` to `Write`. Codex and OpenCode
+translate apply-patch add/update/delete/move markers into a compound of `Write` requests, one per
+target path. Gemini maps `replace` and `write_file` to `Write`. Kiro's write aliases become `Write`.
 
 The CLI attaches the hook cwd to every child request. Scoped path matching normalizes traversal and
 resolves existing symlinks. An apply-patch payload with an invalid envelope, unknown marker, empty

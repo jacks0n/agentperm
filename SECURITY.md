@@ -28,7 +28,7 @@ the shallow `Python(readonly)` AST check.
 | Laundering a denied command through composition: pipes, `&&` chains, subshells, `bash -c`, quoting/backslash tricks, command/process substitution — deny rules bite through all of these | Tool calls the host never routes through hooks (MCP servers with their own execution, non-hooked channels) |
 | A malformed `Shell(...)` / `Python(...)` pattern silently widening or weakening access — these fail loudly at load | Kernel-level containment: filesystem/network isolation is a sandbox's job (containers, `sandbox-exec`, landlock) |
 | Redirect side effects (`>`, `>>`) — writes ask by default and are path-allowlisted | Semantics of allowed commands: if you allow `git`, agentperm does not know which subcommand-flag combinations are dangerous beyond what your rules say |
-| Native file mutations translated to scoped `Edit`/`Write`, including patch moves and multi-file strictness | Writes performed internally by an allowed shell program rather than by a native file tool or shell redirect |
+| Native file mutations translated to scoped `Write`, including patch moves and multi-file strictness | Writes performed internally by an allowed shell program rather than by a native file tool or shell redirect |
 | Invalid mutation patches — rejected before they can evade scoped file rules | Filesystem changes between policy evaluation and execution (TOCTOU) |
 
 Commands the parser cannot fully decompose escalate rather than pass: a recognized-but-

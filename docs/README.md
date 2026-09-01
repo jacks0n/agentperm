@@ -12,6 +12,7 @@ authoritative home.
 | See what each supported agent can enforce | [Capability matrix](capabilities.md) |
 | Write or organize a policy | [Policy reference](policy-reference.md) |
 | Match flags, permutations, pipes, and wrappers | [Shell pattern DSL](pattern-dsl.md) |
+| Allow SQL by dialect, effect, relation, or function | [Semantic SQL policies](sql-policy.md) |
 | Understand a decision or inspect a trace | [`why`](cli.md#why) and [diagnostic traces](cli.md#diagnostic-traces) |
 | Fix prompting, hook, policy, or parsing problems | [Troubleshooting](troubleshooting.md) |
 | Assess the security boundary | [Security model](../SECURITY.md) |
@@ -22,7 +23,8 @@ authoritative home.
 - **Evaluate and try:** [project README](../README.md) and [getting started](getting-started.md).
 - **Operate:** [CLI reference](cli.md), [capability matrix](capabilities.md), and
   [troubleshooting](troubleshooting.md).
-- **Specify:** [policy reference](policy-reference.md) and [Shell pattern DSL](pattern-dsl.md).
+- **Specify:** [policy reference](policy-reference.md), [Shell pattern DSL](pattern-dsl.md), and
+  [Semantic SQL policies](sql-policy.md).
 - **Maintain:** [architecture](architecture.md), [adapter notes](adapters.md), and
   [contributing](../CONTRIBUTING.md).
 
@@ -31,7 +33,7 @@ authoritative home.
 | Term | Meaning |
 |---|---|
 | **policy** | The merged global and directory `.agent-permissions.jsonc` files used for a request. |
-| **rule** | One allow, ask, or deny entry: `Shell(...)`, legacy `Bash(...)`, a named/scoped tool, a structured Bash option rule, or `Python(readonly)`. |
+| **rule** | One allow, ask, or deny entry, including shell, Python, SQL, and named/scoped tool rules. |
 | **segment** | One executable command extracted from shell source. `a | b && c` has three. |
 | **request** | A shell operation, semantic tool operation, compound operation, or rejected operation produced by an adapter. |
 | **verdict** | `allow`, `ask`, `deny`, or `no-opinion`, plus a rationale. |

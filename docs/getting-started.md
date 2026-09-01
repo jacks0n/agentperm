@@ -17,6 +17,25 @@ always installed directly. See [CLI: install](cli.md#install) for exact paths an
 
 With no policy, agentperm returns no opinion and the host continues its native flow.
 
+### Coexisting with Beckon
+
+agentperm and Beckon are independent: agentperm never requires or invokes Beckon, and Beckon's
+ordinary lifecycle hooks do not require agentperm. Codex is the one special composition point. If
+Beckon tracks human permission prompts while agentperm automatically decides the same
+`PermissionRequest`, configure one ordered command:
+
+```text
+beckon permission-hook codex -- agentperm check --agent codex --event PermissionRequest
+```
+
+Do not install separate matching Codex `PermissionRequest` commands for those two responsibilities;
+Codex runs them concurrently, so Beckon cannot observe agentperm's verdict. The wrapper sends the
+same envelope to agentperm, immediately relays allow/deny, and records Beckon attention only for an
+unresolved native prompt. Other agentperm and Beckon hooks remain separate.
+
+After changing generated hook configuration, restart already-running host-agent processes. You may
+resume their conversations; iTerm2 and the multiplexer do not need restarting.
+
 ## 2. Create a starter policy
 
 ```sh
@@ -83,16 +102,15 @@ Add rules to `allow`, `ask`, or `deny`. Within one file, Deny wins over Ask, whi
       "Read(src/**)"
     ],
     "deny": [
-      {"Edit(generated/**)": {"reason": "Edit the schema and regenerate this directory."}},
       {"Write(generated/**)": {"reason": "Edit the schema and regenerate this directory."}}
     ]
   }
 }
 ```
 
-`Edit` and `Write` are semantic operations shared across agents. For example, patch updates map to
-Edit and patch additions map to Write. The [capability matrix](capabilities.md) lists exact host
-mappings and limitations.
+`Write` is a semantic operation shared across agents: native edits, overwrites, notebook edits, and
+patch add/update/delete/move all map to it. The [capability matrix](capabilities.md) lists exact
+host mappings and limitations.
 
 Validate before returning to your agent:
 
@@ -120,7 +138,7 @@ Common forms:
 "Shell(git stash {list,show} !... !-*)"    // no extra operands or flags
 "Shell(aws values(--region) s3 ls)"        // value flag may move
 "WebFetch(domain:github.com)"              // URL field and subdomains
-"Edit(src/**)"                             // normalized path from request cwd
+"Write(src/**)"                            // normalized path from request cwd
 ```
 
 Use the [Shell pattern DSL](pattern-dsl.md) for shell rules and the

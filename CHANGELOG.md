@@ -4,6 +4,38 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+
+- Recursive policy `include` entries with explicit paths and deterministic glob expansion. Included
+  fragments merge as one logical policy layer, preserve Ask/Allow precedence, reject unmatched
+  patterns and cycles, and are followed by runtime discovery, `validate`, and `why`.
+- First-class semantic SQL rules for Oracle, PostgreSQL, MySQL/MariaDB, and SQLite, with recursive
+  effect classification, conservative PostgreSQL `EXPLAIN` unwrapping, and selectors for statements,
+  relations, and functions.
+- Generic SQL captures in `Shell(...)` positional operands, repeated option values, literal stdin,
+  nested executable/shell wrappers, and statically resolved inline-Python calls. Client names,
+  option names, environment variables, and Python helper names remain policy-defined.
+
+### Changed
+
+- The semantic `Edit` file capability is folded into `Write`. Every native file mutation (Claude
+  `Edit`, `MultiEdit`, `NotebookEdit`, `Write`; Codex and OpenCode `apply_patch`
+  add/update/delete/move; OpenCode `edit`/`write`; Gemini `replace`/`write_file`; Kiro
+  `write`/`fs_write`/`fsWrite`) is evaluated as `Write(path)`, so a scoped `Write` rule now governs
+  overwrites of existing files, which previously fell through to the host prompt when only
+  `Edit(...)` was denied. `Edit(...)` is retained as a compatibility alias: it parses as the same
+  `Write(...)` rule, deduplicates against it, is written back as `Write(...)` by `import`/`init`,
+  and `agentperm validate` warns about it. An existing `allow Edit(...)` rule now also allows
+  creating files in its scope.
+- Documentation now states the built-in `bash`/`sh`/`zsh -c` contract, including supported flag
+  forms, Bash-compatible inner syntax, positional parameters, and fail-closed cases.
+
+### Fixed
+
+- `break`, `export`, `unset`, `set -a`, and `set +a` now receive the overridable inert-shell fallback
+  allow; redirects, substitutions, and explicit user rules still take precedence.
+- `Python(readonly)` now analyzes literal heredocs with or without an explicit stdin `-`.
+
 ## [0.4.0] — 2026-08-28
 
 ### Added
