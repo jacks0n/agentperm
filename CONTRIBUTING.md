@@ -22,27 +22,26 @@ pip install -e ".[dev]"
 
 ## Quality gates
 
-All three must pass before a PR merges:
+Run the standard gates before a PR merges:
 
 ```sh
-pytest -q                       # full test suite (~50 ms)
-ruff check .                    # lint
-basedpyright src tests          # strict type check
+just check
 ```
 
-Or run them in one go:
-
-```sh
-pytest -q && ruff check . && basedpyright src tests
-```
+This runs Ruff, strict basedpyright, Vulture dead-code detection, Pylint duplicate-code and
+700-line module limits, and pytest. These are standard tools, not custom checking scripts.
+Source and tests must be fully typed: no Any, unknown-type exemptions, or type-ignore comments.
 
 ## Code conventions
 
-- **No `Any`.** JSON values are typed as `JsonValue`; bashlex / tomlkit are narrowed at the boundary.
+- **No `Any`.** JSON values are typed as `JsonValue`; JSON, TOML and parser inputs are narrowed at boundaries.
+- **Small semantic modules.** Keep each file at most 700 lines. `domain/model.py` owns value objects;
+  `domain/evaluation.py` owns policy decisions. Parsers and agent adapters remain outside that boundary.
 - **Domain types are immutable** (`@dataclass(frozen=True)`).
 - **Sum types use isinstance dispatch**, not enums-with-payload — see `Request`, `Rule`.
 - **Adapter contract** lives in `AgentAdapter`. New agents add a class implementing `install`, `parse_event`, `write_verdict`, optionally `import_native_rules`.
-- **Tests round-trip parse/serialize.** `tests/test_parser.py`, `tests/test_policy.py`, `tests/test_adapters.py` are the authoritative behavior spec.
+- **Tests round-trip parse/serialize.** Parser, policy, installation and native-protocol tests are
+  grouped by scenario in `tests/`. A passing suite does not replace real native-agent acceptance.
 
 ## Adding a new agent
 
@@ -50,7 +49,7 @@ pytest -q && ruff check . && basedpyright src tests
 2. Add an `AgentName` variant.
 3. Subclass `AgentAdapter`, implement `install` / `parse_event` / `write_verdict` / `import_native_rules`.
 4. Register in `ADAPTERS`.
-5. Add round-trip tests in `tests/test_adapters.py`.
+5. Add round-trip tests alongside `tests/test_adapter_decisions.py` and `tests/test_hook_contracts.py`.
 
 ## Adding a new rule kind
 
@@ -58,14 +57,13 @@ pytest -q && ruff check . && basedpyright src tests
 2. Extend `parse_rule` to recognize the new form (string or dict).
 3. Extend `Policy._match_bash` / `_decide_tool` if the rule applies to a new request kind.
 4. Extend `serialize` so it round-trips through the policy file.
-5. Add a parse-and-match test in `tests/test_policy.py`.
+5. Add a parse-and-match test alongside `tests/test_rule_matching.py` and `tests/test_policy_decisions.py`.
 
 ## PR checklist
 
 - [ ] Tests added / updated for the change
-- [ ] `pytest -q` passes
-- [ ] `ruff check .` passes
-- [ ] `basedpyright src tests` passes
+- [ ] `just check` passes (including types, dead/duplicate code and file-size limits)
+- [ ] Applicable native workflows manually verified; arrange focus-changing tests with the user
 - [ ] Public API change → docs updated (`docs/`, `README.md`)
 - [ ] Behavior change → `CHANGELOG.md` entry under `## [Unreleased]`
 

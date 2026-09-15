@@ -18,6 +18,9 @@ from pathlib import Path
 
 import pytest
 
+from agentperm.domain import JsonValue
+from agentperm.json_boundary import decode_json
+
 AGENTPERM = Path(sys.executable).with_name("agentperm")
 FIXTURES = Path(__file__).parent / "fixtures" / "hook_contracts"
 REQUEST_CWD = "/agentperm-black-box/workspace"
@@ -37,8 +40,8 @@ class HookResult:
     stdout: str
     stderr: str
 
-    def output(self) -> object:
-        return json.loads(self.stdout) if self.stdout else None
+    def output(self) -> JsonValue:
+        return decode_json(self.stdout) if self.stdout else None
 
 
 HOOKS = (
@@ -94,17 +97,17 @@ SQL_SCENARIOS = (
     (
         "postgres-read",
         "allow",
-        "source /project/runtime.env && PGPASSWORD=\"$DATABASE_PASSWORD\" /opt/tools/bin/psql -X "
-        "-h \"$DATABASE_HOST\" -p \"$DATABASE_PORT\" -U \"$DATABASE_USER\" -d \"$DATABASE_NAME\" "
+        'source /project/runtime.env && PGPASSWORD="$DATABASE_PASSWORD" /opt/tools/bin/psql -X '
+        '-h "$DATABASE_HOST" -p "$DATABASE_PORT" -U "$DATABASE_USER" -d "$DATABASE_NAME" '
         "-v ON_ERROR_STOP=1 -P pager=off "
-        "-c \"with totals as (select meter_id,count(*) channels from process.channel group by meter_id) "
-        "select meter_id,channels from totals order by meter_id\" "
-        "-c \"select meter_id from process.meter order by meter_id fetch first 20 rows only\"",
+        '-c "with totals as (select meter_id,count(*) channels from process.channel group by meter_id) '
+        'select meter_id,channels from totals order by meter_id" '
+        '-c "select meter_id from process.meter order by meter_id fetch first 20 rows only"',
     ),
     (
         "postgres-write",
         "ask",
-        "psql -c \"with changed as (delete from process.meter returning *) select * from changed\"",
+        'psql -c "with changed as (delete from process.meter returning *) select * from changed"',
     ),
     (
         "postgres-denied-function",
@@ -116,7 +119,7 @@ SQL_SCENARIOS = (
         "allow",
         "docker exec arbitrary-container bash -lc \"printf '%s\\n' 'set pagesize 100 feedback off' "
         "'column meter_id format a12' 'select meter_id from process.meter order by meter_id;' 'exit' "
-        "| sqlplus -s process/example@DATABASE\"",
+        '| sqlplus -s process/example@DATABASE"',
     ),
     (
         "oracle-sqlplus-write",
@@ -265,14 +268,14 @@ def _assert_external_decision(result: HookResult, decision: str) -> None:
         return
 
     if agent == "kiro":
-        assert output is None
-        if decision == "allow":
-            assert result.returncode == 0, result.stderr
-            assert result.stderr == ""
+        assert result.returncode == 0, result.stderr
+        assert isinstance(output, dict)
+        hook_output = output.get("hookSpecificOutput")
+        if decision in ("allow", "deny", "ask"):
+            assert isinstance(hook_output, dict)
+            assert hook_output.get("permissionDecision") == decision
         else:
-            assert result.returncode == 2
-            prefix = "blocked:" if decision == "ask" else "denied:"
-            assert result.stderr.startswith(prefix)
+            assert hook_output is None
         return
 
     assert agent == "opencode"
@@ -283,11 +286,9 @@ def _assert_external_decision(result: HookResult, decision: str) -> None:
 
 def _external_reason(result: HookResult) -> str:
     agent = result.hook.agent
-    if agent == "kiro":
-        return result.stderr.strip()
     output = result.output()
     assert isinstance(output, dict)
-    if agent == "claude":
+    if agent in ("kiro", "claude"):
         hook_output = output.get("hookSpecificOutput")
         assert isinstance(hook_output, dict)
         return str(hook_output.get("permissionDecisionReason", ""))

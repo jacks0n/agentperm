@@ -27,7 +27,7 @@ agentperm install [--mode auto|rulesync|direct] [--dry-run]
 **Direct mode** — bypasses rulesync entirely:
 
 - **Claude Code:** appends a `PreToolUse` hook to `~/.claude/settings.json` (matcher `*`). Strips any spurious agentperm entry that ended up in `PermissionRequest` (Claude doesn't fire that event).
-- **Codex CLI:** appends `PreToolUse` (matcher `Bash|apply_patch`) and `PermissionRequest` (matcher `Bash|apply_patch|mcp__.*`) hooks to `~/.codex/hooks.json`, and enables `[features].hooks = true` in `~/.codex/config.toml`.
+- **Codex CLI:** appends `PreToolUse` and `PermissionRequest` hooks with matcher `.*` to `~/.codex/hooks.json`, and enables `[features].hooks = true` in `~/.codex/config.toml`.
 - **Gemini CLI:** appends a `BeforeTool` hook to `~/.gemini/settings.json` (matcher `.*`).
 - **OpenCode:** writes `~/.config/opencode/plugins/agentperm.js` with pre-execution and permission hooks — always, regardless of mode.
 - **Kiro:** merges `PreToolUse` into existing global and workspace custom-agent files and writes
@@ -174,7 +174,8 @@ here. Exits 2 if a discovered policy file fails to load.
 Runtime decision endpoint. Reads the agent's hook payload from stdin, writes a verdict envelope to stdout. **You don't run this manually** — `install` wires it up. To ask "what would the policy decide?", use [`why`](#why).
 
 ```sh
-agentperm check --agent <auto|claude|codex|opencode|gemini|kiro> --event <event-name>
+agentperm check --agent <auto|claude|codex|opencode|gemini|kiro> --event <event-name> \
+  [--passthrough COMMAND ...]
 ```
 
 Arguments:
@@ -182,13 +183,17 @@ Arguments:
 - `--agent` (required): which adapter parses the payload and formats the verdict. `auto` infers from
   event and known tool names; installed hooks use an explicit agent.
 - `--event` (required): the agent-specific event name, e.g. `PreToolUse`, `PermissionRequest`, `permission.ask`
+- `--passthrough COMMAND ...`: when the decision is neither allow nor deny, invoke the remaining
+  command directly with the exact original hook input and relay its output and exit status. This
+  option must come last because all remaining arguments belong to the downstream command.
 
 Behavior:
 
 1. Read JSON payload from stdin
 2. Parse it via the named adapter into a `Request`
 3. Load the global policy plus every policy from the filesystem root through the payload cwd
-4. Decide → aggregate → coerce for permission mode → emit verdict envelope on stdout
+4. Decide → aggregate → coerce for permission mode
+5. Emit a decisive verdict, or invoke the configured pass-through hook when unresolved
 
 Failure behavior is deliberately split:
 
@@ -198,7 +203,7 @@ Failure behavior is deliberately split:
   `"policy load failed: ..."`; the broken policy is visible instead of silently bypassed.
 - A mutation payload recognized as a patch but not safely translatable → `Deny`; scoped file rules
   cannot be trusted without a complete target list.
-- A Kiro shell payload without a command → `Ask`, which Kiro represents as a blocking exit code 2.
+- A Kiro shell payload without a command → `Ask`, emitted in Kiro's structured permission envelope.
 
 ### Diagnostic traces
 
@@ -269,12 +274,12 @@ After editing, run [`validate`](#validate) to catch typos before they cost you p
 
 | Code | Meaning |
 |---|---|
-| `0` | Normal completion. JSON-envelope adapters report policy verdicts on stdout; Kiro uses 0 for Allow/NoOpinion. |
+| `0` | Normal completion. Adapters report policy verdicts through their native stdout envelopes. |
 | `1` | `validate` found errors, or `install`/`uninstall` failed for at least one adapter. |
-| `2` | Usage/configuration error, `why` with an unloadable policy, or Kiro Ask/Deny (its hook protocol uses exit codes). |
+| `2` | Usage/configuration error or `why` with an unloadable policy. |
 
-Claude, Codex, OpenCode, and Gemini do not signal Deny through the process exit code; their verdict
-is the stdout envelope. Kiro is the deliberate exception—see [adapter notes](adapters.md#kiro-cli--ide).
+Hook adapters communicate decisions through stdout envelopes rather than process exit codes. See
+the [adapter notes](adapters.md) for host-specific formats.
 
 ---
 

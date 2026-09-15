@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from threading import Lock
 
 from sqlglot import ErrorLevel, Expr, exp, parse
@@ -42,13 +43,36 @@ _SESSION_ROOTS: tuple[type[Expr], ...] = (
 _TRANSACTION_ROOTS: tuple[type[Expr], ...] = (exp.Commit, exp.Rollback, exp.Transaction)
 _SQLGLOT_LOGGER = logging.getLogger("sqlglot")
 _SQLGLOT_PARSE_LOCK = Lock()
-_POSTGRES_EXPLAIN_OPTIONS = frozenset({
-    "analyze", "buffers", "costs", "format", "generic_plan", "memory",
-    "serialize", "settings", "summary", "timing", "verbose", "wal",
-})
-_POSTGRES_EXPLAIN_VALUES = frozenset({
-    "binary", "false", "json", "none", "off", "on", "text", "true", "xml", "yaml",
-})
+_POSTGRES_EXPLAIN_OPTIONS = frozenset(
+    {
+        "analyze",
+        "buffers",
+        "costs",
+        "format",
+        "generic_plan",
+        "memory",
+        "serialize",
+        "settings",
+        "summary",
+        "timing",
+        "verbose",
+        "wal",
+    }
+)
+_POSTGRES_EXPLAIN_VALUES = frozenset(
+    {
+        "binary",
+        "false",
+        "json",
+        "none",
+        "off",
+        "on",
+        "text",
+        "true",
+        "xml",
+        "yaml",
+    }
+)
 _POSTGRES_EXPLAIN_LEGACY_OPTION = re.compile(r"(?i)^(analyze|verbose)\b")
 
 
@@ -105,12 +129,16 @@ def parse_sql(document: str, dialect: SqlDialect, document_format: SqlDocumentFo
 def _classifiable_root(root: Expr, dialect: SqlDialect) -> tuple[Expr, SqlStatementKind]:
     if not isinstance(root, exp.Command):
         return root, _statement_kind(root)
-    if dialect is not SqlDialect.Postgres or str(root.this).upper() != "EXPLAIN":
+    command = _argument(root.args, "this")
+    if dialect is not SqlDialect.Postgres or not isinstance(command, str) or command.upper() != "EXPLAIN":
         raise SqlParseError("SQL parser returned an opaque or empty statement")
-    expression = root.expression
+    expression = _argument(root.args, "expression")
     if not isinstance(expression, exp.Literal) or not expression.is_string:
         raise SqlParseError("PostgreSQL EXPLAIN body is not statically available")
-    inner_source = _postgres_explain_inner(expression.this)
+    source = _argument(expression.args, "this")
+    if not isinstance(source, str):
+        raise SqlParseError("PostgreSQL EXPLAIN body is not text")
+    inner_source = _postgres_explain_inner(source)
     inner_roots = tuple(item for item in _parse_without_library_stderr(inner_source, dialect) if item is not None)
     if len(inner_roots) != 1 or isinstance(inner_roots[0], exp.Command):
         raise SqlParseError("PostgreSQL EXPLAIN must contain one classifiable statement")
@@ -132,10 +160,10 @@ def _postgres_explain_inner(source: str) -> str:
                 raise SqlParseError("PostgreSQL EXPLAIN contains an unsupported option")
             if len(parts) == 2 and parts[1] not in _POSTGRES_EXPLAIN_VALUES:
                 raise SqlParseError("PostgreSQL EXPLAIN contains an unsupported option value")
-        remaining = remaining[closing + 1:].strip()
+        remaining = remaining[closing + 1 :].strip()
     else:
         while match := _POSTGRES_EXPLAIN_LEGACY_OPTION.match(remaining):
-            remaining = remaining[match.end():].lstrip()
+            remaining = remaining[match.end() :].lstrip()
     if not remaining:
         raise SqlParseError("PostgreSQL EXPLAIN contains no statement")
     return remaining
@@ -208,7 +236,15 @@ def _qualified_name(table: exp.Table, dialect: SqlDialect) -> str:
 def _function_ref(node: exp.Func, dialect: SqlDialect) -> SqlFunctionRef:
     if isinstance(node, exp.Anonymous):
         name = node.name or node.sql_name()
-        if isinstance(node.parent, exp.Dot) and node.parent.expression is node:
-            name = f"{node.parent.this.sql(dialect=dialect.value)}.{name}"
+        parent = node.parent
+        if isinstance(parent, exp.Dot) and _argument(parent.args, "expression") is node:
+            qualifier = _argument(parent.args, "this")
+            if isinstance(qualifier, Expr):
+                name = f"{qualifier.sql(dialect=dialect.value)}.{name}"
         return SqlFunctionRef(f"{dialect.value}:{name.lower()}", builtin=False)
     return SqlFunctionRef(f"builtin:{node.sql_name().lower()}", builtin=True)
+
+
+def _argument(arguments: Mapping[str, object], name: str) -> object:
+    """Narrow SQLGlot's open AST fields at the adapter boundary."""
+    return arguments.get(name)

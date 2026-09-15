@@ -4,6 +4,16 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Interoperability and maintainability
+
+- Add tool-agnostic hook pass-through: `check --passthrough COMMAND` forwards the original input,
+  stdout, stderr and exit status when policy does not allow or deny. Decisive verdicts stop without
+  invoking the downstream hook, and uninstall restores a configured pass-through as a standalone
+  handler without depending on the notification tool.
+- Split policy models/evaluation and shell parsing responsibilities into semantic typed modules.
+  Enforce no-Any/no-unknown typing, Pylint's 700-line module ceiling, Vulture dead-code and Pylint
+  duplicate-code checks through the standard `just check` gate.
+
 ### Added
 
 - Recursive policy `include` entries with explicit paths and deterministic glob expansion. Included
@@ -32,6 +42,15 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Codex full-auto/YOLO mode now preserves `PreToolUse` hard denies, including for code-mode nested
+  tools, instead of applying Claude's distinct `bypassPermissions` semantics. Codex hook matchers
+  now cover every hook-capable tool so policy coverage is not narrowed during installation.
+- Kiro now emits its native structured permission envelope for allow, ask and deny verdicts;
+  `NoOpinion` continues to defer with an empty object.
+- The default file-inspection policy now allows only bare `launchctl list` for read-only launchd
+  inventory; operands, flags and mutating launchctl subcommands remain unallowed.
+- `set -- [arguments...]` now receives the overridable inert-shell fallback allow, while bare `set`,
+  tracing flags and other unreviewed forms remain unallowed.
 - `break`, `export`, `unset`, `set -a`, and `set +a` now receive the overridable inert-shell fallback
   allow; redirects, substitutions, and explicit user rules still take precedence.
 - `Python(readonly)` now analyzes literal heredocs with or without an explicit stdin `-`.

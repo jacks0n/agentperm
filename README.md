@@ -90,6 +90,8 @@ shell, Python's `ast` for inline Python, SQLGlot for SQL. Anything agentperm can
 understand is never allowed — it asks, or defers to your agent's own prompt.
 `agentperm why "<command>"` prints this breakdown for any command without running it.
 
+Confirmed defects and integration incidents are tracked in the [bug register](BUGS.md).
+
 https://github.com/user-attachments/assets/9abcd24d-147c-4323-a1c3-970544e0d86a
 
 [GIF fallback](https://raw.githubusercontent.com/jacks0n/agentperm/main/docs/media/demo.gif)
@@ -162,8 +164,10 @@ Deny). Install directly or via Rulesync; import existing native rules. Exact cov
 
 agentperm is a **permission intent layer**. It sees only tool calls the host routes through hooks,
 matches argv shape rather than proving program behaviour, and does not isolate processes, files, or
-network. A host's bypass mode bypasses agentperm too. Traces are diagnostic, off by default, and
-unredacted. Threat model, bypass surfaces, and failure behaviour: [SECURITY.md](SECURITY.md).
+network. Bypass semantics are host-specific: Claude's explicit bypass makes agentperm defer, while
+Codex full-auto suppresses prompts but still runs `PreToolUse` hard denies. Traces are diagnostic,
+off by default, and unredacted. Threat model, bypass surfaces, and failure behaviour:
+[SECURITY.md](SECURITY.md).
 
 ## Zellij pane bypass
 

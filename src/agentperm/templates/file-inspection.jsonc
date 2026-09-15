@@ -10,6 +10,8 @@
       // find is deliberately absent: its single-dash long options (-delete,
       // -exec) defeat flag matching, so they can't be reliably excluded.
       "Shell({date,uname,hostname,id,whoami,which,whereis,env,printenv,ps,pgrep,lsof,df,uptime})",
+      // Exact service inventory only; operands and flags select or alter launchd jobs.
+      "Shell(launchctl list !... !-*)",
       // Inert shell builtins agents emit constantly.
       "Shell({:,cd,echo,exit,false,printf,pwd,test,true,type})",
       // Any command asked only for its version or help text.

@@ -10,8 +10,6 @@ from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 
-import pyjson5
-
 from .domain import (
     POLICY_FILENAME,
     Decision,
@@ -21,10 +19,10 @@ from .domain import (
     PythonCallPolicy,
     RedirectionPolicy,
     Rule,
-    narrow_json,
 )
 from .errors import PolicyError
 from .fileio import atomic_write
+from .json_boundary import decode_jsonc
 from .rules import parse_rule
 
 _REDIRECT_DECISION_VALUES = frozenset({Decision.Allow.value, Decision.Ask.value, Decision.Deny.value})
@@ -146,10 +144,9 @@ def _combine_same_layer(policy_files: tuple[Policy, ...]) -> Policy:
 
 def parse_policy_text(text: str, source: str) -> PolicyFile:
     try:
-        decoded: object = pyjson5.decode(text)
+        data = decode_jsonc(text)
     except Exception as error:
         raise PolicyError(f"{source}: invalid JSON/JSONC ({error})") from error
-    data = narrow_json(decoded)
     if not isinstance(data, dict):
         raise PolicyError(f"{source}: top-level must be an object")
     return PolicyFile(policy=_policy_from_dict(data), raw=data)
@@ -234,11 +231,13 @@ def save_policy_file(path: Path, policy_file: PolicyFile) -> None:
     if calls.deny or calls.ask or calls.allow or isinstance(existing_calls, dict):
         python: JsonObject = dict(python_raw) if isinstance(python_raw, dict) else {}
         serialized: JsonObject = dict(existing_calls) if isinstance(existing_calls, dict) else {}
-        serialized.update({
-            "allow": sorted(calls.allow),
-            "ask": sorted(calls.ask),
-            "deny": sorted(calls.deny),
-        })
+        serialized.update(
+            {
+                "allow": sorted(calls.allow),
+                "ask": sorted(calls.ask),
+                "deny": sorted(calls.deny),
+            }
+        )
         python["calls"] = serialized
         raw["python"] = python
 
@@ -294,12 +293,7 @@ def _policy_paths(cwd: Path | None) -> tuple[Path, ...]:
 
 def existing_policy_paths(cwd: Path | None = None) -> tuple[Path, ...]:
     """The policy files runtime discovery would actually load for ``cwd``, in merge order."""
-    return tuple(
-        source
-        for path in _policy_paths(cwd)
-        if path.exists()
-        for source in resolve_policy_paths(path)
-    )
+    return tuple(source for path in _policy_paths(cwd) if path.exists() for source in resolve_policy_paths(path))
 
 
 def merged_policy(cwd: Path | None = None, *, local_root: Path | None = None) -> Policy:

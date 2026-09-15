@@ -8,6 +8,7 @@ import re
 import shlex
 import sys
 from collections.abc import Iterator
+from copy import deepcopy
 from pathlib import Path
 from typing import ClassVar
 
@@ -34,6 +35,7 @@ from ..shell import parse_pipeline
 from .base import (
     AgentAdapter,
     is_bridge_hook,
+    pretooluse_output,
     resolve_bridge_command,
 )
 
@@ -75,15 +77,13 @@ class KiroAdapter(AgentAdapter):
         return ToolRequest(kiro_tool_name(tool_name), arguments, cwd=cwd)
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> int:
-        if verdict.decision == Decision.Deny:
-            print(f"denied: {verdict.rationale}", file=sys.stderr)
-            return 2
-        if verdict.decision == Decision.Ask:
-            print(f"blocked: {verdict.rationale}", file=sys.stderr)
-            return 2
-        if verdict.decision == Decision.Allow:
+        if verdict.decision in (Decision.Allow, Decision.Deny, Decision.Ask):
+            json.dump(
+                pretooluse_output(verdict.decision, verdict.rationale),
+                sys.stdout,
+            )
             return 0
-        # NoOpinion defers to Kiro's native permission handling.
+        json.dump({}, sys.stdout)
         return 0
 
     def install(self, mode: InstallMode, *, dry_run: bool = False) -> list[Path]:
@@ -132,7 +132,7 @@ class KiroAdapter(AgentAdapter):
 
     def _uninstall_v2_agent_hook(self, agent_path: Path, *, dry_run: bool) -> list[Path]:
         before = read_json(agent_path)
-        after: JsonObject = json.loads(json.dumps(before))
+        after: JsonObject = deepcopy(before)
         hooks = after.get("hooks")
         if not isinstance(hooks, dict):
             return []
@@ -164,7 +164,7 @@ class KiroAdapter(AgentAdapter):
         if len(others) == len(entry_list):
             return []
         if others:
-            updated: JsonObject = json.loads(json.dumps(data))
+            updated: JsonObject = deepcopy(data)
             updated["hooks"] = others
             if not dry_run:
                 atomic_write(hooks_path, json.dumps(updated, indent=2) + "\n")
@@ -196,7 +196,7 @@ class KiroAdapter(AgentAdapter):
     ) -> list[Path]:
         before = read_json(agent_path)
         default_name = agent_path.stem
-        after: JsonObject = json.loads(json.dumps(before)) if before else {"name": default_name}
+        after: JsonObject = deepcopy(before) if before else {"name": default_name}
         if "name" not in after:
             after = {"name": default_name, **after}
         hooks = after.setdefault("hooks", {})
@@ -288,7 +288,6 @@ def kiro_tool_name(name: str) -> str:
         "subagent": "Subagent",
         "use_subagent": "Subagent",
     }.get(name, name)
-
 
 
 KIRO_TOOL_NAMES = frozenset(

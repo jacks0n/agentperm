@@ -61,10 +61,7 @@ class SqlSelector:
     patterns: tuple[str, ...]
 
     def matches(self, values: tuple[str, ...], *, unknown: bool = False) -> bool:
-        candidates = tuple(
-            (value, value.split(":", 1)[1]) if ":" in value else (value,)
-            for value in values
-        )
+        candidates = tuple((value, value.split(":", 1)[1]) if ":" in value else (value,) for value in values)
         hits = tuple(
             any(
                 fnmatch.fnmatchcase(candidate.lower(), pattern.lower())

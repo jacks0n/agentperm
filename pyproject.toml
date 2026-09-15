@@ -66,6 +66,8 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
     "basedpyright>=1.13",
+    "pylint>=4.0.6",
+    "vulture>=2.16",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -79,18 +81,18 @@ line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ANN"]
 
 [tool.basedpyright]
 include = ["src", "tests"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
-# tree-sitter-bash stubs are partial. We narrow at the parser boundary so domain
-# code never sees Unknown.
+reportAny = "error"
+reportExplicitAny = "error"
+reportIgnoreCommentWithoutRule = "error"
+enableTypeIgnoreComments = false
+reportUnnecessaryTypeIgnoreComment = "error"
 reportMissingTypeStubs = false
-reportUnknownMemberType = false
-reportUnknownVariableType = false
-reportUnknownArgumentType = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

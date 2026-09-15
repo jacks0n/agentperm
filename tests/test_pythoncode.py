@@ -13,6 +13,7 @@ from agentperm import (
     PythonReadonly,
     Rule,
     ShellRequest,
+    Verdict,
     parse_pipeline,
     parse_rule,
 )
@@ -23,18 +24,18 @@ def _decide(
     *,
     calls: PythonCallPolicy | None = None,
     extra_allow: tuple[Rule, ...] = (),
-):
+) -> Verdict:
     policy = Policy(allow=(PythonReadonly(), *extra_allow), python_calls=calls or PythonCallPolicy())
     return policy.decide(ShellRequest(parse_pipeline(command)))
 
 
-def test_python_readonly_rule_parses_and_serializes():
+def test_python_readonly_rule_parses_and_serializes() -> None:
     rule = parse_rule("Python(readonly)")
     assert isinstance(rule, PythonReadonly)
     assert rule.serialize() == "Python(readonly)"
 
 
-def test_python_readonly_rule_is_allow_only():
+def test_python_readonly_rule_is_allow_only() -> None:
     with pytest.raises(PolicyError, match=r"only valid in permissions\.allow"):
         Policy(ask=(PythonReadonly(),))
 
@@ -44,17 +45,17 @@ def test_python_readonly_rule_is_allow_only():
     (
         'python -c "import agentperm; print(len(agentperm.__all__))"',
         'PYTHONPATH=src python -c "import agentperm; print(type(agentperm), vars(agentperm))"',
-        ".venv/bin/python -c \"from agentperm import Policy; print(Policy)\"",
-        "python3 -c \"import inspect; print(inspect.signature(len))\"",
-        "uv run python -c \"from agentperm.adapters.kiro import _kiro_command_rule; "
+        '.venv/bin/python -c "from agentperm import Policy; print(Policy)"',
+        'python3 -c "import inspect; print(inspect.signature(len))"',
+        'uv run python -c "from agentperm.adapters.kiro import _kiro_command_rule; '
         "print(_kiro_command_rule('git status'))\"",
     ),
 )
-def test_readonly_diagnostic_commands_allow(command: str):
+def test_readonly_diagnostic_commands_allow(command: str) -> None:
     assert _decide(command).decision is Decision.Allow
 
 
-def test_readonly_project_call_and_introspection_heredoc_allows():
+def test_readonly_project_call_and_introspection_heredoc_allows() -> None:
     command = """uv run python - <<'PY'
 from lib.adapters.common.calendar import get_calendar, VENUE_ASX
 c = get_calendar(VENUE_ASX)
@@ -65,7 +66,7 @@ PY
     assert _decide(command).decision is Decision.Allow
 
 
-def test_readonly_file_search_with_exception_handling_allows():
+def test_readonly_file_search_with_exception_handling_allows() -> None:
     command = """python - <<'PY'
 from pathlib import Path
 for p in Path('.venv').rglob('*'):
@@ -81,13 +82,13 @@ PY
     assert _decide(command).decision is Decision.Allow
 
 
-def test_multiline_python_c_import_list_allows():
-    command = '''python -c "
+def test_multiline_python_c_import_list_allows() -> None:
+    command = """python -c "
 from agentperm import (
     AgentAdapter, AgentName, BashCommand, Policy
 )
 print('All old public names still importable from agentperm')
-" 2>&1'''
+" 2>&1"""
     assert _decide(command).decision is Decision.Allow
 
 
@@ -107,15 +108,15 @@ print('All old public names still importable from agentperm')
         ("(factory())()", "dynamic Python call"),
     ),
 )
-def test_known_mutation_or_unknown_call_asks(source: str, reason: str):
+def test_known_mutation_or_unknown_call_asks(source: str, reason: str) -> None:
     command_source = source.replace("\n", "; ")
     verdict = _decide(f'python -c "{command_source}"')
     assert verdict.decision is Decision.Ask
     assert reason in verdict.rationale
 
 
-def test_assignment_alias_not_called_is_allowed():
-    command = "python -c \"import os; f = os.remove; print(f)\""
+def test_assignment_alias_not_called_is_allowed() -> None:
+    command = 'python -c "import os; f = os.remove; print(f)"'
     assert _decide(command).decision is Decision.Allow
 
 
@@ -128,13 +129,13 @@ def test_assignment_alias_not_called_is_allowed():
         ("import shutil; d = shutil.rmtree; d('/tmp/x')", "shutil.rmtree"),
     ),
 )
-def test_assignment_rebinding_tracked_for_calls(source: str, reason: str):
+def test_assignment_rebinding_tracked_for_calls(source: str, reason: str) -> None:
     verdict = _decide(f'python -c "{source}"')
     assert verdict.decision is Decision.Ask
     assert reason in verdict.rationale
 
 
-def test_assignment_rebinding_respects_deny_policy():
+def test_assignment_rebinding_respects_deny_policy() -> None:
     calls = PythonCallPolicy(deny=frozenset({"project.forbidden"}))
     source = "from project import forbidden; f = forbidden; f()"
     verdict = _decide(f'python -c "{source}"', calls=calls)
@@ -142,33 +143,33 @@ def test_assignment_rebinding_respects_deny_policy():
     assert "project.forbidden" in verdict.rationale
 
 
-def test_python_call_allow_overrides_builtin_mutation_catalogue():
+def test_python_call_allow_overrides_builtin_mutation_catalogue() -> None:
     calls = PythonCallPolicy(allow=frozenset({"os.remove"}))
     assert _decide("python -c \"from os import remove; remove('out')\"", calls=calls).decision is Decision.Allow
 
 
-def test_python_call_ask_overrides_ordinary_call_default():
+def test_python_call_ask_overrides_ordinary_call_default() -> None:
     calls = PythonCallPolicy(ask=frozenset({"project.inspect"}))
-    verdict = _decide("python -c \"from project import inspect; inspect()\"", calls=calls)
+    verdict = _decide('python -c "from project import inspect; inspect()"', calls=calls)
     assert verdict.decision is Decision.Ask
     assert "requires approval by policy" in verdict.rationale
 
 
-def test_python_call_deny_returns_deny():
+def test_python_call_deny_returns_deny() -> None:
     calls = PythonCallPolicy(deny=frozenset({"project.forbidden"}))
-    verdict = _decide("python -c \"from project import forbidden; forbidden()\"", calls=calls)
+    verdict = _decide('python -c "from project import forbidden; forbidden()"', calls=calls)
     assert verdict.decision is Decision.Deny
 
 
-def test_python_call_policy_deny_beats_allow_for_same_target():
+def test_python_call_policy_deny_beats_allow_for_same_target() -> None:
     calls = PythonCallPolicy(
         deny=frozenset({"project.operation"}),
         allow=frozenset({"project.operation"}),
     )
-    assert _decide("python -c \"from project import operation; operation()\"", calls=calls).decision is Decision.Deny
+    assert _decide('python -c "from project import operation; operation()"', calls=calls).decision is Decision.Deny
 
 
-def test_python_guard_beats_broad_shell_allow():
+def test_python_guard_beats_broad_shell_allow() -> None:
     verdict = _decide(
         "python -c \"open('out', 'w')\"",
         extra_allow=(BashCommand(("python",)),),
@@ -176,16 +177,16 @@ def test_python_guard_beats_broad_shell_allow():
     assert verdict.decision is Decision.Ask
 
 
-def test_python_m_and_script_execution_remain_outside_inline_guard():
+def test_python_m_and_script_execution_remain_outside_inline_guard() -> None:
     assert _decide("python -m pytest").decision is Decision.NoOpinion
     assert _decide("python script.py").decision is Decision.NoOpinion
 
 
-def test_python_stdin_without_literal_heredoc_asks():
+def test_python_stdin_without_literal_heredoc_asks() -> None:
     assert _decide("python -").decision is Decision.Ask
 
 
-def test_dynamic_unquoted_heredoc_asks():
+def test_dynamic_unquoted_heredoc_asks() -> None:
     command = """python - <<PY
 print('$VALUE')
 PY
@@ -195,7 +196,7 @@ PY
     assert "shell expansion" in verdict.rationale
 
 
-def test_malformed_inline_python_asks():
+def test_malformed_inline_python_asks() -> None:
     verdict = _decide("python -c 'def nope('")
     assert verdict.decision is Decision.Ask
     assert "not parseable" in verdict.rationale

@@ -12,10 +12,9 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-import pyjson5
-
-from .domain import JsonObject, JsonValue, NamedTool, narrow_json
+from .domain import JsonObject, JsonValue, NamedTool
 from .errors import PolicyError
+from .json_boundary import decode_jsonc
 from .rules import TOOL_NAME_ALIASES, parse_rule
 
 _TOP_LEVEL_KEYS = frozenset({"version", "include", "permissions", "shell", "python"})
@@ -41,10 +40,9 @@ def validate_policy_file(path: Path) -> list[Finding]:
 
 def validate_policy_text(text: str) -> list[Finding]:
     try:
-        decoded: object = pyjson5.decode(text)
+        data = decode_jsonc(text)
     except Exception as error:
         return [Finding("error", f"invalid JSON/JSONC: {error}")]
-    data = narrow_json(decoded)
     if not isinstance(data, dict):
         return [Finding("error", "top-level must be an object")]
 
@@ -58,8 +56,7 @@ def validate_policy_text(text: str) -> list[Finding]:
 
     include = data.get("include")
     if include is not None and (
-        not isinstance(include, list)
-        or not all(isinstance(item, str) and item.strip() for item in include)
+        not isinstance(include, list) or not all(isinstance(item, str) and item.strip() for item in include)
     ):
         findings.append(Finding("error", "'include' must be an array of non-empty path or glob strings"))
 

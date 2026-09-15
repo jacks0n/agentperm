@@ -2,102 +2,15 @@
 
 from __future__ import annotations
 
-import fnmatch
-import os
 import re
-from collections.abc import Iterable, Iterator
-from pathlib import Path
+from collections.abc import Iterator
 
 import tree_sitter_bash
 from tree_sitter import Language, Node, Parser
 
-from .domain import Decision, Pipeline, Redirect, RedirectionPolicy, Segment, Verdict, basename
-
-# -----------------------------------------------------------------------------
-# Redirect policy — shapes are fixed here, but each shape's decision is
-# user-tunable via a policy file's ``shell.redirection`` block (RedirectionPolicy).
-# -----------------------------------------------------------------------------
-
-
-def evaluate_redirects(
-    redirects: Iterable[Redirect],
-    policy: RedirectionPolicy,
-    *,
-    allow_paths: tuple[str, ...] = (),
-    cwd: Path | None = None,
-) -> Verdict:
-    strictest = Verdict(Decision.NoOpinion, "")
-    for r in redirects:
-        verdict = _evaluate_redirect(r, policy, allow_paths, cwd)
-        if verdict.decision is Decision.Deny:
-            return verdict
-        if verdict.decision is Decision.Ask and strictest.decision is Decision.NoOpinion:
-            strictest = verdict
-    return strictest
-
-
-def _evaluate_redirect(
-    r: Redirect,
-    policy: RedirectionPolicy,
-    allow_paths: tuple[str, ...] = (),
-    cwd: Path | None = None,
-) -> Verdict:
-    if r.is_fd_dup:
-        return Verdict(Decision.NoOpinion, "")
-    if r.op == "<":
-        return Verdict(Decision.NoOpinion, "")
-    if r.target == "/dev/null":
-        if r.fd == 2:
-            return _configured_verdict(policy.stderr_to_dev_null, Decision.Allow, "stderr to /dev/null")
-        return _configured_verdict(policy.stdout_to_dev_null, Decision.Allow, "stdout to /dev/null")
-    # Path allowlist — checked before the operator-based policy so an allowed
-    # directory overrides the default ask/deny for writes and appends.
-    is_write = r.op in (">", "&>", ">|", ">>", "&>>")
-    if is_write and allow_paths and _redirect_path_allowed(r.target, allow_paths, cwd):
-        return Verdict(Decision.NoOpinion, "")
-    if r.op in (">", "&>", ">|"):
-        return _configured_verdict(policy.stdout_to_file, Decision.Ask, f"writes to {r.target!r}")
-    if r.op in (">>", "&>>"):
-        return _configured_verdict(policy.append_to_file, Decision.Ask, f"appends to {r.target!r}")
-    return Verdict(Decision.Ask, f"unrecognized redirection {r.op!r}")
-
-
-def _redirect_path_allowed(
-    target: str, allow_paths: tuple[str, ...], cwd: Path | None
-) -> bool:
-    if os.path.isabs(target):
-        resolved = os.path.realpath(target)
-    elif cwd is not None:
-        resolved = os.path.realpath(cwd / target)
-    else:
-        return False
-    resolved_parts = Path(resolved).parts
-    for pattern in allow_paths:
-        canonical = os.path.realpath(pattern)
-        pattern_parts = Path(canonical).parts
-        if len(pattern_parts) > len(resolved_parts):
-            continue
-        if all(
-            fnmatch.fnmatch(actual, pat)
-            for actual, pat in zip(resolved_parts, pattern_parts, strict=False)
-        ):
-            return True
-    return False
-
-
-def _configured_verdict(configured: Decision | None, default: Decision, rationale: str) -> Verdict:
-    """Turn a redirect shape's configured/default decision into a Verdict.
-
-    ``Allow`` defers entirely to the segment's own command rule (NoOpinion);
-    ``Ask``/``Deny`` force that verdict regardless of what the command rule says.
-    """
-    intended = configured if configured is not None else default
-    if intended is Decision.Allow:
-        return Verdict(Decision.NoOpinion, "")
-    if intended is Decision.Deny:
-        return Verdict(Decision.Deny, rationale)
-    return Verdict(Decision.Ask, rationale)
-
+from .domain import Pipeline, Redirect, Segment, basename
+from .shell_redirection import evaluate_redirects as evaluate_redirects
+from .shell_words import OPAQUE_ARG_TYPES, UnsupportedShellError, argument_text, node_text
 
 # -----------------------------------------------------------------------------
 # Shell parser (Tree-sitter Bash -> Pipeline)
@@ -106,10 +19,6 @@ def _configured_verdict(configured: Decision | None, default: Decision, rational
 # The helpers below are the only place that talks to that boundary; everything
 # outside this section only sees the typed Pipeline/Segment/Redirect domain types.
 # -----------------------------------------------------------------------------
-
-
-class _UnsupportedShellError(Exception):
-    pass
 
 
 _SHELL_COMMANDS = frozenset({"bash", "sh", "zsh"})
@@ -132,10 +41,26 @@ _EXEC_WRAPPER_NO_ARG_OPTS: dict[str, frozenset[str]] = {
 # Exec wrappers we never decompose — leading positionals (``timeout 5 cmd``) or
 # option grammars too varied to model. Flagged at decision time so bypass prompts
 # rather than allowing the hidden command; an explicit rule still allow-lists them.
-_OPAQUE_EXEC_WRAPPERS: frozenset[str] = frozenset({
-    "timeout", "sudo", "doas", "su", "runuser", "xargs", "stdbuf", "ionice",
-    "chrt", "setarch", "setpriv", "unshare", "watch", "parallel", "flock", "eval",
-})
+_OPAQUE_EXEC_WRAPPERS: frozenset[str] = frozenset(
+    {
+        "timeout",
+        "sudo",
+        "doas",
+        "su",
+        "runuser",
+        "xargs",
+        "stdbuf",
+        "ionice",
+        "chrt",
+        "setarch",
+        "setpriv",
+        "unshare",
+        "watch",
+        "parallel",
+        "flock",
+        "eval",
+    }
+)
 
 ALL_EXEC_WRAPPERS: frozenset[str] = frozenset(_EXEC_WRAPPER_NO_ARG_OPTS) | _OPAQUE_EXEC_WRAPPERS
 
@@ -149,37 +74,54 @@ _BASH_PARSER.language = _BASH_LANGUAGE
 # matching is unaffected. ``_node_contains_substitution`` still rejects anything
 # nesting a command/process substitution, so e.g. ``cat foo$(date)`` is blocked
 # even though the outer node here is a ``concatenation``.
-_OPAQUE_ARG_TYPES = frozenset({
-    "word", "number", "string", "raw_string",
-    "simple_expansion", "expansion", "concatenation",
-    "arithmetic_expansion", "ansi_c_string", "translated_string",
-})
+
 
 # Children of control-flow nodes that are subjects/patterns/names rather than
 # executable segments — skipped during recursion. Includes function names
 # (``foo`` in ``foo() { … }``, parsed as ``word``) and ``case`` patterns.
-_PATTERN_CHILD_TYPES = frozenset({"extglob_pattern", "regex"}) | _OPAQUE_ARG_TYPES
+_PATTERN_CHILD_TYPES = frozenset({"extglob_pattern", "regex"}) | OPAQUE_ARG_TYPES
 
 # Control-flow / grouping nodes whose named children are recursable into segments.
 # Excludes ``for_statement`` (handled separately because the iterable list contains
 # ``variable_name``/etc. that aren't pattern types but also aren't recursable).
-_CONTROL_FLOW_TYPES = frozenset({
-    "program", "list", "pipeline", "do_group",
-    "if_statement", "while_statement", "until_statement",
-    "case_statement", "case_item",
-    "elif_clause", "else_clause",
-    "subshell", "negated_command", "function_definition",
-})
+_CONTROL_FLOW_TYPES = frozenset(
+    {
+        "program",
+        "list",
+        "pipeline",
+        "do_group",
+        "if_statement",
+        "while_statement",
+        "until_statement",
+        "case_statement",
+        "case_item",
+        "elif_clause",
+        "else_clause",
+        "subshell",
+        "negated_command",
+        "function_definition",
+    }
+)
 
 # AST node types that ``_build_redirected_segment`` will recurse into via
 # ``_extract_segments`` to collect inner segments before attaching the redirect.
-_REDIRECT_INNER_TYPES = frozenset({
-    "list", "pipeline", "subshell",
-    "test_command", "compound_statement",
-    "if_statement", "while_statement", "until_statement",
-    "case_statement", "negated_command",
-    "function_definition", "declaration_command", "unset_command",
-})
+_REDIRECT_INNER_TYPES = frozenset(
+    {
+        "list",
+        "pipeline",
+        "subshell",
+        "test_command",
+        "compound_statement",
+        "if_statement",
+        "while_statement",
+        "until_statement",
+        "case_statement",
+        "negated_command",
+        "function_definition",
+        "declaration_command",
+        "unset_command",
+    }
+)
 
 
 def parse_pipeline(command: str) -> Pipeline:
@@ -192,7 +134,7 @@ def parse_pipeline(command: str) -> Pipeline:
     segments: list[Segment] = []
     try:
         segments.extend(_extract_segments(tree.root_node, source))
-    except _UnsupportedShellError as error:
+    except UnsupportedShellError as error:
         return Pipeline((), parseable=False, unparseable_reason=str(error))
     return Pipeline(tuple(segments), parseable=True)
 
@@ -240,7 +182,7 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
         # ``(( … ))`` and ``{ …; }`` share this AST node — disambiguate by source prefix.
         # Arithmetic is a pure predicate (in-process state only); brace groups are
         # ordinary command lists wrapped in braces.
-        if source[node.start_byte:node.start_byte + 2] == b"((":
+        if source[node.start_byte : node.start_byte + 2] == b"((":
             yield Segment(("((",), ())
             yield from _extract_substitution_segments(node, source)
             return
@@ -277,15 +219,14 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
         # words as subsequent argv tokens. Substitution-containing children are
         # dropped from argv and their inner commands yielded as separate segments.
         if not node.children:
-            raise _UnsupportedShellError("declaration_command missing keyword")
-        decl_argv: list[str] = [_node_text(node.children[0], source)]
+            raise UnsupportedShellError("declaration_command missing keyword")
+        decl_argv: list[str] = [node_text(node.children[0], source)]
         decl_inner: list[Segment] = []
         for child in node.named_children:
-            if child.type in ("command_substitution", "process_substitution") \
-                    or _node_contains_substitution(child):
+            if child.type in ("command_substitution", "process_substitution") or _node_contains_substitution(child):
                 decl_inner.extend(_extract_substitution_segments(child, source))
                 continue
-            decl_argv.append(_node_text(child, source))
+            decl_argv.append(node_text(child, source))
         yield Segment(tuple(decl_argv), ())
         yield from decl_inner
         return
@@ -298,17 +239,16 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
         unset_argv: list[str] = ["unset"]
         unset_inner: list[Segment] = []
         for child in node.named_children:
-            if child.type in ("command_substitution", "process_substitution") \
-                    or _node_contains_substitution(child):
+            if child.type in ("command_substitution", "process_substitution") or _node_contains_substitution(child):
                 unset_inner.extend(_extract_substitution_segments(child, source))
                 continue
             if child.type == "variable_name":
-                unset_argv.append(_node_text(child, source))
+                unset_argv.append(node_text(child, source))
                 continue
-            if child.type in _OPAQUE_ARG_TYPES:
-                unset_argv.append(_argument_text(child, source))
+            if child.type in OPAQUE_ARG_TYPES:
+                unset_argv.append(argument_text(child, source))
                 continue
-            raise _UnsupportedShellError(f"unsupported unset part {child.type!r}")
+            raise UnsupportedShellError(f"unsupported unset part {child.type!r}")
         yield Segment(tuple(unset_argv), ())
         yield from unset_inner
         return
@@ -335,11 +275,10 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
                 continue
             if child.type == "variable_name":
                 continue
-            if child.type in ("command_substitution", "process_substitution") \
-                    or _node_contains_substitution(child):
+            if child.type in ("command_substitution", "process_substitution") or _node_contains_substitution(child):
                 yield from _extract_substitution_segments(child, source)
         return
-    raise _UnsupportedShellError(f"unsupported shell node {node.type!r}")
+    raise UnsupportedShellError(f"unsupported shell node {node.type!r}")
 
 
 def _literal_stdout(segment: Segment) -> str | None:
@@ -366,8 +305,7 @@ def _build_segment(command_node: Node, source: bytes) -> tuple[Segment, tuple[Se
     argv: list[str] = []
     inner: list[Segment] = []
     for child in command_node.named_children:
-        if child.type in ("command_substitution", "process_substitution") \
-                or _node_contains_substitution(child):
+        if child.type in ("command_substitution", "process_substitution") or _node_contains_substitution(child):
             inner.extend(_extract_substitution_segments(child, source))
             continue
         if child.type == "variable_assignment":
@@ -375,17 +313,17 @@ def _build_segment(command_node: Node, source: bytes) -> tuple[Segment, tuple[Se
         if child.type == "command_name":
             inner_name = child.named_children
             if len(inner_name) != 1:
-                raise _UnsupportedShellError(f"unsupported command_name shape ({len(inner_name)} children)")
-            argv.append(_argument_text(inner_name[0], source))
+                raise UnsupportedShellError(f"unsupported command_name shape ({len(inner_name)} children)")
+            argv.append(argument_text(inner_name[0], source))
             continue
-        if child.type in _OPAQUE_ARG_TYPES:
-            argv.append(_argument_text(child, source))
+        if child.type in OPAQUE_ARG_TYPES:
+            argv.append(argument_text(child, source))
             continue
         if child.type == "herestring_redirect":
             # ``cmd <<< word`` feeds a string to stdin — input only, no file write.
             # A herestring carrying a substitution is extracted by the branch above.
             continue
-        raise _UnsupportedShellError(f"unsupported command part {child.type!r}")
+        raise UnsupportedShellError(f"unsupported command part {child.type!r}")
     return Segment(tuple(argv), ()), tuple(inner)
 
 
@@ -441,7 +379,7 @@ def _build_redirected_segment(node: Node, source: bytes) -> Iterator[Segment]:
             # tree-sitter-bash omits a bare stdin marker immediately before a
             # heredoc (``python - <<'PY'``) from the command node. Recover that
             # one literal token from the gap; other gap text is left untouched.
-            if source[previous_end:child.start_byte].strip() == b"-" and inner_segments:
+            if source[previous_end : child.start_byte].strip() == b"-" and inner_segments:
                 last = inner_segments[-1]
                 inner_segments[-1] = Segment(
                     (*last.argv, "-"),
@@ -457,9 +395,9 @@ def _build_redirected_segment(node: Node, source: bytes) -> Iterator[Segment]:
             substitution_segments.extend(_extract_substitution_segments(child, source))
             previous_end = child.end_byte
             continue
-        raise _UnsupportedShellError(f"unsupported redirected statement part {child.type!r}")
+        raise UnsupportedShellError(f"unsupported redirected statement part {child.type!r}")
     if not inner_segments:
-        raise _UnsupportedShellError("redirected statement missing command")
+        raise UnsupportedShellError("redirected statement missing command")
     # Words after a ``shell -c "…"`` wrapper are the wrapper's positional params
     # ($0, $1, …), not argv of the unwrapped inner command — they vanish with the
     # discarded wrapper. Spillover only rejoins argv when the last segment is a
@@ -482,14 +420,13 @@ def _heredoc_source(node: Node, source: bytes) -> tuple[str | None, bool]:
     body: str | None = None
     for child in node.named_children:
         if child.type == "heredoc_start":
-            start = _node_text(child, source)
+            start = node_text(child, source)
         elif child.type == "heredoc_body":
-            body = _node_text(child, source)
+            body = node_text(child, source)
     if body is None:
         return None, False
     quoted = bool(start) and (
-        (len(start) >= 2 and start[0] in "'\"" and start[-1] == start[0])
-        or start.startswith("\\")
+        (len(start) >= 2 and start[0] in "'\"" and start[-1] == start[0]) or start.startswith("\\")
     )
     # An unquoted body is literal only when bash has nothing to expand. Dollar,
     # backtick, and backslash all change heredoc processing at runtime.
@@ -679,7 +616,7 @@ def _build_redirect(node: Node, source: bytes) -> tuple[Redirect | None, tuple[s
     tree-sitter-bash will absorb ``b.py`` from ``cmd a 2>/dev/null b.py`` into
     the redirect node as a second ``word`` child, even though bash treats
     ``b.py`` as argv to ``cmd``. We take the first opaque-argument node (see
-    ``_OPAQUE_ARG_TYPES`` — covers bare words, quoted strings, and variable
+    ``OPAQUE_ARG_TYPES`` — covers bare words, quoted strings, and variable
     expansions like ``$SP``/``${SP}``/``$SP/file.log``) after the operator as
     the target and return the rest as spillover for the caller to re-attach to
     the surrounding command.
@@ -699,7 +636,7 @@ def _build_redirect(node: Node, source: bytes) -> tuple[Redirect | None, tuple[s
     substitutions: list[Segment] = []
     for child in node.children:
         if child.type == "file_descriptor":
-            fd = int(_node_text(child, source))
+            fd = int(node_text(child, source))
             continue
         if child.type in (">", ">>", "<", ">&", "&>", ">|", "&>>", "<&"):
             op = child.type
@@ -714,10 +651,10 @@ def _build_redirect(node: Node, source: bytes) -> tuple[Redirect | None, tuple[s
             # command so a deny rule on it still bites.
             substitutions.extend(_extract_substitution_segments(child, source))
             if target is None:
-                target = _node_text(child, source)
+                target = node_text(child, source)
             continue
-        if child.is_named and child.type in _OPAQUE_ARG_TYPES:
-            text = _argument_text(child, source)
+        if child.is_named and child.type in OPAQUE_ARG_TYPES:
+            text = argument_text(child, source)
             if target is None:
                 target = text
             else:
@@ -726,79 +663,5 @@ def _build_redirect(node: Node, source: bytes) -> tuple[Redirect | None, tuple[s
     if op is not None and target is None and substitutions:
         return None, tuple(extras), tuple(substitutions)
     if op is None or target is None:
-        raise _UnsupportedShellError("redirect target unparseable")
+        raise UnsupportedShellError("redirect target unparseable")
     return Redirect(fd=fd, op=op, target=target, is_fd_dup=op in (">&", "<&")), tuple(extras), tuple(substitutions)
-
-
-def _argument_text(node: Node, source: bytes) -> str:
-    if node.type == "string":
-        return _string_text(node, source)
-    if node.type == "raw_string":
-        # ``raw_string`` is a leaf in tree-sitter-bash (no named children); the
-        # body lives in the unnamed bytes between the surrounding single quotes.
-        text = _node_text(node, source)
-        if len(text) >= 2 and text.startswith("'") and text.endswith("'"):
-            return text[1:-1]
-        return text
-    if node.type == "ansi_c_string":
-        # ``$'...'``: strip the ``$'`` prefix and trailing ``'``. Escape sequences
-        # aren't interpreted — the literal content is sufficient for argv-prefix
-        # rule matching, and not interpreting is the conservative choice.
-        text = _node_text(node, source)
-        if len(text) >= 3 and text.startswith("$'") and text.endswith("'"):
-            return text[2:-1]
-        return text
-    if node.type == "word":
-        # Outside quotes, bash removes a backslash and takes the next character
-        # literally (``\rm`` -> ``rm``, ``--f\orce`` -> ``--force``) — the standard
-        # alias-bypass idiom. argv-keyed rule matching must see the same string
-        # bash's argv[0]/argv[n] would be, or a leading ``\`` silently defeats it.
-        return _unescape_word(_node_text(node, source))
-    if node.type in _OPAQUE_ARG_TYPES:
-        return _node_text(node, source)
-    raise _UnsupportedShellError(f"unsupported argument node {node.type!r}")
-
-
-def _unescape_word(text: str) -> str:
-    """Undo bash's outside-quotes backslash removal for a literal ``word`` token."""
-    if "\\" not in text:
-        return text
-    out: list[str] = []
-    i = 0
-    while i < len(text):
-        char = text[i]
-        if char == "\\" and i + 1 < len(text):
-            nxt = text[i + 1]
-            i += 2
-            if nxt != "\n":  # backslash-newline is a line continuation: drop both
-                out.append(nxt)
-            continue
-        out.append(char)
-        i += 1
-    return "".join(out)
-
-
-def _string_text(node: Node, source: bytes) -> str:
-    # Slice between the quotes rather than joining named ``string_content``
-    # children: tree-sitter leaves whitespace/newlines in unnamed gaps, and
-    # joining children corrupts multiline ``python -c`` source. Apply bash's
-    # limited double-quote backslash processing so argv reflects execution.
-    text = _node_text(node, source)
-    if len(text) < 2 or not text.startswith('"') or not text.endswith('"'):
-        raise _UnsupportedShellError("malformed double-quoted string")
-    body = text[1:-1]
-    parts: list[str] = []
-    index = 0
-    while index < len(body):
-        char = body[index]
-        if char == "\\" and index + 1 < len(body) and body[index + 1] in '$`"\\\n':
-            escaped = body[index + 1]
-            if escaped != "\n":
-                parts.append(escaped)
-            index += 2
-            continue
-        parts.append(char)
-        index += 1
-    return "".join(parts)
-def _node_text(node: Node, source: bytes) -> str:
-    return source[node.start_byte : node.end_byte].decode()

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import tomlkit
+from tomlkit.items import Bool, InlineTable, Table
 
 from ..domain import (
     AgentName,
@@ -120,7 +121,7 @@ class CodexAdapter(AgentAdapter):
             )
         touched = merge_nested_hooks(
             self.hooks_path,
-            add=[("PreToolUse", "Bash|apply_patch"), ("PermissionRequest", "Bash|apply_patch|mcp__.*")],
+            add=[("PreToolUse", ".*"), ("PermissionRequest", ".*")],
             strip=[],
             agent_name="codex",
             dry_run=dry_run,
@@ -158,13 +159,16 @@ def _enable_codex_hooks_feature(path: Path, *, dry_run: bool) -> list[Path]:
             raise PolicyError(f"{path}: {error}") from error
     else:
         doc = tomlkit.document()
-    features = doc.get("features")
-    if not isinstance(features, dict):
+    features: object = None
+    if "features" in doc:
+        features = doc["features"]
+    if not isinstance(features, (Table, InlineTable)):
         features = tomlkit.table()
         doc["features"] = features
 
     changed = False
-    if features.get("hooks") is not True:
+    enabled = features.item("hooks") if "hooks" in features else None
+    if not isinstance(enabled, Bool) or not enabled.value:
         features["hooks"] = True
         changed = True
     if "codex_hooks" in features:
@@ -173,7 +177,7 @@ def _enable_codex_hooks_feature(path: Path, *, dry_run: bool) -> list[Path]:
     if not changed:
         return []
     if not dry_run:
-        atomic_write(path, tomlkit.dumps(doc))
+        atomic_write(path, doc.as_string())
     return [path]
 
 

@@ -13,7 +13,7 @@ agentperm replaces those configs with one policy file plus a small adapter per a
 ## Domain model
 
 The system is built from a small set of sum-typed domain objects defined in
-`src/agentperm/domain.py` and re-exported from `agentperm`.
+`src/agentperm/domain/` and re-exported from `agentperm`.
 
 ### Decision
 
@@ -140,15 +140,18 @@ File-write verdicts are configurable via `shell.redirection` (`stdoutToFile`, `a
 Claude Code's hook payload includes `permission_mode`. When the user is in `bypassPermissions` mode they've explicitly turned permission checks off — so agentperm gets out of the way entirely:
 
 ```python
-def coerce_for_permission_mode(verdict, payload):
-    if payload.get("permission_mode") == "bypassPermissions":
+def coerce_for_permission_mode(verdict, payload, agent):
+    if agent is AgentName.Claude and payload.get("permission_mode") == "bypassPermissions":
         return Verdict(Decision.NoOpinion, "bypass: deferring to host")
     return verdict
 ```
 
 Claude fires `PreToolUse` hooks even in bypass mode, but agentperm returns `NoOpinion` (an empty `{}` envelope) for *everything* — `Ask`, `Allow`, even `Deny` — and lets Claude's native bypass proceed. agentperm does not second-guess a user who has explicitly chosen "skip all permissions." (The Claude write path still attaches any MCP-bypass `updatedInput`, so bypass still propagates to a downstream Codex MCP tool — see below.) If you want `deny` rules to keep biting, don't enable Claude's bypass; use [pane bypass](#pane-bypass-zellij), which *does* preserve `Deny`.
 
-Codex / OpenCode / Gemini don't ship a bypass mode in the hook payload, so this is a no-op there. They get an out-of-band equivalent via [pane bypass](#pane-bypass-zellij) below or [MCP bypass propagation](#mcp-bypass-propagation) when running as a Claude Code MCP server.
+Codex uses the same payload string for `approval_policy=never`, but with different semantics: it
+skips interactive `PermissionRequest` hooks while continuing to run `PreToolUse`. Agentperm therefore
+does not apply Claude's coercion to Codex, and hard denies still block in full-auto/YOLO mode. Current
+Codex routes code-mode nested tools through the same registry and `PreToolUse` boundary.
 
 ### MCP bypass propagation
 
@@ -275,7 +278,12 @@ called functions or inspect other interpreted languages:
 - **Other interpreters and unsupported Python forms:** `perl -e "…"`, `ruby -e`, `node -e`, `awk 'prog'`, `python -m`, scripts, and interactive stdin remain argv-only. Inline Python is inspected only when an allow-side `Python(readonly)` rule is present.
 - **Unrecognized executor prefixes:** the decomposed/​recognized wrapper lists (`command`, `env`, `timeout`, …) are not exhaustive. An executor not on either list (`busybox rm …`, `find . -exec rm …`) is treated as an ordinary command and returns `NoOpinion`.
 
-`NoOpinion` defers to the host agent. Under any **bypass** agentperm defers entirely anyway (Claude bypass → `{}`; pane bypass → `Allow`), so commands the parser can't fully decompose are **not** caught under bypass — bypass means "I accept the risk." In normal mode, an unrecognized executor returns `NoOpinion` (host decides) while a *recognized-but-undecomposable* wrapper returns `Ask`. Treat shell rules and `Python(readonly)` as intent classification, not a security sandbox, and don't rely on bypass as a boundary against a command crafted to evade analysis.
+`NoOpinion` defers to the host agent. Claude's explicit **bypass** makes agentperm defer entirely,
+while pane bypass converts Ask/NoOpinion to Allow but preserves Deny. Codex full-auto also preserves
+`PreToolUse` denies. In normal mode, an unrecognized executor returns `NoOpinion` (host decides)
+while a *recognized-but-undecomposable* wrapper returns `Ask`. Treat shell rules and
+`Python(readonly)` as intent classification, not a security sandbox, and don't rely on any bypass
+mode as a boundary against a command crafted to evade analysis.
 
 ## Why Tree-sitter Bash
 
@@ -293,10 +301,18 @@ Tree-sitter Bash is a maintained Bash grammar. It eliminates the regex parser's 
 ```
 src/agentperm/
 ├── __init__.py           Re-export shim — all public names importable from `agentperm`
-├── domain.py             Decision, Verdict, Rule types, Policy engine, Request types
+├── domain/
+│   ├── model.py          Decision, Verdict, Rule and Request value objects
+│   └── evaluation.py     Policy decision and precedence engine
 ├── shell.py              Tree-sitter Bash → Pipeline (parse_pipeline, segment extraction)
+├── shell_tokens.py       Typed Tree-sitter token boundary
+├── shell_words.py        Shell word and substitution analysis
+├── shell_redirection.py  Redirect classification
 ├── shellpattern.py       Shell(...) DSL parser + matcher
 ├── pythoncode.py         Shallow AST analysis for inline Python (Python(readonly))
+├── command_arguments.py  Typed argparse namespace
+├── hook_passthrough.py   Transparent unresolved-hook relay
+├── json_boundary.py      Checked JSON/JSONC decoding
 ├── sql/                  SQL domain, document adapters, SQLGlot boundary, policy service
 ├── adapters/             Host adapters and shared apply_patch translation
 ├── rules.py              Rule parsing: string/dict → Rule objects
@@ -318,7 +334,10 @@ src/agentperm/
 
 ## Type safety
 
-The codebase runs under `basedpyright` strict mode. There is no `Any`. JSON values are typed as `JsonValue` (a recursive union of scalars, `Sequence`, and `Mapping`). `tree-sitter-bash` and `tomlkit` ship partial type information; their boundaries are isolated in `pyproject.toml` and narrowed at the seam. Domain code downstream of those seams sees only typed values.
+The codebase runs under `basedpyright` strict mode with explicit `Any` and unknown types rejected.
+JSON values are typed as `JsonValue` (a recursive union of scalars, lists and mappings).
+`tree-sitter-bash`, SQLGlot, TOML and JSON inputs are narrowed at dedicated seams, so domain code
+downstream sees only typed values.
 
 ---
 

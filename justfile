@@ -16,6 +16,7 @@ test:
 
 lint:
     uv run ruff check .
+    uv run pylint --disable=all --enable=too-many-lines --max-module-lines=700 src tests
 
 fmt:
     uv run ruff format .
@@ -23,8 +24,14 @@ fmt:
 typecheck:
     uv run basedpyright src tests
 
-# All three gates — matches the PR checklist in CONTRIBUTING.md.
-check: lint typecheck test
+dead-code:
+    uv run vulture src tests --min-confidence 90
+
+duplicate-code:
+    uv run pylint --disable=all --enable=duplicate-code --min-similarity-lines=12 src
+
+# Standard quality gates — matches the PR checklist in CONTRIBUTING.md.
+check: lint typecheck dead-code duplicate-code test
 
 # Install locked dependencies and run every CI gate.
 ci: sync check

@@ -6,20 +6,18 @@ import os
 import tempfile
 from pathlib import Path
 
-import pyjson5
-
-from .domain import JsonObject, narrow_json
+from .domain import JsonObject
 from .errors import PolicyError
+from .json_boundary import decode_jsonc
 
 
 def read_json(path: Path) -> JsonObject:
     if not path.exists():
         return {}
     try:
-        decoded: object = pyjson5.decode(path.read_text())
+        narrowed = decode_jsonc(path.read_text())
     except Exception as error:
         raise PolicyError(f"{path}: {error}") from error
-    narrowed = narrow_json(decoded)
     return narrowed if isinstance(narrowed, dict) else {}
 
 

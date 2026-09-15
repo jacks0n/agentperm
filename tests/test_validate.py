@@ -172,9 +172,7 @@ def test_cli_validate_deprecated_edit_is_a_warning_only(
     assert '"Write(src/**)"' in out
 
 
-def test_cli_validate_explicit_root_follows_includes(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_cli_validate_explicit_root_follows_includes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     included = tmp_path / "included.jsonc"
     included.write_text('{"permissions":{"allow":[""]}}')
     root = tmp_path / "root.jsonc"
@@ -186,9 +184,7 @@ def test_cli_validate_explicit_root_follows_includes(
     assert "silently ignored" in out
 
 
-def test_cli_validate_reports_unmatched_include_glob(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_cli_validate_reports_unmatched_include_glob(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root = tmp_path / "root.jsonc"
     root.write_text('{"include":["missing/*.jsonc"]}')
 

@@ -13,8 +13,10 @@ import pytest
 
 import agentperm.cli as cli_module
 from agentperm import POLICY_FILENAME, BashCommand, Policy, PolicyError, main
+from agentperm.domain import JsonObject
+from tests.json_support import decode_object
 
-EMPTY_DEFAULT = {"version": 1, "permissions": {"allow": [], "ask": [], "deny": []}}
+EMPTY_DEFAULT: JsonObject = {"version": 1, "permissions": {"allow": [], "ask": [], "deny": []}}
 DENY_RM = '{"version":1,"permissions":{"deny":["Bash(rm:*)"]}}'
 
 
@@ -46,18 +48,19 @@ def _init_repo(path: Path) -> None:
 
 def _run_check(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command: str, cwd: Path
-) -> dict[str, object]:
+) -> JsonObject:
     # Mirrors a real hook: the command's cwd travels in the payload, not the bridge process's cwd.
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(cwd)})
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
     assert main(["check", "--agent", "claude", "--event", "PreToolUse"]) == 0
     out = capsys.readouterr().out.strip()
-    return json.loads(out) if out else {}
+    return decode_object(out) if out else {}
 
 
-def _decision(verdict: dict[str, object]) -> str | None:
+def _decision(verdict: JsonObject) -> str | None:
     hook = verdict.get("hookSpecificOutput")
-    return hook.get("permissionDecision") if isinstance(hook, dict) else None
+    decision = hook.get("permissionDecision") if isinstance(hook, dict) else None
+    return decision if isinstance(decision, str) else None
 
 
 # --- edit: scope routing ----------------------------------------------------
@@ -228,9 +231,7 @@ def test_check_applies_python_readonly_ast_policy(
 ) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    (home / POLICY_FILENAME).write_text(
-        '{"version":1,"permissions":{"allow":["Python(readonly)"]}}'
-    )
+    (home / POLICY_FILENAME).write_text('{"version":1,"permissions":{"allow":["Python(readonly)"]}}')
     monkeypatch.setenv("HOME", str(home))
 
     readonly = _run_check(
@@ -242,11 +243,73 @@ def test_check_applies_python_readonly_ast_policy(
     mutation = _run_check(
         monkeypatch,
         capsys,
-        'python -c "open(\'out\', \'w\')"',
+        "python -c \"open('out', 'w')\"",
         cwd=tmp_path,
     )
     assert _decision(readonly) == "allow"
     assert _decision(mutation) == "ask"
+
+
+def test_check_passes_original_payload_to_passthrough_hook_when_policy_is_unresolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    original = ' {"tool_name":"Bash","tool_input":{"command":"unknown"}}\n'
+    monkeypatch.setattr(sys, "stdin", io.StringIO(original))
+
+    rc = main(
+        [
+            "check",
+            "--agent",
+            "codex",
+            "--event",
+            "PermissionRequest",
+            "--passthrough",
+            sys.executable,
+            "-c",
+            "import sys; data=sys.stdin.read(); sys.stdout.write(data); "
+            "sys.stderr.write('fallback-stderr'); raise SystemExit(7)",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 7
+    assert captured.out == original
+    assert captured.err == "fallback-stderr"
+
+
+def test_check_does_not_run_passthrough_hook_for_decisive_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / POLICY_FILENAME).write_text('{"version":1,"permissions":{"allow":["Bash(cat:*)"]}}')
+    monkeypatch.setenv("HOME", str(home))
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "cat README.md"}})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+
+    rc = main(
+        [
+            "check",
+            "--agent",
+            "codex",
+            "--event",
+            "PermissionRequest",
+            "--passthrough",
+            str(tmp_path / "must-not-run"),
+        ]
+    )
+
+    assert rc == 0
+    assert "allow" in capsys.readouterr().out
+
+
+def test_check_rejects_empty_passthrough_command() -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["check", "--agent", "codex", "--event", "PermissionRequest", "--passthrough"])
+    assert exit_info.value.code == 2
 
 
 # --- why: human-readable decision explanations --------------------------------

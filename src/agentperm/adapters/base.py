@@ -8,6 +8,7 @@ import shutil
 import sys
 from abc import ABC
 from collections.abc import Iterator
+from copy import deepcopy
 from pathlib import Path
 from typing import ClassVar
 
@@ -124,8 +125,7 @@ def resolve_bridge_command() -> str:
     if resolved:
         return resolved
     print(
-        f"warning: '{BRIDGE_HOOK_MARKER}' not on PATH at install time; "
-        f"hooks will rely on runtime PATH",
+        f"warning: '{BRIDGE_HOOK_MARKER}' not on PATH at install time; hooks will rely on runtime PATH",
         file=sys.stderr,
     )
     return BRIDGE_HOOK_MARKER
@@ -140,8 +140,7 @@ def _bridge_command_string(agent: str, event: str) -> str:
     anyway as a defensive habit.
     """
     return " ".join(
-        shlex.quote(part)
-        for part in (resolve_bridge_command(), "check", "--agent", agent, "--event", event)
+        shlex.quote(part) for part in (resolve_bridge_command(), "check", "--agent", agent, "--event", event)
     )
 
 
@@ -189,7 +188,51 @@ def is_bridge_hook(hook: JsonValue) -> bool:
     return Path(parts[0]).name == BRIDGE_HOOK_MARKER and parts[1] == "check"
 
 
-def _strip_bridge_groups(groups: JsonArray) -> JsonArray:
+def _without_bridge(hook: JsonValue) -> JsonArray:
+    """Remove our command while restoring an explicitly configured passthrough hook."""
+    if not is_bridge_hook(hook):
+        return [hook]
+    if not isinstance(hook, dict):
+        return []
+    passthrough = _passthrough_parts(hook)
+    if passthrough is None:
+        return []
+    return [{**hook, "command": shlex.join(passthrough)}] if passthrough else []
+
+
+def _passthrough_parts(hook: JsonValue) -> tuple[str, ...] | None:
+    if not is_bridge_hook(hook) or not isinstance(hook, dict):
+        return None
+    command = hook.get("command")
+    if not isinstance(command, str):
+        return None
+    parts = shlex.split(command, posix=True)
+    if "--passthrough" not in parts:
+        return None
+    return tuple(parts[parts.index("--passthrough") + 1 :])
+
+
+def _nested_passthrough(groups: JsonArray) -> tuple[str, ...] | None:
+    for group in groups:
+        hooks = group.get("hooks") if isinstance(group, dict) else None
+        if not isinstance(hooks, list):
+            continue
+        for hook in hooks:
+            if (parts := _passthrough_parts(hook)) is not None:
+                return parts
+    return None
+
+
+def _with_passthrough(hook: JsonObject, passthrough: tuple[str, ...] | None) -> JsonObject:
+    if not passthrough:
+        return hook
+    command = hook.get("command")
+    if not isinstance(command, str):
+        return hook
+    return {**hook, "command": f"{command} --passthrough {shlex.join(passthrough)}"}
+
+
+def _strip_bridge_groups(groups: JsonArray, *, restore_passthrough: bool = True) -> JsonArray:
     """Remove bridge entries from nested ``{matcher, hooks: [...]}`` groups.
 
     Drops groups whose hooks list is left empty; preserves all non-bridge entries
@@ -204,16 +247,24 @@ def _strip_bridge_groups(groups: JsonArray) -> JsonArray:
         if not isinstance(hooks, list):
             kept.append(group)
             continue
-        remaining: JsonArray = [hook for hook in hooks if not is_bridge_hook(hook)]
+        remaining: JsonArray = [
+            restored
+            for hook in hooks
+            for restored in (_without_bridge(hook) if restore_passthrough else ([] if is_bridge_hook(hook) else [hook]))
+        ]
         if not remaining:
             continue
         kept.append({**group, "hooks": remaining})
     return kept
 
 
-def _strip_bridge_entries(entries: JsonArray) -> JsonArray:
+def _strip_bridge_entries(entries: JsonArray, *, restore_passthrough: bool = True) -> JsonArray:
     """Remove bridge entries from a flat rulesync-style entry list."""
-    return [entry for entry in entries if not is_bridge_hook(entry)]
+    return [
+        restored
+        for entry in entries
+        for restored in (_without_bridge(entry) if restore_passthrough else ([] if is_bridge_hook(entry) else [entry]))
+    ]
 
 
 def _section(parent: JsonObject, key: str) -> JsonObject:
@@ -266,13 +317,18 @@ def merge_rulesync_hooks(
     """
     path = _rulesync_hooks_path()
     before = read_json(path)
-    after: JsonObject = json.loads(json.dumps(before))
+    after: JsonObject = deepcopy(before)
     after.setdefault("version", 1)
     agent_section = _section(after, block)
     hooks = _section(agent_section, "hooks")
     for rulesync_key, bridge_event, matcher in add:
-        entries = _strip_bridge_entries(_ensure_list(hooks, rulesync_key))
-        entries.append(_rulesync_entry(agent_name, bridge_event, matcher))
+        current = _ensure_list(hooks, rulesync_key)
+        passthrough = next(
+            (parts for entry in current if (parts := _passthrough_parts(entry)) is not None),
+            None,
+        )
+        entries = _strip_bridge_entries(current, restore_passthrough=False)
+        entries.append(_with_passthrough(_rulesync_entry(agent_name, bridge_event, matcher), passthrough))
         hooks[rulesync_key] = entries
     for event_name in strip:
         if event_name in hooks:
@@ -297,7 +353,7 @@ def strip_rulesync_hooks(*, block: str, keys: list[str], dry_run: bool) -> list[
     if not path.exists():
         return []
     before = read_json(path)
-    after: JsonObject = json.loads(json.dumps(before))
+    after: JsonObject = deepcopy(before)
     block_section = after.get(block)
     hooks = block_section.get("hooks") if isinstance(block_section, dict) else None
     if not isinstance(block_section, dict) or not isinstance(hooks, dict):
@@ -327,7 +383,7 @@ def strip_nested_hooks(path: Path, *, events: list[str], dry_run: bool) -> list[
     if not path.exists():
         return []
     before = read_json(path)
-    after: JsonObject = json.loads(json.dumps(before))
+    after: JsonObject = deepcopy(before)
     hooks_section = after.get("hooks")
     if not isinstance(hooks_section, dict):
         return []
@@ -362,11 +418,17 @@ def merge_nested_hooks(
     keys are the per-tool event names.
     """
     before = read_json(path)
-    after: JsonObject = json.loads(json.dumps(before))
+    after: JsonObject = deepcopy(before)
     hooks_section = _section(after, "hooks")
     for event_name, matcher in add:
-        groups = _strip_bridge_groups(_ensure_list(hooks_section, event_name))
-        groups.append(_hook_group(matcher, agent=agent_name, event=event_name))
+        current = _ensure_list(hooks_section, event_name)
+        passthrough = _nested_passthrough(current)
+        groups = _strip_bridge_groups(current, restore_passthrough=False)
+        group = _hook_group(matcher, agent=agent_name, event=event_name)
+        group_hooks = group.get("hooks")
+        if isinstance(group_hooks, list) and group_hooks and isinstance(group_hooks[0], dict):
+            group_hooks[0] = _with_passthrough(group_hooks[0], passthrough)
+        groups.append(group)
         hooks_section[event_name] = groups
     for event_name in strip:
         if event_name in hooks_section:
@@ -378,4 +440,3 @@ def merge_nested_hooks(
                 else:
                     del hooks_section[event_name]
     return _write_json_if_changed(path, before, after, dry_run=dry_run)
-

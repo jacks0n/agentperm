@@ -110,8 +110,7 @@ def test_shell_sql_option_values_validate_every_occurrence() -> None:
     )
     allowed = _decide(
         policy,
-        "dbcli --host db.internal -q 'select * from reporting.meters' "
-        "--query='with x as (select 1) select * from x'",
+        "dbcli --host db.internal -q 'select * from reporting.meters' --query='with x as (select 1) select * from x'",
     )
     denied_by_semantics = _decide(
         policy,
@@ -314,7 +313,7 @@ def test_python_call_capture_is_target_and_argument_driven() -> None:
     )
     read = "python -c \"project.database.inspect(sql='select * from reporting.meters')\""
     write = "python -c \"project.database.inspect(sql='update reporting.meters set active=false')\""
-    dynamic = "python -c \"project.database.inspect(sql=get_query())\""
+    dynamic = 'python -c "project.database.inspect(sql=get_query())"'
     assert _decide(policy, read).decision is Decision.Allow
     assert _decide(policy, write).decision is Decision.Ask
     assert _decide(policy, dynamic).decision is Decision.Ask
@@ -371,9 +370,9 @@ def test_connection_environment_and_non_sql_options_stay_generic() -> None:
     )
     second = "select meter_id from process.meter order by meter_id fetch first 20 rows only"
     command = (
-        "source /project/config.env && CONNECTION_SECRET=\"$SECRET\" /custom/bin/dbcli -X "
-        "-h \"$HOST\" -p \"$PORT\" -U \"$USER\" -d \"$DATABASE\" "
-        f"-v STOP=1 -P pager=off -c \"{first}\" -c \"{second}\""
+        'source /project/config.env && CONNECTION_SECRET="$SECRET" /custom/bin/dbcli -X '
+        '-h "$HOST" -p "$PORT" -U "$USER" -d "$DATABASE" '
+        f'-v STOP=1 -P pager=off -c "{first}" -c "{second}"'
     )
     assert _decide(policy, command).decision is Decision.Allow
 
@@ -387,10 +386,7 @@ def test_postgres_explain_classifies_the_inner_statement() -> None:
           "Shell(dbcli sqlvalues(<SQL:reporting>,-q))"
         ]""",
     )
-    read = (
-        "set statement_timeout='20s'; "
-        "explain (analyze, buffers, summary) select * from reporting.meters"
-    )
+    read = "set statement_timeout='20s'; explain (analyze, buffers, summary) select * from reporting.meters"
     assert _decide(policy, f'dbcli -q "{read}"').decision is Decision.Allow
     assert _decide(policy, "dbcli -q 'explain delete from reporting.meters'").decision is Decision.Ask
     facts = parse_sql(

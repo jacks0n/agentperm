@@ -65,6 +65,9 @@ Two mechanisms deliberately suppress prompts; both are opt-in and both are bound
   permission checks, and agentperm does not second-guess the host
   (`coerce_for_permission_mode`, `src/agentperm/cli.py`). Under host bypass, **deny rules do
   not bite**.
+- **Codex full-auto/YOLO** (`approval_policy=never`) uses the same `permission_mode` string in its
+  hook payload but has a narrower contract: prompts are disabled while `PreToolUse` hooks still run.
+  Agentperm preserves hard denies for direct and code-mode nested tool calls in this mode.
 - **Zellij pane bypass**: a per-pane flag file coerces ask/NoOpinion to allow, but **deny rules
   still bite** — which is why it's the recommended alternative to host bypass. Hardening:
   session/pane names are rejected if they contain path-traversal characters; the flag directory
@@ -81,6 +84,9 @@ Two mechanisms deliberately suppress prompts; both are opt-in and both are bound
   This prevents malformed input from bypassing scoped mutation rules.
 - **Malformed policy file → fail closed to ask.** Every decision returns **ask** with a
   rationale naming the failing file, so a broken policy is loud, not silently permissive.
+- **Pass-through hooks are explicitly trusted.** `check --passthrough` executes the configured
+  command directly and gives it the original, potentially sensitive hook input only when Agentperm
+  cannot allow or deny. Treat the downstream hook configuration as executable code.
 - **Malformed `Shell(...)` and `Python(...)` patterns fail loudly at load** (`PolicyError`),
   rather than being dropped. Some mistakes are still silent at runtime, though: a typo'd rule
   prefix (`"Shel(git status)"`) parses as a named-tool rule that never matches a shell command,
@@ -88,8 +94,8 @@ Two mechanisms deliberately suppress prompts; both are opt-in and both are bound
   these cases before they cost you protection.
 
 Adapter behavior is constrained by each host. Gemini maps Ask to a blocking deny with an
-approval-required rationale; Kiro represents both Ask and Deny as exit code 2. OpenCode and Codex
-use pre-execution hooks for hard denies so native allow settings cannot bypass a denied patch. See
+approval-required rationale; Kiro emits distinct structured Ask and Deny decisions. OpenCode and
+Codex use pre-execution hooks for hard denies so native allow settings cannot bypass a denied patch. See
 the [capability matrix](docs/capabilities.md#enforcement-behavior) for the full comparison.
 
 ## Diagnostic traces are not an audit system
@@ -110,4 +116,4 @@ Please report suspected vulnerabilities privately via
 [GitHub security advisories](https://github.com/jacks0n/agentperm/security/advisories/new)
 rather than public issues. Reports about deny rules being bypassable through command
 composition or encoding are especially valuable — that class is in scope and has dedicated
-regression tests (`tests/test_policy.py`, the `test_deny_bites_through_*` family).
+regression coverage in the parser, shell-policy and policy-decision test suites.

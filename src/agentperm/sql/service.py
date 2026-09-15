@@ -16,11 +16,7 @@ class SqlPolicyService:
     _failure_cache: dict[tuple[str, str, str], str] = field(default_factory=dict, init=False)
 
     def decide(self, captured: CapturedSql) -> Verdict:
-        deny_rules = tuple(
-            (decision, rule)
-            for decision, rule in self.rules
-            if decision is Decision.Deny
-        )
+        deny_rules = tuple((decision, rule) for decision, rule in self.rules if decision is Decision.Deny)
         non_deny_rules = tuple(
             (decision, rule)
             for decision, rule in self.rules

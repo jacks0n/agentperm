@@ -38,16 +38,15 @@ SQL captures use SQLGlot plus explicit dialect policy and fail closed on opaque 
 |---|---|---|---|---|---|
 | Hook stage | PreToolUse | PreToolUse + PermissionRequest | tool.execute.before + permission.ask | BeforeTool | PreToolUse |
 | Allow | explicit pre-approval | emitted at PermissionRequest | permission hook approves; pre-hook is deny-only | explicit allow | exit 0 / host proceeds |
-| Ask | native prompt | falls through to native prompt | falls through to native prompt | host API cannot request approval; blocks with an approval-required reason | exit 2; blocks |
-| Deny | pre-execution block | PreToolUse veto; PermissionRequest also denies | pre-execution exception; permission hook also denies | pre-execution block | exit 2; blocks |
+| Ask | native prompt | falls through to native prompt | falls through to native prompt | host API cannot request approval; blocks with an approval-required reason | structured ask |
+| Deny | pre-execution block | PreToolUse veto; PermissionRequest also denies | pre-execution exception; permission hook also denies | pre-execution block | structured deny |
 | No opinion | native flow | native flow | native flow | native flow | exit 0 / native flow |
 | Recognized malformed operation | generic payload defers | unparseable patch denies | unparseable patch denies | generic payload defers | missing shell command asks/blocks |
-| Host bypass | Claude `bypassPermissions` makes agentperm defer entirely | none in payload | none in payload | none in payload | none in payload |
+| Host bypass | Claude `bypassPermissions` makes agentperm defer entirely | full-auto skips prompts; PreToolUse Deny preserved | none in payload | none in payload | none in payload |
 | Pane bypass | Ask/NoOpinion → Allow; Deny preserved | same | same | same | same |
 
-Gemini and Kiro cannot preserve the interactive distinction between Ask and Deny through their
-current pre-tool hook contracts. The rationale still says whether policy requested approval or
-denied the action.
+Gemini cannot preserve the interactive distinction between Ask and Deny through its current
+pre-tool hook contract. Kiro receives distinct structured permission decisions and rationales.
 
 ## Semantic file operations
 

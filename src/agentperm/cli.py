@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .adapters import ADAPTERS, ClaudeAdapter, select_adapter
 from .adapters.base import mcp_bypass_input
+from .command_arguments import CommandArguments
 from .domain import (
     POLICY_FILENAME,
     AgentName,
@@ -29,6 +30,8 @@ from .domain import (
     narrow_json,
 )
 from .fileio import atomic_write
+from .hook_passthrough import run_passthrough
+from .json_boundary import decode_json
 from .policy import (
     DEFAULT_TEMPLATES,
     PolicyError,
@@ -157,6 +160,12 @@ def main(argv: list[str] | None = None) -> int:
     check = sub.add_parser("check", help="runtime decision; reads stdin, writes stdout")
     check.add_argument("--agent", required=True, choices=[a.value for a in AgentName])
     check.add_argument("--event", required=True)
+    check.add_argument(
+        "--passthrough",
+        nargs=argparse.REMAINDER,
+        metavar="COMMAND",
+        help="pass the original hook input to COMMAND when policy does not allow or deny",
+    )
 
     edit = sub.add_parser(
         "edit",
@@ -177,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     edit.set_defaults(edit_local=False)
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(argv, namespace=CommandArguments())
 
     if args.command == "install":
         return _cmd_install(mode=args.mode, dry_run=args.dry_run)
@@ -197,7 +206,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "why":
         return _cmd_why(command=args.shell_command)
     if args.command == "check":
-        return cmd_check(AgentName(args.agent), args.event)
+        if args.passthrough is not None and not args.passthrough:
+            parser.error("--passthrough requires a command")
+        return cmd_check(AgentName(args.agent), args.event, passthrough=tuple(args.passthrough or ()))
     if args.command == "edit":
         return _cmd_edit(local=args.edit_local)
     parser.error(f"unknown command {args.command}")
@@ -306,21 +317,31 @@ def _cmd_import() -> int:
     return 0
 
 
-def cmd_check(agent: AgentName, event: str) -> int:
+def cmd_check(agent: AgentName, event: str, *, passthrough: tuple[str, ...] = ()) -> int:
+    original_payload = sys.stdin.read()
     try:
-        raw_payload: object = json.load(sys.stdin)
+        raw_payload = decode_json(original_payload)
     except json.JSONDecodeError:
         _trace(agent, event, None, None, "json decode failed")
+        fallback = run_passthrough(passthrough, original_payload)
+        if fallback is not None:
+            return fallback
         json.dump({}, sys.stdout)
         return 0
     try:
         payload_value = narrow_json(raw_payload)
     except PolicyError:
         _trace(agent, event, None, None, "payload narrow failed")
+        fallback = run_passthrough(passthrough, original_payload)
+        if fallback is not None:
+            return fallback
         json.dump({}, sys.stdout)
         return 0
     if not isinstance(payload_value, dict):
         _trace(agent, event, None, None, "payload not object")
+        fallback = run_passthrough(passthrough, original_payload)
+        if fallback is not None:
+            return fallback
         json.dump({}, sys.stdout)
         return 0
     payload: JsonObject = payload_value
@@ -329,6 +350,9 @@ def cmd_check(agent: AgentName, event: str) -> int:
     request = adapter.parse_event(payload, event)
     if request is None:
         _trace(agent, event, payload, None, "request unparseable")
+        fallback = run_passthrough(passthrough, original_payload)
+        if fallback is not None:
+            return fallback
         json.dump({}, sys.stdout)
         return 0
     cwd_value = payload.get("cwd")
@@ -338,11 +362,17 @@ def cmd_check(agent: AgentName, event: str) -> int:
         policy = merged_policy(cwd=cwd)
     except PolicyError as error:
         _trace(agent, event, payload, None, f"policy load failed: {error}")
-        return adapter.write_verdict(Verdict(Decision.Ask, f"policy load failed: {error}"), event)
+        verdict = Verdict(Decision.Ask, f"policy load failed: {error}")
+        fallback = run_passthrough(passthrough, original_payload)
+        return fallback if fallback is not None else adapter.write_verdict(verdict, event)
     verdict = policy.decide(request)
-    verdict = coerce_for_permission_mode(verdict, payload)
+    verdict = coerce_for_permission_mode(verdict, payload, adapter.name)
     verdict, coercion = coerce_for_pane_bypass(verdict, os.environ)
     _trace(agent, event, payload, verdict, None, coercion)
+    if verdict.decision not in (Decision.Allow, Decision.Deny):
+        fallback = run_passthrough(passthrough, original_payload)
+        if fallback is not None:
+            return fallback
     if isinstance(adapter, ClaudeAdapter):
         adapter.write_verdict(verdict, event, updated_input=mcp_bypass_input(payload))
         return 0
@@ -433,7 +463,7 @@ def _trace(
         pass
 
 
-def coerce_for_permission_mode(verdict: Verdict, payload: JsonObject) -> Verdict:
+def coerce_for_permission_mode(verdict: Verdict, payload: JsonObject, agent: AgentName) -> Verdict:
     """Under Claude's ``bypassPermissions`` mode, agentperm defers entirely.
 
     Claude fires ``PreToolUse`` hooks even in bypass mode, but the user has explicitly opted
@@ -442,7 +472,7 @@ def coerce_for_permission_mode(verdict: Verdict, payload: JsonObject) -> Verdict
     still attaches any MCP-bypass ``updatedInput`` (so bypass propagates to a downstream Codex
     MCP tool). Pane bypass and non-bypass modes are unaffected.
     """
-    if payload.get("permission_mode") == "bypassPermissions":
+    if agent is AgentName.Claude and payload.get("permission_mode") == "bypassPermissions":
         return Verdict(Decision.NoOpinion, "bypass: deferring to host")
     return verdict
 

@@ -50,16 +50,37 @@ Claude Code concatenates hooks across user (`~/.claude/settings.json`), project 
 
 ## Codex CLI
 
-**Hooks:** `PreToolUse` (matcher `Bash|apply_patch`) and `PermissionRequest` (matcher `Bash|apply_patch|mcp__.*`) in `~/.codex/hooks.json`. In rulesync mode, both events are merged into `codexcli.hooks.{preToolUse,permissionRequest}` of `~/.rulesync/hooks.json` with matcher `.*`.
+**Hooks:** `PreToolUse` and `PermissionRequest`, both with matcher `.*`, in `~/.codex/hooks.json`. In rulesync mode, both events are merged into `codexcli.hooks.{preToolUse,permissionRequest}` of `~/.rulesync/hooks.json` with the same matcher.
 
 Codex requires `[features].hooks = true` in `~/.codex/config.toml`. `install` sets this automatically in direct mode; in rulesync mode, it's rulesync's responsibility — agentperm does not touch `config.toml`. `uninstall` strips the hook entries but leaves the feature flag: it is inert without entries, and other tools may rely on it.
 
 ### Two events, two roles
 
-- **`PreToolUse`:** fires before matching Bash and `apply_patch` calls. agentperm only emits a verdict here if the decision is `Deny` — this is the fast-path for hard denies. Allow / Ask / NoOpinion fall through to Codex's normal permission flow. Codex added `apply_patch` hook support in 0.123.0; rerun `agentperm install` after upgrading agentperm so the matcher is refreshed.
+- **`PreToolUse`:** fires before hook-capable tools, including Bash and `apply_patch`. agentperm only emits a verdict here if the decision is `Deny` — this is the fast-path for hard denies. Allow / Ask / NoOpinion fall through to Codex's normal permission flow. Code-mode nested tools traverse the same registry and hook boundary, so a nested `apply_patch` is checked before execution too.
 - **`PermissionRequest`:** fires when Codex would otherwise prompt the user. Here agentperm can emit `allow` (silently approve) or `deny` (silently reject); other decisions fall through to the prompt.
 
 This split mirrors Codex's design: `PreToolUse` is for vetoes, `PermissionRequest` is for approvals.
+Under Codex full-auto/YOLO (`approval_policy=never`), `PermissionRequest` is skipped and the hook
+payload reports `permission_mode: "bypassPermissions"`, but `PreToolUse` still runs and Agentperm
+continues to enforce hard denies. The similarly named Claude mode has deliberately different semantics.
+
+### Pass-through to other PermissionRequest integrations
+
+Codex starts separate matching synchronous handlers for one event concurrently. Consequently, an
+integration that needs to observe whether a human prompt remains cannot run as a separate
+`PermissionRequest` handler. Configure it after Agentperm with `--passthrough`:
+
+```sh
+agentperm check --agent codex --event PermissionRequest \
+  --passthrough notification-tool hook --agent codex PermissionRequest
+```
+
+Agentperm returns immediately for allow or deny. For ask, no opinion, or input it cannot interpret,
+it invokes the remaining command directly (without a shell), sends the exact original hook input to
+its stdin, and relays stdout, stderr and exit status unchanged. Agentperm does not identify or import
+the downstream tool. In RuleSync mode, keep the composed command as the single entry in
+`codexcli.hooks.permissionRequest` in `~/.rulesync/hooks.json`, rather than editing the generated
+Codex file.
 
 **`PermissionRequest` payload (Codex CLI 0.128+):**
 ```json
@@ -70,7 +91,7 @@ This split mirrors Codex's design: `PreToolUse` is for vetoes, `PermissionReques
   "cwd": "/path/to/cwd",
   "hook_event_name": "PermissionRequest",
   "model": "...",
-  "permission_mode": "default",
+  "permission_mode": "default" | "bypassPermissions",
   "tool_name": "Bash" | "apply_patch" | "mcp__...",
   "tool_input": { "command": "..." }
 }
@@ -176,17 +197,13 @@ OpenCode names tools in lowercase (`bash`, `read`, `grep`). agentperm maps these
 }
 ```
 
-**Verdict protocol — exit codes (not JSON):**
-
-| Exit code | Meaning |
-|---|---|
-| `0` | Allow — tool execution proceeds |
-| `2` | Block — STDERR is returned to the LLM as the reason |
-
-Unlike the other adapters, Kiro does not use a JSON stdout envelope. agentperm writes the rationale to stderr and exits with code 2 to block, or exits 0 to allow. `NoOpinion` and `Allow` both exit 0; `Ask` and `Deny` both exit 2.
+**Verdict protocol:** Agentperm exits 0 and emits Kiro's structured `PreToolUse` envelope for
+`Allow`, `Ask`, or `Deny`, including the rationale. `NoOpinion` emits an empty `{}` so Kiro's native
+permission handling takes over.
 
 A shell event with no string `tool_input.command` becomes an unparseable Shell request. Its Ask
-verdict therefore exits 2 instead of silently treating the event as an empty operation.
+verdict is therefore emitted as a structured Ask instead of silently treating the event as an
+empty operation.
 
 ### Tool name canonicalization
 
@@ -269,9 +286,11 @@ class AgentAdapter(ABC):
     def write_verdict(self, verdict: Verdict, event_name: str) -> int: ...
 ```
 
-`install` wires agentperm into the agent's hook config under the requested `mode` (Rulesync or Direct) and returns the list of paths it touched (empty if already up to date); `uninstall` is its inverse and must remove exactly what `install` wrote. `parse_event` translates the agent's payload into a `Request`. `write_verdict` serializes a `Verdict` into the agent's expected format and returns a process exit code (0 for most agents; Kiro returns 2 to block). `import_native_rules` is optional.
+`install` wires agentperm into the agent's hook config under the requested `mode` (Rulesync or Direct) and returns the list of paths it touched (empty if already up to date); `uninstall` is its inverse and must remove exactly what `install` wrote. `parse_event` translates the agent's payload into a `Request`. `write_verdict` serializes a `Verdict` into the agent's expected native envelope and returns a process exit code. `import_native_rules` is optional.
 
-Tests for adapter parse/serialize round-trips live in `tests/test_adapters.py`.
+Adapter decisions, hook contracts and installation lifecycles are covered in the corresponding
+`tests/test_adapter_decisions.py`, `tests/test_hook_contracts.py`, `tests/test_hook_installation.py`
+and `tests/test_hook_uninstallation.py` suites.
 
 ---
 

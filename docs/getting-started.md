@@ -15,23 +15,9 @@ finds; it does not replace their native permission settings. In auto mode it use
 `~/.rulesync/` exists, otherwise it writes native hook configuration directly. OpenCode's plugin is
 always installed directly. See [CLI: install](cli.md#install) for exact paths and modes.
 
-With no policy, agentperm returns no opinion and the host continues its native flow.
-
-### Coexisting with Beckon
-
-agentperm and Beckon are independent: agentperm never requires or invokes Beckon, and Beckon's
-ordinary lifecycle hooks do not require agentperm. Codex is the one special composition point. If
-Beckon tracks human permission prompts while agentperm automatically decides the same
-`PermissionRequest`, configure one ordered command:
-
-```text
-beckon permission-hook codex -- agentperm check --agent codex --event PermissionRequest
-```
-
-Do not install separate matching Codex `PermissionRequest` commands for those two responsibilities;
-Codex runs them concurrently, so Beckon cannot observe agentperm's verdict. The wrapper sends the
-same envelope to agentperm, immediately relays allow/deny, and records Beckon attention only for an
-unresolved native prompt. Other agentperm and Beckon hooks remain separate.
+With no policy, agentperm returns no opinion and the host continues its native flow. See the
+[Codex adapter notes](adapters.md#pass-through-to-other-permissionrequest-integrations) when
+another `PermissionRequest` integration must observe agentperm's verdict.
 
 After changing generated hook configuration, restart already-running host-agent processes. You may
 resume their conversations; iTerm2 and the multiplexer do not need restarting.
