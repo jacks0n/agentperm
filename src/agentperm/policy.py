@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import subprocess
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from .domain import (
     PythonCallPolicy,
     RedirectionPolicy,
     Rule,
+    ShellPattern,
 )
 from .errors import PolicyError
 from .fileio import atomic_write
@@ -34,6 +36,16 @@ class PolicyFile:
 
     policy: Policy
     raw: JsonObject = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PolicyLayer:
+    """One discovered root policy, its include sources, and path-matching anchor."""
+
+    root: Path
+    anchor: Path
+    sources: tuple[Path, ...]
+    policy: Policy
 
 
 def load_policy_file(path: Path) -> PolicyFile:
@@ -272,7 +284,7 @@ def save_policy_file(path: Path, policy_file: PolicyFile) -> None:
     atomic_write(path, json.dumps(raw, indent=2) + "\n")
 
 
-def _policy_paths(cwd: Path | None) -> tuple[Path, ...]:
+def _policy_paths(cwd: Path | None, *, resolve_cwd: bool = True) -> tuple[Path, ...]:
     """Policy files in merge order: global, then filesystem root through ``cwd``."""
     global_path = Path.home() / POLICY_FILENAME
     paths = [global_path]
@@ -280,7 +292,7 @@ def _policy_paths(cwd: Path | None) -> tuple[Path, ...]:
     if cwd is None:
         return tuple(paths)
 
-    resolved_cwd = cwd.resolve()
+    resolved_cwd = cwd.resolve() if resolve_cwd else Path(os.path.abspath(cwd))
     for directory in reversed((resolved_cwd, *resolved_cwd.parents)):
         candidate = directory / POLICY_FILENAME
         identity = candidate.resolve()
@@ -296,6 +308,58 @@ def existing_policy_paths(cwd: Path | None = None) -> tuple[Path, ...]:
     return tuple(source for path in _policy_paths(cwd) if path.exists() for source in resolve_policy_paths(path))
 
 
+def policy_layers(cwd: Path | None = None, *, preserve_symlinks: bool = False) -> tuple[PolicyLayer, ...]:
+    """Load discovered policy roots without discarding their path anchors.
+
+    Included documents form one logical layer and inherit the directory of the
+    root policy that included them. ``preserve_symlinks`` keeps the supplied
+    target's lexical ancestry for conservative cross-symlink discovery.
+    """
+    layers: list[PolicyLayer] = []
+    for path in _policy_paths(cwd, resolve_cwd=not preserve_symlinks):
+        if not path.exists():
+            continue
+        sources = _load_policy_sources(path)
+        anchor = path.parent.resolve(strict=False)
+        layers.append(
+            PolicyLayer(
+                root=path,
+                anchor=anchor,
+                sources=tuple(source_path for source_path, _ in sources),
+                policy=_bind_runtime_paths(
+                    _combine_same_layer(tuple(source.policy for _, source in sources)),
+                    anchor,
+                ),
+            )
+        )
+    return tuple(layers)
+
+
+def _bind_runtime_paths(policy: Policy, anchor: Path) -> Policy:
+    """Anchor relative global and per-rule redirect allowlists to their root policy."""
+
+    def bind(path: str) -> str:
+        expanded = Path(path).expanduser()
+        return str(expanded if expanded.is_absolute() else (anchor / expanded).absolute())
+
+    def bind_rule(rule: Rule) -> Rule:
+        if isinstance(rule, ShellPattern) and rule.allow_paths:
+            return replace(rule, allow_paths=tuple(bind(path) for path in rule.allow_paths))
+        return rule
+
+    redirection = replace(
+        policy.redirection,
+        allow_paths=tuple(bind(path) for path in policy.redirection.allow_paths),
+    )
+    return Policy(
+        deny=tuple(bind_rule(rule) for rule in policy.deny),
+        ask=tuple(bind_rule(rule) for rule in policy.ask),
+        allow=tuple(bind_rule(rule) for rule in policy.allow),
+        redirection=redirection,
+        python_calls=policy.python_calls,
+    )
+
+
 def merged_policy(cwd: Path | None = None, *, local_root: Path | None = None) -> Policy:
     """Merge global policy with every policy from the filesystem root through ``cwd``.
 
@@ -309,7 +373,8 @@ def merged_policy(cwd: Path | None = None, *, local_root: Path | None = None) ->
     for path in _policy_paths(search_from):
         if not path.exists():
             continue
-        policy = policy.merged_with(load_policy_layer(path).policy)
+        layer = _bind_runtime_paths(load_policy_layer(path).policy, path.parent.resolve(strict=False))
+        policy = policy.merged_with(layer)
     return policy
 
 

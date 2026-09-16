@@ -2,10 +2,10 @@
 {
   "version": 1,
   "permissions": {
-    "allow": ["Edit(src/**)"],
+    "allow": ["Edit(/agentperm-black-box/workspace/src/**)"],
     "ask": [],
     "deny": [
-      {"Edit(generated/**)": {"reason": "Generated file; run the generator instead."}}
+      {"Edit(/agentperm-black-box/workspace/generated/**)": {"reason": "Generated file; run the generator instead."}}
     ]
   }
 }

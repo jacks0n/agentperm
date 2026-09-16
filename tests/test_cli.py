@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-import agentperm.cli as cli_module
+import agentperm.scoped_policy as scoped_policy_module
 from agentperm import POLICY_FILENAME, BashCommand, Policy, PolicyError, main
 from agentperm.domain import JsonObject
 from tests.json_support import decode_object
@@ -61,6 +61,27 @@ def _decision(verdict: JsonObject) -> str | None:
     hook = verdict.get("hookSpecificOutput")
     decision = hook.get("permissionDecision") if isinstance(hook, dict) else None
     return decision if isinstance(decision, str) else None
+
+
+def _run_codex_patch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    cwd: Path,
+    target: Path,
+) -> JsonObject:
+    patch = f"*** Begin Patch\n*** Update File: {target}\n@@\n-old\n+new\n*** End Patch"
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": {"command": patch},
+            "cwd": str(cwd),
+        }
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+    assert main(["check", "--agent", "codex", "--event", "PreToolUse"]) == 0
+    out = capsys.readouterr().out.strip()
+    return decode_object(out) if out else {}
 
 
 # --- edit: scope routing ----------------------------------------------------
@@ -185,10 +206,46 @@ def test_edit_global_and_local_are_mutually_exclusive() -> None:
     assert exit_info.value.code == 2  # argparse usage error
 
 
-# --- check: ancestor policies are keyed off the payload cwd ----------------
+# --- check: policy discovery ------------------------------------------------
 
 
-def test_check_passes_payload_cwd_to_public_policy_loader(
+def test_check_applies_target_policy_when_codex_writes_outside_payload_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    source = home / "Code" / "network-api"
+    target_root = home / "Code" / "network-api-worktrees" / "mir-281"
+    target = target_root / "db" / "schema" / "nap.sql"
+    source.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    (target_root / POLICY_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "permissions": {
+                    "deny": [
+                        {
+                            "Write(db/schema/nap.sql)": {
+                                "reason": "Regenerate the database schema snapshot."
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    verdict = _run_codex_patch(monkeypatch, capsys, cwd=source, target=target)
+
+    hook = verdict.get("hookSpecificOutput")
+    assert isinstance(hook, dict)
+    assert hook.get("permissionDecision") == "deny"
+    assert hook.get("permissionDecisionReason") == "Regenerate the database schema snapshot."
+
+
+def test_check_passes_payload_cwd_to_policy_loader(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     payload_cwd = Path("/workspace/project/src")
@@ -199,7 +256,7 @@ def test_check_passes_payload_cwd_to_public_policy_loader(
         received.append(cwd)
         return Policy(deny=(BashCommand(("rm",)),))
 
-    monkeypatch.setattr(cli_module, "merged_policy", fake_merged_policy)
+    monkeypatch.setattr(scoped_policy_module, "merged_policy", fake_merged_policy)
 
     assert _decision(_run_check(monkeypatch, capsys, "rm foo", cwd=payload_cwd)) == "deny"
     assert received == [payload_cwd]
@@ -214,7 +271,7 @@ def test_check_asks_and_names_malformed_ancestor_policy(
     def failing_merged_policy(cwd: Path | None = None, *, local_root: Path | None = None) -> Policy:
         raise PolicyError(f"{policy_path}: invalid JSON/JSONC")
 
-    monkeypatch.setattr(cli_module, "merged_policy", failing_merged_policy)
+    monkeypatch.setattr(scoped_policy_module, "merged_policy", failing_merged_policy)
 
     verdict = _run_check(monkeypatch, capsys, "cat README.md", cwd=cwd)
 

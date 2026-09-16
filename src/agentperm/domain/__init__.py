@@ -119,3 +119,6 @@ from .model import (
 from .model import (
     tool_arguments as tool_arguments,
 )
+from .model import (
+    tool_path_arguments as tool_path_arguments,
+)

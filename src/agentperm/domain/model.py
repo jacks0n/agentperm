@@ -467,13 +467,14 @@ class NamedTool(Rule):
         arguments: ToolArguments = (),
         cwd: Path | None = None,
         *,
+        path_base: Path | None = None,
         conservative_paths: bool = False,
     ) -> bool:
         if not self._name_matches(name):
             return False
         if self.specifier is None or self.specifier == "*":
             return True
-        return self._specifier_matches(arguments, cwd, conservative_paths)
+        return self._specifier_matches(arguments, cwd, path_base, conservative_paths)
 
     def _name_matches(self, name: str) -> bool:
         if self.name in ("*", name):
@@ -484,6 +485,7 @@ class NamedTool(Rule):
         self,
         arguments: ToolArguments,
         cwd: Path | None,
+        path_base: Path | None,
         conservative_paths: bool,
     ) -> bool:
         spec = self.specifier
@@ -493,7 +495,7 @@ class NamedTool(Rule):
             host = spec[len("domain:") :]
             return any(_url_host_matches(value, host) for key, value in arguments if key.lower() in _URL_ARG_KEYS)
         return any(
-            _path_glob_matches(spec, value, cwd, conservative=conservative_paths)
+            _path_glob_matches(spec, value, cwd, path_base=path_base, conservative=conservative_paths)
             for key, value in arguments
             if key.lower() in _PATH_ARG_KEYS
         )
@@ -567,20 +569,24 @@ def _path_glob_matches(
     value: str,
     cwd: Path | None = None,
     *,
+    path_base: Path | None = None,
     conservative: bool = False,
 ) -> bool:
     """Glob match where ``*`` stays within one path segment and ``**`` crosses ``/``.
 
     The value's ``.``/``..`` segments are normalized first, so a scope can't be escaped via
-    traversal (``/repo/src/../secrets`` is matched as ``/repo/secrets``).
+    traversal (``/repo/src/../secrets`` is matched as ``/repo/secrets``). ``cwd`` resolves a
+    relative request value; ``path_base`` anchors a relative policy pattern.
     """
     pattern = pattern.replace("\\", "/")
     value = value.replace("\\", "/")
     normalized_pattern = posixpath.normpath(pattern)
-    if cwd is None:
+    resolution_root = cwd if cwd is not None else path_base
+    if resolution_root is None:
         candidates = (posixpath.normpath(value),)
     else:
-        resolved_cwd = cwd.resolve(strict=False)
+        resolved_cwd = resolution_root.resolve(strict=False)
+        resolved_base = (path_base or resolution_root).resolve(strict=False)
         supplied = Path(value)
         resolved_value = (
             supplied.resolve(strict=False)
@@ -590,14 +596,20 @@ def _path_glob_matches(
         if pattern.startswith("/"):
             resolved_candidate = resolved_value.as_posix()
             lexical_candidate = (
-                posixpath.normpath(value) if supplied.is_absolute() else posixpath.normpath((cwd / supplied).as_posix())
+                posixpath.normpath(value)
+                if supplied.is_absolute()
+                else posixpath.normpath((resolution_root / supplied).as_posix())
             )
         else:
-            resolved_candidate = posixpath.relpath(resolved_value.as_posix(), resolved_cwd.as_posix())
+            resolved_candidate = posixpath.relpath(resolved_value.as_posix(), resolved_base.as_posix())
+            lexical_base = posixpath.normpath((path_base or resolution_root).absolute().as_posix())
             lexical_candidate = (
-                posixpath.relpath(posixpath.normpath(value), cwd.as_posix())
+                posixpath.relpath(posixpath.normpath(value), lexical_base)
                 if supplied.is_absolute()
-                else posixpath.normpath(value)
+                else posixpath.relpath(
+                    posixpath.normpath((resolution_root / supplied).absolute().as_posix()),
+                    lexical_base,
+                )
             )
         candidates = (resolved_candidate, lexical_candidate) if conservative else (resolved_candidate,)
     regex = _glob_to_regex(normalized_pattern)
@@ -608,7 +620,10 @@ def _glob_to_regex(pattern: str) -> str:
     out: list[str] = []
     i = 0
     while i < len(pattern):
-        if pattern.startswith("**", i):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
             out.append(".*")
             i += 2
         elif pattern[i] == "*":
@@ -647,6 +662,11 @@ def tool_arguments(value: object) -> ToolArguments:
                 if len(queue) < _MAX_ARG_NODES:
                     queue.append((key, item))
     return tuple(out)
+
+
+def tool_path_arguments(arguments: ToolArguments) -> ToolArguments:
+    """Return the authoritative path fields used by scoped named-tool rules."""
+    return tuple((key, value) for key, value in arguments if key.lower() in _PATH_ARG_KEYS)
 
 
 def basename(arg: str) -> str:

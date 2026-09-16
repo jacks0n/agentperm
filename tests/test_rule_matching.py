@@ -222,6 +222,12 @@ def test_named_tool_no_specifier_ignores_arguments() -> None:
     assert NamedTool("Read", "*").matches("Read", (("file_path", "/anything"),)) is True
 
 
+def test_path_double_star_directory_prefix_matches_zero_or_many_segments() -> None:
+    rule = NamedTool("Write", "**/generated/**")
+    assert rule.matches("Write", (("file_path", "generated/client.py"),)) is True
+    assert rule.matches("Write", (("file_path", "project/generated/client.py"),)) is True
+
+
 def test_relative_tool_path_rule_matches_absolute_request_from_hook_cwd(tmp_path: Path) -> None:
     generated = tmp_path / "generated/client.py"
     verdict = Policy(deny=(NamedTool("Write", "generated/**"),)).decide(

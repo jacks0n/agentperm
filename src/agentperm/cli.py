@@ -50,6 +50,7 @@ from .policy import (
     save_policy_file,
     write_default_policy,
 )
+from .scoped_policy import decide_with_discovered_policy
 from .shell import parse_pipeline
 from .validate import validate_policy_file
 
@@ -359,13 +360,12 @@ def cmd_check(agent: AgentName, event: str, *, passthrough: tuple[str, ...] = ()
     cwd = Path(cwd_value) if isinstance(cwd_value, str) else Path(os.getcwd())
     request = _with_cwd(request, cwd)
     try:
-        policy = merged_policy(cwd=cwd)
+        verdict = decide_with_discovered_policy(request, cwd)
     except PolicyError as error:
         _trace(agent, event, payload, None, f"policy load failed: {error}")
         verdict = Verdict(Decision.Ask, f"policy load failed: {error}")
         fallback = run_passthrough(passthrough, original_payload)
         return fallback if fallback is not None else adapter.write_verdict(verdict, event)
-    verdict = policy.decide(request)
     verdict = coerce_for_permission_mode(verdict, payload, adapter.name)
     verdict, coercion = coerce_for_pane_bypass(verdict, os.environ)
     _trace(agent, event, payload, verdict, None, coercion)

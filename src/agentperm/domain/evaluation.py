@@ -85,7 +85,7 @@ class Policy:
         if any(isinstance(rule, PythonReadonly) for rule in self.deny + self.ask):
             raise PolicyError("Python(readonly) is only valid in permissions.allow")
 
-    def decide(self, request: Request) -> Verdict:
+    def decide(self, request: Request, *, path_base: Path | None = None) -> Verdict:
         from ..sql.domain import SqlRequest, SqlRule
 
         if isinstance(request, SqlRequest):
@@ -96,9 +96,9 @@ class Policy:
         if isinstance(request, ShellRequest):
             return self._decide_shell(request.pipeline, request.cwd)
         if isinstance(request, ToolRequest):
-            return self._decide_tool(request.tool, request.arguments, request.cwd)
+            return self._decide_tool(request.tool, request.arguments, request.cwd, path_base)
         if isinstance(request, CompoundRequest):
-            return aggregate([self.decide(part) for part in request.requests])
+            return aggregate([self.decide(part, path_base=path_base) for part in request.requests])
         if isinstance(request, RejectedRequest):
             return Verdict(Decision.Deny, request.rationale)
         return Verdict(Decision.NoOpinion, "unrecognized request")
@@ -271,12 +271,14 @@ class Policy:
         name: str,
         arguments: ToolArguments,
         cwd: Path | None = None,
+        path_base: Path | None = None,
     ) -> Verdict:
         for decision, rule in self.all_rules():
             if isinstance(rule, NamedTool) and rule.matches(
                 name,
                 arguments,
                 cwd,
+                path_base=path_base,
                 conservative_paths=decision is not Decision.Allow,
             ):
                 return Verdict(decision, _format_rule(rule, decision))
