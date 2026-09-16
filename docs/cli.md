@@ -191,7 +191,8 @@ Behavior:
 
 1. Read JSON payload from stdin
 2. Parse it via the named adapter into a `Request`
-3. Load the global policy plus every policy from the filesystem root through the payload cwd
+3. Load the global policy plus policies from the payload cwd for shell/non-path requests, or from
+   each resolved target's ancestry for path-bearing tools
 4. Decide → aggregate → coerce for permission mode
 5. Emit a decisive verdict, or invoke the configured pass-through hook when unresolved
 

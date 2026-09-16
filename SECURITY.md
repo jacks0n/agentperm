@@ -38,10 +38,11 @@ agent's own permission flow. See [architecture.md § Limitations](docs/architect
 
 ## Known gap: project policies are trusted implicitly
 
-Policy discovery merges `~/.agent-permissions.jsonc` with **every** `.agent-permissions.jsonc`
-between the filesystem root and the command's working directory
-(`_policy_paths` in `src/agentperm/policy.py`). There is **no trust gating**: a repository you
-clone can ship a policy file whose `allow` rules take effect the moment an agent runs inside it.
+Policy discovery always loads `~/.agent-permissions.jsonc`. Shell and non-path tools add **every**
+`.agent-permissions.jsonc` between the filesystem root and the command cwd. Path-bearing tools add
+the corresponding chain for each target, so a repository policy protects its files even when the
+agent runs elsewhere. There is **no trust gating**: a repository you clone can ship a policy file
+whose `allow` rules take effect when an agent runs inside it or targets one of its files.
 
 What limits the exposure today:
 

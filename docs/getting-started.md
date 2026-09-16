@@ -85,10 +85,10 @@ Add rules to `allow`, `ask`, or `deny`. Within one file, Deny wins over Ask, whi
   "permissions": {
     "allow": [
       "Shell(terraform {plan,show,validate} !-*)",
-      "Read(src/**)"
+      "Read(**/src/**)"
     ],
     "deny": [
-      {"Write(generated/**)": {"reason": "Edit the schema and regenerate this directory."}}
+      {"Write(**/generated/**)": {"reason": "Edit the schema and regenerate this directory."}}
     ]
   }
 }
@@ -124,7 +124,7 @@ Common forms:
 "Shell(git stash {list,show} !... !-*)"    // no extra operands or flags
 "Shell(aws values(--region) s3 ls)"        // value flag may move
 "WebFetch(domain:github.com)"              // URL field and subdomains
-"Write(src/**)"                            // normalized path from request cwd
+"Write(src/**)"                            // src beneath this policy's directory
 ```
 
 Use the [Shell pattern DSL](pattern-dsl.md) for shell rules and the
@@ -143,7 +143,9 @@ modifying native configuration. Gemini import is not available. Review imported 
 ## Policy locations and trust
 
 - `~/.agent-permissions.jsonc` applies globally.
-- A `.agent-permissions.jsonc` in any ancestor of the request cwd adds directory policy.
+- Shell and non-path tools load `.agent-permissions.jsonc` files from the request cwd's ancestry.
+- Path-bearing tools load them from each target's ancestry, even when the agent runs elsewhere.
+- Relative path patterns use the root policy directory; included fragments inherit that anchor.
 - `agentperm edit --local` targets the current Git repository root.
 
 Deny rules union across every file and cannot be overridden. For Ask and Allow, the nearest matching

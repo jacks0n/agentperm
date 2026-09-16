@@ -69,7 +69,8 @@ operation that creates, overwrites, edits, deletes, or moves a file is a `Write`
 Multi-file patches become one compound request. Every child is evaluated and the strictest verdict
 wins. A malformed patch that claims to mutate files but cannot be translated becomes a rejected
 request and is denied. File paths are resolved from the hook cwd, normalized through `.` and `..`,
-and resolved through existing symlinks before scoped rules match.
+and resolved through existing symlinks. Agentperm discovers policy from every target's ancestry;
+relative scoped rules match from the directory containing their root policy.
 
 These capabilities cover native file tools, not writes hidden inside arbitrary shell commands.
 Shell redirects are governed separately by `shell.redirection`; programs that write internally must

@@ -45,7 +45,8 @@ parsed `Pipeline`; `ToolRequest` carries a canonical tool capability (e.g. `"Wri
 `"WebFetch"`). `CompoundRequest` represents one native operation with several semantic effects;
 the strictest child verdict wins. `RejectedRequest` fails closed when a mutation payload cannot be
 translated safely. Before policy evaluation, the CLI recursively attaches the hook cwd to every
-path-bearing child so scoped rules behave identically for single and compound operations.
+path-bearing child so relative request targets resolve consistently. It then evaluates each target
+against policies discovered from that target's ancestry.
 
 ### Rule
 
@@ -65,12 +66,14 @@ wildcard or `mcp__memory__*` prefix.
 
 ### Policy
 
-`Policy` is `(deny, ask, allow)` plus feature-specific policy objects. Runtime discovery folds the
-global policy and every filesystem-ancestor policy through `Policy.merged_with`. Deny rules union
-into a non-overridable floor. Ask and Allow retain layer order: the nearest layer is evaluated first,
-with Ask before Allow within that layer. A project Allow can therefore whitelist a global Ask, while
-no Allow can bypass any Deny. Python call decisions use the same model; redirection values use the
-nearest configured value.
+`Policy` is `(deny, ask, allow)` plus feature-specific policy objects. Runtime discovery preserves
+each root policy as a layer with its directory anchor and included sources. Shell and non-path
+requests use the cwd ancestry; path-bearing tools use each target ancestry. Relative path rules are
+matched from the layer anchor, while included fragments inherit their root layer's anchor. Deny
+rules union into a non-overridable floor. Ask and Allow retain layer order: the nearest layer is
+evaluated first, with Ask before Allow within that layer. A project Allow can therefore whitelist a
+global Ask, while no Allow can bypass any Deny. Python call decisions use the same model;
+redirection values use the nearest configured value.
 
 ## Decision flow
 
@@ -81,7 +84,7 @@ agent hook payload
 adapter.parse_event   →  Request | None
        │
        ▼
-policy.decide(request)
+target-aware policy discovery → policy.decide(request)
        │
        ▼  (per-segment or per-child)
 aggregate(verdicts)   →  Verdict

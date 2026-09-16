@@ -266,9 +266,11 @@ Claude maps `Edit`, `MultiEdit`, `NotebookEdit`, and `Write` to `Write`. Codex a
 translate apply-patch add/update/delete/move markers into a compound of `Write` requests, one per
 target path. Gemini maps `replace` and `write_file` to `Write`. Kiro's write aliases become `Write`.
 
-The CLI attaches the hook cwd to every child request. Scoped path matching normalizes traversal and
-resolves existing symlinks. An apply-patch payload with an invalid envelope, unknown marker, empty
-path, invalid move, or no operation becomes `RejectedRequest` and denies. See
+The CLI attaches the hook cwd to every child request, resolves each target, and loads the target's
+ancestor policies. Relative rule patterns use each root policy's directory rather than the agent
+cwd. Scoped matching normalizes traversal and resolves existing symlinks. An apply-patch payload
+with an invalid envelope, unknown marker, empty path, invalid move, or no operation becomes
+`RejectedRequest` and denies. See
 [Capabilities: semantic file operations](capabilities.md#semantic-file-operations) for the compact
 user-facing mapping.
 

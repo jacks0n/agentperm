@@ -5,7 +5,7 @@
 agentperm is a pre-tool hook for [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
 [Codex CLI](https://github.com/openai/codex), [OpenCode](https://opencode.ai),
 [Gemini CLI](https://github.com/google-gemini/gemini-cli), and [Kiro](https://kiro.dev). Before a
-command runs, it parses the whole shell program, judges every piece against one local policy file,
+command runs, it parses the whole shell program, judges every piece against one layered policy,
 and returns **allow / ask / deny**. You approve *intent* once; you stop re-approving `git status`
 because a flag moved, it entered a pipe, or a different agent asked.
 
@@ -23,7 +23,7 @@ because a flag moved, it entered a pipe, or a different agent asked.
   "permissions": {
     "deny": [
       "Shell(git push --force)",
-      {"Write(src/generated/**)": {"reason": "Generated — run `just generate`."}},
+      {"Write(**/src/generated/**)": {"reason": "Generated — run `just generate`."}},
       {"SQL(no-file-io)": {"dialect": "postgres", "functions": {"any": ["pg_read_file"]}}}
     ],
     "ask": ["Shell(aws ec2 terminate-*)"],
@@ -37,7 +37,7 @@ because a flag moved, it entered a pipe, or a different agent asked.
       {"SQL(ro)": {"dialect": "postgres", "effects": {"only": ["read"]}}},
       "Python(readonly)",
       "Python(query_db(<SQL:ro>))",
-      "Write(src/**)"
+      "Write(**/src/**)"
     ]
   }
 }
@@ -125,8 +125,10 @@ Sandboxes are a different tool: they contain what runs, agentperm decides what r
 
 ## How policies compose
 
-- `~/.agent-permissions.jsonc` merges with every `.agent-permissions.jsonc` from `/` down to the
-  command's working directory.
+- `~/.agent-permissions.jsonc` merges with directory policies discovered from the command cwd, or
+  from each target for path-bearing tools such as `Write` and `Read`.
+- Relative path patterns are anchored to the directory containing their root policy. Included
+  fragments inherit that root anchor; absolute patterns can cover paths anywhere.
 - **Deny anywhere is a floor.** For Ask and Allow the nearest matching policy wins, so a project can
   allow something your global policy asks about — but never un-deny anything.
 - Any policy file can `include` explicit paths or globs; fragments merge into that same layer.
@@ -147,7 +149,7 @@ Sandboxes are a different tool: they contain what runs, agentperm decides what r
 | `<SQL:name>` · `stdin(<SQL>)` · `sqlvalues(<SQL>, -c)` | parse SQL from an operand, stdin, or option values |
 | `<EXEC>` · `<SHELL>` | evaluate a wrapper's nested command or nested shell source |
 | `Python(readonly)` · `Python(f(<SQL>))` | AST-check inline Python; capture SQL passed to a helper |
-| `Write(src/**)` · `Read(**)` | scoped file capabilities shared by every agent — `Write` covers create, overwrite, edit, and patch |
+| `Write(src/**)` · `Read(**)` | config-relative file capabilities shared by every agent — `Write` covers create, overwrite, edit, and patch |
 | `shell.redirection` | `>/dev/null` and `2>&1` pass; `> file` asks unless the path is allowlisted |
 
 `agentperm validate` after editing. Exact grammar: [Shell pattern DSL](docs/pattern-dsl.md) ·

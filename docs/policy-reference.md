@@ -7,11 +7,12 @@ The policy file is JSON-with-comments (JSON5-compatible). Policies can live at:
 - `~/.agent-permissions.jsonc` — global policy
 - `<any-directory>/.agent-permissions.jsonc` — directory-scoped policy
 
-The global policy is loaded first, followed by every policy from the filesystem root through the
-command's working directory. Duplicate paths are loaded once. Deny rules union and always win. Ask
-and Allow use nearest-policy precedence: the closest matching layer wins, with Ask before Allow
-inside one logical layer. Other override-style settings also prefer layers closer to the working
-directory.
+The global policy is always loaded. Shell and non-path tool requests then load every policy from the
+filesystem root through the command's working directory. Path-bearing tools instead load policies
+from each target's ancestry, so a target project's protections apply even when the agent runs in a
+different checkout. Duplicate paths are loaded once. Deny rules union and always win. Ask and Allow
+use nearest-policy precedence within each target chain, with Ask before Allow inside one logical
+layer. Other override-style settings prefer layers closer to the applicable cwd or target.
 
 ## Includes and policy fragments
 
@@ -42,7 +43,9 @@ Allow lists union, duplicates are removed, and Ask still precedes Allow across t
 split policy therefore decides permissions exactly like the equivalent single file. Override-style
 settings are applied depth-first: later include entries override earlier ones, later glob matches
 override earlier matches, and the including file overrides all of its includes. `allowPaths` values
-union rather than replace.
+union rather than replace. Relative permission paths and `allowPaths` in every included fragment
+are anchored to the directory containing the root policy, as if the fragment's contents appeared
+directly in that root file.
 
 Includes are fail-safe. An entry that matches no files, an unreadable included file, malformed
 `include` data, or an include cycle fails the policy load. In particular, do not use a glob that
@@ -252,9 +255,14 @@ An optional specifier in parentheses scopes the rule by the tool's input values 
 
 Matching is **keyed by field name**, so a specifier only ever checks the authoritative field — `WebFetch(domain:github.com)` will not be satisfied by a `github.com` URL that happens to appear in a `prompt`, and `Write(src/**)` will not be satisfied by path-like text in `old_string`. Adapters that don't surface those fields only match the name-only forms.
 
-Relative path specifiers are evaluated from the hook's working directory, whether the agent sends
-a relative or absolute path. `.`/`..` segments and existing symlinks are resolved before matching,
-so a path cannot remain inside a protected glob lexically while resolving outside it.
+Relative path specifiers are evaluated from the directory containing the root policy that declares
+the logical layer. For example, `Write(db/schema/nap.sql)` in `/repo/.agent-permissions.jsonc`
+matches `/repo/db/schema/nap.sql`; `Write(**/db/schema/nap.sql)` in a worktree parent also matches
+that path beneath every child worktree. In `~/.agent-permissions.jsonc`, `Write(**/generated/**)`
+covers generated directories beneath the home directory, while `Write(/**/generated/**)` is
+filesystem-wide. Relative request targets still resolve from the hook cwd. `.`/`..` segments and
+existing symlinks are resolved before matching, so lexical aliases and their destinations cannot
+bypass a deny.
 
 `Write` is a semantic capability, not a literal host tool name. Every native operation that
 creates, overwrites, edits, deletes, or moves a file is evaluated as `Write` on that path:
@@ -527,6 +535,7 @@ Path matching:
 
 - Both the target and pattern are resolved through symlinks (`os.path.realpath`), so `/tmp` on macOS covers `/private/tmp`.
 - Each path component is matched individually with `fnmatch`, so `/private/tmp/claude-*` matches `/private/tmp/claude-502/scratchpad/out.txt`.
+- Relative `allowPaths` patterns are anchored to the root policy directory; included fragments inherit that anchor.
 - Relative redirect targets are resolved against the working directory from the hook payload.
 
 **Per-rule `allowPaths`** scope path allowlisting to specific commands via the rule-as-key dict form:

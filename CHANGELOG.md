@@ -28,6 +28,10 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Changed
 
+- Relative named-tool paths and redirect `allowPaths` are now anchored to the directory containing
+  their root `.agent-permissions.jsonc`; included fragments inherit that root anchor. Global
+  `**/...` patterns therefore cover matching paths beneath the home directory, while absolute
+  `/**/...` patterns remain filesystem-wide.
 - The semantic `Edit` file capability is folded into `Write`. Every native file mutation (Claude
   `Edit`, `MultiEdit`, `NotebookEdit`, `Write`; Codex and OpenCode `apply_patch`
   add/update/delete/move; OpenCode `edit`/`write`; Gemini `replace`/`write_file`; Kiro
@@ -42,6 +46,12 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- Path-bearing tool requests now discover policies from every target's ancestry instead of only
+  from the agent cwd. Cross-project and cross-worktree writes therefore retain the target project's
+  protections for Claude, Codex, OpenCode, Gemini, and Kiro; multi-target operations evaluate every
+  path and keep the strictest verdict.
+- Path globs now treat a `**/` prefix as zero or more directory levels, so a recursive rule matches
+  both an immediate child and the same path beneath nested directories.
 - Codex full-auto/YOLO mode now preserves `PreToolUse` hard denies, including for code-mode nested
   tools, instead of applying Claude's distinct `bypassPermissions` semantics. Codex hook matchers
   now cover every hook-capable tool so policy coverage is not narrowed during installation.
