@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..errors import PolicyError
+from .mcp import McpToolRequest, McpToolRule
 from .model import (
     BashCommand,
     BashOption,
@@ -97,6 +98,8 @@ class Policy:
             return self._decide_shell(request.pipeline, request.cwd)
         if isinstance(request, ToolRequest):
             return self._decide_tool(request.tool, request.arguments, request.cwd, path_base)
+        if isinstance(request, McpToolRequest):
+            return self._decide_mcp_tool(request.server, request.tool)
         if isinstance(request, CompoundRequest):
             return aggregate([self.decide(part, path_base=path_base) for part in request.requests])
         if isinstance(request, RejectedRequest):
@@ -283,6 +286,12 @@ class Policy:
             ):
                 return Verdict(decision, _format_rule(rule, decision))
         return Verdict(Decision.NoOpinion, f"no rule matched {name!r}")
+
+    def _decide_mcp_tool(self, server: str, tool: str) -> Verdict:
+        for decision, rule in self.all_rules():
+            if isinstance(rule, McpToolRule) and rule.matches(server, tool):
+                return Verdict(decision, _format_rule(rule, decision))
+        return Verdict(Decision.NoOpinion, f"no rule matched MCP({server}.{tool})")
 
 
 def _format_rule(rule: Rule, decision: Decision) -> str:

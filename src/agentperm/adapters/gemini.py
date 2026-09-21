@@ -12,6 +12,7 @@ from ..domain import (
     Decision,
     InstallMode,
     JsonObject,
+    McpToolRequest,
     Request,
     ShellRequest,
     ToolRequest,
@@ -42,7 +43,11 @@ class GeminiAdapter(AgentAdapter):
         if tool_name == "run_shell_command":
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""), cwd=cwd)
-        return ToolRequest(_gemini_tool_name(tool_name), tool_arguments(tool_input), cwd=cwd)
+        arguments = tool_arguments(tool_input)
+        mcp_request = _gemini_mcp_request(tool_name, arguments, cwd)
+        if mcp_request is not None:
+            return mcp_request
+        return ToolRequest(_gemini_tool_name(tool_name), arguments, cwd=cwd)
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> int:
         if verdict.decision is Decision.NoOpinion:
@@ -94,6 +99,21 @@ def _gemini_tool_name(name: str) -> str:
         "replace": "Write",
         "write_file": "Write",
     }.get(name, name)
+
+
+def _gemini_mcp_request(
+    tool_name: str,
+    arguments: tuple[tuple[str, str], ...],
+    cwd: Path | None,
+) -> McpToolRequest | None:
+    # Gemini defines this FQN and deliberately disallows underscores in server
+    # names so the first separator remains unambiguous.
+    if not tool_name.startswith("mcp_"):
+        return None
+    server, separator, tool = tool_name[4:].partition("_")
+    if not server or not separator or not tool:
+        return None
+    return McpToolRequest(server, tool, arguments, cwd)
 
 
 GEMINI_TOOL_NAMES = frozenset(

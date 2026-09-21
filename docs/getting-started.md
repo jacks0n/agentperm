@@ -137,8 +137,10 @@ agentperm import
 ```
 
 Import reads supported Claude, Codex, OpenCode, and Kiro rules into the global policy without
-modifying native configuration. Gemini import is not available. Review imported legacy
-`Bash(...)` rules and narrow them where appropriate.
+modifying native configuration. Claude and Kiro MCP entries become canonical `MCP(server.tool)`
+rules. OpenCode MCP keys cannot be separated safely during import without runtime server metadata,
+and Gemini import is not available. Review imported legacy `Bash(...)` rules and narrow them where
+appropriate.
 
 ## Policy locations and trust
 

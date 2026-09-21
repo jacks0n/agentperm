@@ -13,6 +13,8 @@ from ..domain import (
     Decision,
     InstallMode,
     JsonObject,
+    McpToolRequest,
+    McpToolRule,
     Request,
     Rule,
     ShellRequest,
@@ -59,6 +61,9 @@ class ClaudeAdapter(AgentAdapter):
                 for raw in raw_list:
                     if raw == "Bash":
                         continue
+                    if isinstance(raw, str) and (identity := _claude_mcp_identity(raw)) is not None:
+                        yield target_decision, McpToolRule(*identity)
+                        continue
                     rule = parse_rule(raw)
                     if rule is not None:
                         yield target_decision, rule
@@ -73,10 +78,14 @@ class ClaudeAdapter(AgentAdapter):
             tool_input = payload.get("tool_input")
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""), cwd=cwd)
+        arguments = tool_arguments(payload.get("tool_input"))
+        mcp_request = _claude_mcp_request(tool_name, arguments, cwd)
+        if mcp_request is not None:
+            return mcp_request
         # Every native file-mutation tool is one capability: a Write to an existing
         # path overwrites it, so create/overwrite/edit are not separable permissions.
         semantic_name = "Write" if tool_name in _CLAUDE_WRITE_TOOL_NAMES else tool_name
-        return ToolRequest(semantic_name, tool_arguments(payload.get("tool_input")), cwd=cwd)
+        return ToolRequest(semantic_name, arguments, cwd=cwd)
 
     def write_verdict(
         self,
@@ -149,3 +158,21 @@ class ClaudeAdapter(AgentAdapter):
             events=["PreToolUse", "PermissionRequest"],
             dry_run=dry_run,
         )
+
+
+def _claude_mcp_request(
+    tool_name: str,
+    arguments: tuple[tuple[str, str], ...],
+    cwd: Path | None,
+) -> McpToolRequest | None:
+    identity = _claude_mcp_identity(tool_name)
+    return McpToolRequest(*identity, arguments, cwd) if identity is not None else None
+
+
+def _claude_mcp_identity(tool_name: str) -> tuple[str, str] | None:
+    if not tool_name.startswith("mcp__"):
+        return None
+    server, separator, tool = tool_name[5:].partition("__")
+    if not server or not separator or not tool:
+        return None
+    return server, tool

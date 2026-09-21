@@ -18,6 +18,8 @@ from agentperm import (
     JsonObject,
     JsonValue,
     KiroAdapter,
+    McpToolRequest,
+    McpToolRule,
     NamedTool,
     Policy,
     ShellRequest,
@@ -122,14 +124,14 @@ def test_kiro_parse_web_fetch_tool() -> None:
     assert ("url", "https://example.com") in request.arguments
 
 
-def test_kiro_parse_mcp_tool_passthrough() -> None:
+def test_kiro_parses_mcp_tool_identity() -> None:
     adapter = KiroAdapter()
     request = adapter.parse_event(
         {"tool_name": "@git/git_status", "tool_input": {}},
         "preToolUse",
     )
-    assert isinstance(request, ToolRequest)
-    assert request.tool == "@git/git_status"
+    assert isinstance(request, McpToolRequest)
+    assert (request.server, request.tool) == ("git", "git_status")
 
 
 def test_kiro_parse_missing_tool_name() -> None:
@@ -352,7 +354,12 @@ def test_kiro_import_allowed_tools(fake_home: Path) -> None:
     decisions = {(d.value, r.name) for d, r in rules if isinstance(r, NamedTool)}
     assert ("allow", "Read") in decisions
     assert ("allow", "Grep") in decisions
-    assert ("allow", "@git/git_status") in decisions
+    assert any(
+        decision is Decision.Allow
+        and isinstance(rule, McpToolRule)
+        and (rule.server_pattern, rule.tool_pattern) == ("git", "git_status")
+        for decision, rule in rules
+    )
 
 
 def test_kiro_import_skips_shell_in_allowed_tools(fake_home: Path) -> None:
@@ -370,8 +377,11 @@ def test_kiro_import_skips_unrepresentable_allowed_tool_wildcards(fake_home: Pat
     agents_dir = fake_home / ".kiro/agents"
     agents_dir.mkdir(parents=True)
     (agents_dir / "default.json").write_text(json.dumps({"allowedTools": ["code_*", "*_bash", "?ead", "@git/read_*"]}))
-    tools = [r.name for _, r in KiroAdapter().import_native_rules() if isinstance(r, NamedTool)]
-    assert tools == ["code_*", "@git/read_*"]
+    rules = list(KiroAdapter().import_native_rules())
+    tools = [rule.name for _, rule in rules if isinstance(rule, NamedTool)]
+    mcp_tools = [rule for _, rule in rules if isinstance(rule, McpToolRule)]
+    assert tools == ["code_*"]
+    assert mcp_tools == [McpToolRule("git", "read_*")]
 
 
 def test_kiro_import_expands_known_wildcard_aliases(fake_home: Path) -> None:

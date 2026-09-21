@@ -16,6 +16,11 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- Canonical `MCP(server.tool-pattern)` permission rules across Claude Code, Codex CLI, OpenCode,
+  Gemini CLI, and Kiro. MCP identities are decoded by each host adapter and matched as separate
+  server/tool components with arbitrary `*` globs, `{a,b}` alternatives, and escaping. Claude and
+  Kiro native imports produce canonical MCP rules; OpenCode uses configured-server metadata in its
+  runtime plugin shim to decode otherwise ambiguous flattened tool names.
 - Recursive policy `include` entries with explicit paths and deterministic glob expansion. Included
   fragments merge as one logical policy layer, preserve Ask/Allow precedence, reject unmatched
   patterns and cycles, and are followed by runtime discovery, `validate`, and `why`.

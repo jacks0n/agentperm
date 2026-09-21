@@ -157,7 +157,7 @@ at the pre-execution stage.
 
 ### Tool name canonicalization
 
-OpenCode names tools in lowercase (`bash`, `read`, `grep`). agentperm maps these to the capitalized canonical names (`Read`, `Grep`, …) both when importing native rules and when parsing hook payloads at decision time. The policy file uses one canonical naming convention across all adapters.
+OpenCode names tools in lowercase (`bash`, `read`, `grep`). agentperm maps these to the capitalized canonical names (`Read`, `Grep`, …) both when importing native rules and when parsing hook payloads at decision time. The plugin also records configured MCP server names so an underscore-qualified OpenCode tool can be separated without guessing at underscores in the server name. The policy file uses one canonical naming convention across all adapters.
 
 ## Gemini CLI
 
@@ -223,15 +223,38 @@ Kiro uses lowercase tool names with aliases. agentperm maps them to its capitali
 | `knowledge` | `Knowledge` |
 | `delegate` | `Delegate` |
 | `subagent`, `use_subagent` | `Subagent` |
-| `@server/tool` (MCP) | passed through as-is |
+| `@server/tool` (MCP) | canonical `{server, tool}` MCP identity |
 
 ### Native rules import
 
 `import` reads the active Kiro profile's `agents/*.json` (`$KIRO_HOME/agents` when set, otherwise `~/.kiro/agents`) and extracts:
 
-- **`allowedTools`** — exact names and losslessly representable trailing-`*` prefix patterns become `NamedTool` allow rules. Shell aliases and Kiro-only suffix/`?` wildcard forms are skipped rather than imported with narrower semantics.
+- **`allowedTools`** — exact names and losslessly representable trailing-`*` prefix patterns become canonical named-tool or MCP allow rules. Shell aliases and Kiro-only suffix/`?` wildcard forms are skipped rather than imported with narrower semantics.
 - **`toolsSettings.shell.allowedCommands`** — each simple pattern becomes a `BashCommand` allow rule.
 - **`toolsSettings.shell.deniedCommands`** — each simple pattern becomes a `BashCommand` deny rule.
+
+## MCP tool canonicalization
+
+Every adapter decodes its host's MCP spelling into a shared `{server, tool}` request. Policy never
+contains a host-native spelling:
+
+| Host | Native example | Canonical rule |
+|---|---|---|
+| Claude Code | `mcp__coderift__find_symbol` | `MCP(coderift.find_symbol)` |
+| Codex CLI | `coderift.find_symbol` or its hook-qualified form | `MCP(coderift.find_symbol)` |
+| OpenCode | `coderift_find_symbol` plus configured-server metadata | `MCP(coderift.find_symbol)` |
+| Gemini CLI | `mcp_coderift_find_symbol` | `MCP(coderift.find_symbol)` |
+| Kiro | `@coderift/find_symbol` | `MCP(coderift.find_symbol)` |
+
+`MCP(coderift.*)`, arbitrary `*` placement, `{a,b}` alternatives, and escaped pattern characters
+therefore behave identically across hosts. Adapter-specific parsing remains inside each adapter.
+
+Native-rule import uses the same boundary where it is unambiguous: Claude
+`mcp__server__tool` entries and Kiro `@server/tool` entries become canonical `MCP(server.tool)`
+rules. Codex has no MCP permission entries in its imported `.rules` format, Gemini import is not
+implemented, and OpenCode's flattened permission keys are not converted during import because they
+cannot be separated safely without runtime server metadata. OpenCode runtime enforcement is fully
+supported by the config-aware plugin shim.
 
 Kiro uses regex patterns for commands (anchored with `\A`/`\z`). `import` converts simple prefix patterns (e.g. `git status`, `git push.*`) but skips entries with complex regex metacharacters like alternation or character classes.
 

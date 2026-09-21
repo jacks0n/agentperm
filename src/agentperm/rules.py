@@ -10,6 +10,7 @@ from .domain import (
     BashOption,
     JsonObject,
     JsonValue,
+    McpToolRule,
     NamedTool,
     PythonReadonly,
     PythonSqlPattern,
@@ -33,6 +34,10 @@ def parse_rule(raw: JsonValue) -> Rule | None:
 
 def _parse_string_rule(text: str) -> Rule | None:
     text = text.strip()
+    if text.startswith("MCP("):
+        from .mcppattern import parse_mcp_rule
+
+        return parse_mcp_rule(text)
     if text == "Python(readonly)":
         return PythonReadonly()
     if text.startswith("Python("):
@@ -143,7 +148,7 @@ def _parse_metadata_rule(rule_str: str, metadata: JsonObject) -> Rule | None:
         return replace(rule, rationale=rationale)
     if isinstance(rule, BashCommand):
         return replace(rule, rationale=rationale)
-    if isinstance(rule, NamedTool):
+    if isinstance(rule, NamedTool | McpToolRule):
         return replace(rule, rationale=rationale)
     return rule
 

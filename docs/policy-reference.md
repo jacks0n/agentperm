@@ -235,8 +235,24 @@ Matches a non-Bash tool by name.
 "Write"          // exact match
 "WebFetch"       // exact match
 "*"              // matches every tool name
-"mcp__memory__*" // prefix glob — matches mcp__memory__lookup, mcp__memory__store, etc.
 ```
+
+MCP tools use their own host-independent syntax; native host spellings do not belong in policy:
+
+```jsonc
+"MCP(coderift.open_repository)"          // one exact server tool
+"MCP(coderift.*)"                        // every tool from coderift
+"MCP(coderift.{find_symbol,get_usages})" // alternatives
+"MCP(*.{search,get_*})"                  // selected tools on every server
+"MCP(server.*.foo)"                      // wildcards anywhere in the tool pattern
+"MCP(server.{foo,bar}.*)"                // alternatives within a larger pattern
+"MCP(*)"                                 // every MCP tool
+```
+
+The first unescaped `.` separates the server pattern from the tool pattern. Later dots belong to
+the tool pattern. `*` matches any number of characters within its server or tool component,
+`{a,b}` selects alternatives, and `\` escapes `.`, `*`, `{`, `}`, `,`, or `\`. Matching remains
+component-aware: a tool wildcard never crosses into a different server.
 
 #### `"<ToolName>(<specifier>)"` — named tool scoped by its input
 
@@ -555,11 +571,11 @@ When multiple allow rules match the same command (e.g. a broad `Shell({echo,ls})
 
 `agentperm import` walks every adapter's native config and merges rules into your `.agent-permissions.jsonc`:
 
-- **Claude Code:** reads `~/.claude/settings.json` and `~/.claude/settings.local.json`, parses `permissions.allow / ask / deny`.
+- **Claude Code:** reads `~/.claude/settings.json` and `~/.claude/settings.local.json`, parses `permissions.allow / ask / deny`, and converts native `mcp__server__tool` entries to canonical MCP rules.
 - **Codex CLI:** reads `~/.codex/rules/*.rules`, extracts `prefix_rule(...)` declarations.
-- **OpenCode:** reads `~/.config/opencode/opencode.json` (or `.jsonc`), parses `permission` blocks.
+- **OpenCode:** reads `~/.config/opencode/opencode.json` (or `.jsonc`), parses `permission` blocks; flattened MCP keys remain unimported because import lacks the runtime server metadata needed to separate them safely.
 - **Gemini CLI:** no import yet — Gemini's policy DSL is regex-only and round-tripping safely needs more work.
-- **Kiro:** reads `~/.kiro/agents/*.json`, importing named tools and simple shell command patterns.
+- **Kiro:** reads `~/.kiro/agents/*.json`, importing named tools, canonical `MCP(server.tool)` rules, and simple shell command patterns.
 
 Imports are additive: existing rules in the policy file are kept, new rules are appended in the
 form produced by the native adapter. Import does not migrate existing `Bash(...)` rules to

@@ -20,6 +20,8 @@ from ..domain import (
     JsonArray,
     JsonObject,
     JsonValue,
+    McpToolRequest,
+    McpToolRule,
     NamedTool,
     Pipeline,
     Request,
@@ -74,6 +76,9 @@ class KiroAdapter(AgentAdapter):
                 )
             return ShellRequest(parse_pipeline(command), cwd=cwd)
         arguments = tool_arguments(tool_input)
+        mcp_request = _kiro_mcp_request(tool_name, arguments, cwd)
+        if mcp_request is not None:
+            return mcp_request
         return ToolRequest(kiro_tool_name(tool_name), arguments, cwd=cwd)
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> int:
@@ -290,6 +295,19 @@ def kiro_tool_name(name: str) -> str:
     }.get(name, name)
 
 
+def _kiro_mcp_request(
+    tool_name: str,
+    arguments: tuple[tuple[str, str], ...],
+    cwd: Path | None,
+) -> McpToolRequest | None:
+    if not tool_name.startswith("@"):
+        return None
+    server, separator, tool = tool_name[1:].partition("/")
+    if not server or not separator or not tool:
+        return None
+    return McpToolRequest(server, tool, arguments, cwd)
+
+
 KIRO_TOOL_NAMES = frozenset(
     {
         "shell",
@@ -316,14 +334,19 @@ KIRO_TOOL_NAMES = frozenset(
 )
 
 
-def _kiro_allowed_tool_rules(pattern: str) -> list[NamedTool]:
-    """Convert Kiro tool patterns to canonical NamedTool rules.
+def _kiro_allowed_tool_rules(pattern: str) -> list[Rule]:
+    """Convert Kiro tool patterns to canonical rules.
 
     Wildcards are expanded against known Kiro tool names so the resulting rules
     use agentperm's canonical namespace (``Read``, ``Write``, …), not Kiro's
     native aliases (``fs_read``, ``fs_write``, …).  Unknown wildcards that
     don't match any known alias are passed through for custom/MCP tools.
     """
+    if pattern.startswith("@"):
+        server, separator, tool = pattern[1:].partition("/")
+        if server and separator and tool and "?" not in pattern and pattern.count("*") <= 1:
+            return [McpToolRule(server, tool)]
+        return []
     if "?" in pattern or pattern.count("*") > 1 or ("*" in pattern and not pattern.endswith("*")):
         return []
     if "*" not in pattern:
@@ -331,7 +354,7 @@ def _kiro_allowed_tool_rules(pattern: str) -> list[NamedTool]:
         return [] if canonical == "Bash" else [NamedTool(canonical)]
     prefix = pattern[:-1]
     seen: set[str] = set()
-    result: list[NamedTool] = []
+    result: list[Rule] = []
     for kiro_name in sorted(KIRO_TOOL_NAMES):
         if not kiro_name.startswith(prefix):
             continue

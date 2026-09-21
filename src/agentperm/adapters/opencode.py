@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,6 +15,7 @@ from ..domain import (
     Decision,
     InstallMode,
     JsonObject,
+    McpToolRequest,
     NamedTool,
     Request,
     Rule,
@@ -33,6 +35,11 @@ from .base import (
 _OPENCODE_PLUGIN_TEMPLATE = """import {{ spawnSync }} from "node:child_process";
 
 const bridge = {bridge};
+let mcpServers = [];
+
+function sanitizedMcpServer(toolName) {{
+  return mcpServers.find((server) => toolName.startsWith(server.sanitized + "_"));
+}}
 
 function bridgeDecision(event, payload) {{
   const proc = spawnSync(
@@ -45,24 +52,33 @@ function bridgeDecision(event, payload) {{
 }}
 
 export const AgentBridgePlugin = async (input) => ({{
+  config: async (config) => {{
+    mcpServers = Object.keys(config.mcp ?? {{}})
+      .map((name) => ({{ name, sanitized: name.replace(/[^a-zA-Z0-9_-]/g, "_") }}))
+      .sort((left, right) => right.sanitized.length - left.sanitized.length);
+  }},
   "tool.execute.before": async (tool, output) => {{
+    const mcpServer = sanitizedMcpServer(tool.tool);
     const decision = bridgeDecision("tool.execute.before", {{
       cwd: input.directory,
       hook_event_name: "tool.execute.before",
       tool_name: tool.tool,
       tool_input: output.args,
+      mcp_server: mcpServer?.name,
     }});
     if (decision?.status === "deny") {{
       throw new Error(decision.reason || "Blocked by agentperm policy");
     }}
   }},
   "permission.ask": async (permission, output) => {{
+    const mcpServer = sanitizedMcpServer(permission.type);
     const decision = bridgeDecision("permission.ask", {{
       cwd: input.directory,
       hook_event_name: "permission.ask",
       permission,
       tool_name: permission.type,
       tool_input: permission.metadata ?? permission,
+      mcp_server: mcpServer?.name,
     }});
     if (decision?.status === "allow" || decision?.status === "deny" || decision?.status === "ask") {{
       output.status = decision.status;
@@ -124,6 +140,9 @@ class OpencodeAdapter(AgentAdapter):
             if tool_name == "apply_patch":
                 patch = tool_input.get("patchText")
                 return parse_apply_patch_request(patch if isinstance(patch, str) else "", cwd)
+            mcp_request = _opencode_mcp_request(payload, tool_name, tool_arguments(tool_input), cwd)
+            if mcp_request is not None:
+                return mcp_request
             return ToolRequest(_opencode_tool_name(tool_name), tool_arguments(tool_input), cwd=cwd)
 
         permission = payload.get("permission")
@@ -142,6 +161,9 @@ class OpencodeAdapter(AgentAdapter):
             if isinstance(patch, str):
                 return parse_apply_patch_request(patch, cwd)
         if isinstance(permission_type, str):
+            mcp_request = _opencode_mcp_request(payload, permission_type, tool_arguments(metadata), cwd)
+            if mcp_request is not None:
+                return mcp_request
             return ToolRequest(_opencode_tool_name(permission_type), tool_arguments(metadata), cwd=cwd)
         return None
 
@@ -215,6 +237,22 @@ _OPENCODE_TOOL_NAMES = {
 def _opencode_tool_name(tool: str) -> str:
     """Canonicalize an OpenCode tool key (``webfetch``) to the policy name (``WebFetch``)."""
     return _OPENCODE_TOOL_NAMES.get(tool, tool)
+
+
+def _opencode_mcp_request(
+    payload: JsonObject,
+    tool_name: str,
+    arguments: tuple[tuple[str, str], ...],
+    cwd: Path | None,
+) -> McpToolRequest | None:
+    server = payload.get("mcp_server")
+    if not isinstance(server, str) or not server:
+        return None
+    sanitized = re.sub(r"[^A-Za-z0-9_-]", "_", server)
+    prefix = f"{sanitized}_"
+    if not tool_name.startswith(prefix) or len(tool_name) == len(prefix):
+        return None
+    return McpToolRequest(server, tool_name[len(prefix) :], arguments, cwd)
 
 
 def _opencode_decision(action: str) -> Decision | None:

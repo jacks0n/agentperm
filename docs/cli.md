@@ -107,10 +107,10 @@ agentperm import
 
 This reads:
 
-- `~/.claude/settings.json` and `~/.claude/settings.local.json` → `permissions.allow / ask / deny`
+- `~/.claude/settings.json` and `~/.claude/settings.local.json` → `permissions.allow / ask / deny`, including canonicalized MCP tools
 - `~/.codex/rules/*.rules` → `prefix_rule(...)` declarations
-- `~/.config/opencode/opencode.json` → `permission` blocks
-- Kiro `agents/*.json` → `allowedTools` and shell allowed/denied commands
+- `~/.config/opencode/opencode.json` → non-MCP `permission` blocks; flattened MCP keys cannot be separated safely during import
+- Kiro `agents/*.json` → `allowedTools` (including canonicalized MCP tools) and shell allowed/denied commands
 
 Rules are merged into the policy file (existing rules kept, new rules appended). Run `edit` afterwards to deduplicate or reorganize. Native config files are not modified — they keep working as fallback fast paths. Gemini import is not supported (its regex policy can't be round-tripped safely).
 

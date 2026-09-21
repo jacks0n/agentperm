@@ -150,6 +150,7 @@ Sandboxes are a different tool: they contain what runs, agentperm decides what r
 | `<EXEC>` · `<SHELL>` | evaluate a wrapper's nested command or nested shell source |
 | `Python(readonly)` · `Python(f(<SQL>))` | AST-check inline Python; capture SQL passed to a helper |
 | `Write(src/**)` · `Read(**)` | config-relative file capabilities shared by every agent — `Write` covers create, overwrite, edit, and patch |
+| `MCP(server.{read_*,search})` | match canonical MCP server/tool identities across every agent; supports `*`, `{a,b}`, and escaping |
 | `shell.redirection` | `>/dev/null` and `2>&1` pass; `> file` asks unless the path is allowlisted |
 
 `agentperm validate` after editing. Exact grammar: [Shell pattern DSL](docs/pattern-dsl.md) ·

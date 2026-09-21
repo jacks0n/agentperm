@@ -214,7 +214,7 @@ class Rule(ABC):
     def serialize(self) -> str | JsonObject: ...
 
 
-def _serialize_rule_metadata(serialized: str | JsonObject, rationale: str) -> str | JsonObject:
+def serialize_rule_metadata(serialized: str | JsonObject, rationale: str) -> str | JsonObject:
     """Attach optional metadata using the canonical rule-as-key representation."""
     if not rationale:
         return serialized
@@ -236,7 +236,7 @@ class PythonReadonly(Rule):
     rationale: str = field(default="", compare=False)
 
     def serialize(self) -> str | JsonObject:
-        return _serialize_rule_metadata("Python(readonly)", self.rationale)
+        return serialize_rule_metadata("Python(readonly)", self.rationale)
 
 
 @dataclass(frozen=True)
@@ -260,7 +260,7 @@ class BashCommand(Rule):
     def serialize(self) -> str | JsonObject:
         body = " ".join(self.prefix)
         serialized = f"Bash({body}:*)" if self.trailing_wildcard else f"Bash({body})"
-        return _serialize_rule_metadata(serialized, self.rationale)
+        return serialize_rule_metadata(serialized, self.rationale)
 
 
 def _glob_match_argv(pattern: tuple[str, ...], argv: tuple[str, ...], trailing_wildcard: bool) -> bool:
@@ -406,7 +406,7 @@ class ShellPattern(Rule):
     def serialize(self) -> str | JsonObject:
         shell_str = f"Shell({self.raw})"
         if not self.extra_values and not self.allow_paths:
-            return _serialize_rule_metadata(shell_str, self.rationale)
+            return serialize_rule_metadata(shell_str, self.rationale)
         opts: JsonObject = {}
         if self.extra_values:
             opts["values"] = sorted(self.extra_values)
@@ -434,7 +434,7 @@ class PythonSqlPattern(Rule):
     def serialize(self) -> str | JsonObject:
         placeholder = "<SQL>" if self.profile is None else f"<SQL:{self.profile}>"
         argument = placeholder if self.position == 0 else f"{self.keyword}={placeholder}"
-        return _serialize_rule_metadata(f"Python({self.target}({argument}))", self.rationale)
+        return serialize_rule_metadata(f"Python({self.target}({argument}))", self.rationale)
 
 
 _URL_ARG_KEYS = frozenset({"url", "uri", "href"})
@@ -446,7 +446,7 @@ _MAX_ARG_NODES = 1000
 class NamedTool(Rule):
     """Non-shell tool rule: a name plus an optional argument specifier.
 
-    Name matches exactly (``Read``), as a prefix glob (``mcp__memory__*``), or as ``*``.
+    Name matches exactly (``Read``), as a prefix glob (``Deferred*``), or as ``*``.
     The optional specifier scopes by the tool's input, keyed by conventional field names so
     the same syntax works for any tool without hard-coding tool names:
 
@@ -502,7 +502,7 @@ class NamedTool(Rule):
 
     def serialize(self) -> str | JsonObject:
         serialized = self.name if self.specifier is None else f"{self.name}({self.specifier})"
-        return _serialize_rule_metadata(serialized, self.rationale)
+        return serialize_rule_metadata(serialized, self.rationale)
 
 
 @dataclass(frozen=True)

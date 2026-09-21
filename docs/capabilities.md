@@ -12,6 +12,7 @@ not available from that host or adapter.
 |---|---:|---:|---:|---:|---:|
 | Structural Shell rules | ✓ `Bash` | ✓ `Bash` | ✓ `bash` | ✓ shell tools | ✓ shell aliases |
 | Named and scoped tools | ✓ all hooked tools | ◐ hooked Bash, patch, MCP | ✓ all tools | ✓ all tools | ✓ all tools |
+| Canonical `MCP(server.tool)` rules | ✓ | ✓ | ✓ config-aware shim | ✓ | ✓ |
 | Scoped `Read` | ✓ | — native Read is not in the installed matcher | ✓ | ✓ | ✓ |
 | Semantic `Write` | ✓ Edit, MultiEdit, NotebookEdit, Write | ✓ patch add/update/delete/move | ✓ edit, write, patch | ✓ replace, write_file | ✓ write aliases |
 | Multi-file/move aggregation | — native calls are individual | ✓ | ✓ for patchText | — native calls are individual | — native call has one path |

@@ -2,6 +2,8 @@
 
 from .evaluation import Policy as Policy
 from .evaluation import aggregate as aggregate
+from .mcp import McpToolRequest as McpToolRequest
+from .mcp import McpToolRule as McpToolRule
 from .model import (
     POLICY_FILENAME as POLICY_FILENAME,
 )

@@ -18,6 +18,7 @@ from ..domain import (
     Decision,
     InstallMode,
     JsonObject,
+    McpToolRequest,
     RejectedRequest,
     Request,
     Rule,
@@ -81,9 +82,17 @@ class CodexAdapter(AgentAdapter):
                     command = metadata.get("command") if isinstance(metadata, dict) else None
                     return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""))
                 if isinstance(permission_type, str):
+                    mcp_request = _codex_mcp_request(permission_type, tool_arguments(metadata), None)
+                    if mcp_request is not None:
+                        return mcp_request
                     return ToolRequest(permission_type, tool_arguments(metadata))
                 return None
-        return ClaudeAdapter().parse_event(payload, event_name)
+        request = ClaudeAdapter().parse_event(payload, event_name)
+        if isinstance(request, ToolRequest):
+            mcp_request = _codex_mcp_request(request.tool, request.arguments, request.cwd)
+            if mcp_request is not None:
+                return mcp_request
+        return request
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> int:
         # Codex's two events split responsibilities: PreToolUse is the fast-path
@@ -179,6 +188,20 @@ def _enable_codex_hooks_feature(path: Path, *, dry_run: bool) -> list[Path]:
     if not dry_run:
         atomic_write(path, doc.as_string())
     return [path]
+
+
+def _codex_mcp_request(
+    tool_name: str,
+    arguments: tuple[tuple[str, str], ...],
+    cwd: Path | None,
+) -> McpToolRequest | None:
+    if tool_name.startswith("mcp__"):
+        server, separator, tool = tool_name[5:].partition("__")
+    else:
+        server, separator, tool = tool_name.partition(".")
+    if not server or not separator or not tool:
+        return None
+    return McpToolRequest(server, tool, arguments, cwd)
 
 
 def _parse_codex_prefix_rules(text: str) -> Iterator[tuple[list[str], str]]:

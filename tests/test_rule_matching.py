@@ -12,6 +12,8 @@ from agentperm import (
     CompoundRequest,
     Decision,
     JsonObject,
+    McpToolRequest,
+    McpToolRule,
     NamedTool,
     Policy,
     PolicyError,
@@ -129,8 +131,90 @@ def test_named_tool_wildcard_matches_anything() -> None:
 
 
 def test_named_tool_prefix_glob() -> None:
-    assert NamedTool("mcp__memory__*").matches("mcp__memory__lookup") is True
-    assert NamedTool("mcp__memory__*").matches("mcp__other__x") is False
+    assert NamedTool("Deferred*").matches("DeferredRead") is True
+    assert NamedTool("Deferred*").matches("Read") is False
+
+
+@pytest.mark.parametrize(
+    ("text", "canonical"),
+    [
+        ("MCP(coderift.open_repository)", "MCP(coderift.open_repository)"),
+        ("MCP(coderift.*)", "MCP(coderift.*)"),
+        ("MCP(*)", "MCP(*)"),
+    ],
+)
+def test_mcp_rules_parse_and_serialize_canonically(text: str, canonical: str) -> None:
+    rule = parse_rule(text)
+
+    assert isinstance(rule, McpToolRule)
+    assert rule.serialize() == canonical
+
+
+def test_mcp_rule_matches_only_its_server_and_tool_scope() -> None:
+    server = parse_rule("MCP(coderift.*)")
+    exact = parse_rule("MCP(coderift.open_repository)")
+    all_mcp = parse_rule("MCP(*)")
+    assert isinstance(server, McpToolRule)
+    assert isinstance(exact, McpToolRule)
+    assert isinstance(all_mcp, McpToolRule)
+
+    assert server.matches("coderift", "open_repository") is True
+    assert server.matches("atlassian", "open_repository") is False
+    assert exact.matches("coderift", "open_repository") is True
+    assert exact.matches("coderift", "close_repository") is False
+    assert all_mcp.matches("atlassian", "jira_search") is True
+
+
+@pytest.mark.parametrize(
+    ("pattern", "matching", "not_matching"),
+    [
+        ("MCP(coderift.{find_symbol,get_usages})", "find_symbol", "open_repository"),
+        ("MCP(coderift.get_*)", "get_usages", "find_symbol"),
+        ("MCP(coderift.*_repository)", "open_repository", "find_symbol"),
+        ("MCP(coderift.*.foo)", "navigation.deep.foo", "navigation.deep.bar"),
+        ("MCP(coderift.{foo,bar}.*)", "bar.deep.tool", "baz.deep.tool"),
+        (r"MCP(server\.prod.literal\*tool)", "literal*tool", "literal_tool"),
+    ],
+)
+def test_mcp_patterns_support_globs_alternatives_and_escaping(
+    pattern: str,
+    matching: str,
+    not_matching: str,
+) -> None:
+    rule = parse_rule(pattern)
+    assert isinstance(rule, McpToolRule)
+
+    server = "server.prod" if pattern.startswith(r"MCP(server\.") else "coderift"
+    assert rule.matches(server, matching) is True
+    assert rule.matches(server, not_matching) is False
+
+
+def test_mcp_policy_evaluates_typed_server_and_tool_identity() -> None:
+    rule = parse_rule("MCP({coderift,atlassian}.{find_*,get_*})")
+    assert isinstance(rule, McpToolRule)
+    policy = Policy(allow=(rule,))
+
+    assert policy.decide(McpToolRequest("coderift", "find_symbol")).decision is Decision.Allow
+    assert policy.decide(McpToolRequest("atlassian", "get_issue")).decision is Decision.Allow
+    assert policy.decide(McpToolRequest("github", "get_issue")).decision is Decision.NoOpinion
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "MCP()",
+        "MCP(coderift)",
+        "MCP(.find_symbol)",
+        "MCP(coderift.)",
+        "MCP(coderift.{find_symbol})",
+        "MCP(coderift.{find_symbol,})",
+        "MCP(coderift.{find_symbol,get_usages)",
+        "MCP(coderift.find_symbol\\)",
+    ),
+)
+def test_malformed_mcp_patterns_fail_loudly(text: str) -> None:
+    with pytest.raises(PolicyError):
+        parse_rule(text)
 
 
 def test_named_tool_reason_round_trips_and_is_verbatim_rationale() -> None:

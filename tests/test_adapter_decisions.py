@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from agentperm import (
+    AgentAdapter,
     AgentName,
     BashCommand,
     BashOption,
@@ -18,6 +19,8 @@ from agentperm import (
     Decision,
     GeminiAdapter,
     JsonObject,
+    KiroAdapter,
+    McpToolRequest,
     NamedTool,
     OpencodeAdapter,
     Policy,
@@ -103,6 +106,55 @@ def test_claude_parse_non_bash_tool_event() -> None:
     assert isinstance(request, ToolRequest)
     assert request.tool == "Read"
     assert ("file_path", "/tmp/x") in request.arguments  # input threaded through for scoping
+
+
+@pytest.mark.parametrize(
+    ("adapter", "event_name", "payload"),
+    [
+        (
+            ClaudeAdapter(),
+            "PreToolUse",
+            {"tool_name": "mcp__coderift__open_repository", "tool_input": {"path": "/workspace"}},
+        ),
+        (
+            CodexAdapter(),
+            "PermissionRequest",
+            {"tool_name": "coderift.open_repository", "tool_input": {"path": "/workspace"}},
+        ),
+        (
+            GeminiAdapter(),
+            "BeforeTool",
+            {"tool_name": "mcp_coderift_open_repository", "tool_input": {"path": "/workspace"}},
+        ),
+        (
+            OpencodeAdapter(),
+            "tool.execute.before",
+            {
+                "tool_name": "coderift_open_repository",
+                "mcp_server": "coderift",
+                "tool_input": {"path": "/workspace"},
+            },
+        ),
+        (
+            KiroAdapter(),
+            "preToolUse",
+            {"tool_name": "@coderift/open_repository", "tool_input": {"path": "/workspace"}},
+        ),
+    ],
+)
+def test_one_mcp_rule_matches_every_host_tool_name(
+    adapter: AgentAdapter,
+    event_name: str,
+    payload: JsonObject,
+) -> None:
+    rule = parse_rule("MCP(coderift.*)")
+    assert rule is not None
+
+    request = adapter.parse_event(payload, event_name)
+
+    assert isinstance(request, McpToolRequest)
+    assert (request.server, request.tool) == ("coderift", "open_repository")
+    assert Policy(allow=(rule,)).decide(request).decision is Decision.Allow
 
 
 def test_claude_write_verdict_no_opinion_emits_empty() -> None:

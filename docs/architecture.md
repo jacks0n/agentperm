@@ -36,17 +36,19 @@ children after policy-layer precedence has selected each child verdict.
 class Request: ...
 @dataclass(frozen=True) class ShellRequest(Request): pipeline: Pipeline; cwd: Path | None
 @dataclass(frozen=True) class ToolRequest(Request): tool: str; arguments: ToolArguments; cwd: Path | None
+@dataclass(frozen=True) class McpToolRequest(Request): server: str; tool: str; arguments: ToolArguments; cwd: Path | None
 @dataclass(frozen=True) class CompoundRequest(Request): requests: tuple[Request, ...]
 @dataclass(frozen=True) class RejectedRequest(Request): rationale: str
 ```
 
 Every adapter parses its native hook payload into these semantic types. `ShellRequest` carries a
 parsed `Pipeline`; `ToolRequest` carries a canonical tool capability (e.g. `"Write"`,
-`"WebFetch"`). `CompoundRequest` represents one native operation with several semantic effects;
-the strictest child verdict wins. `RejectedRequest` fails closed when a mutation payload cannot be
-translated safely. Before policy evaluation, the CLI recursively attaches the hook cwd to every
-path-bearing child so relative request targets resolve consistently. It then evaluates each target
-against policies discovered from that target's ancestry.
+`"WebFetch"`); and `McpToolRequest` carries the separately decoded server and tool identity.
+`CompoundRequest` represents one native operation with several semantic effects; the strictest
+child verdict wins. `RejectedRequest` fails closed when a mutation payload cannot be translated
+safely. Before policy evaluation, the CLI recursively attaches the hook cwd to every path-bearing
+child so relative request targets resolve consistently. It then evaluates each target against
+policies discovered from that target's ancestry.
 
 ### Rule
 
@@ -56,13 +58,15 @@ class Rule(ABC): ...
 @dataclass(frozen=True) class BashOption(Rule): commands, options, rationale
 @dataclass(frozen=True) class ShellPattern(Rule): raw, path, flags, value_flags, ...
 @dataclass(frozen=True) class NamedTool(Rule): pattern: str
+@dataclass(frozen=True) class McpToolRule(Rule): server_pattern: str; tool_pattern: str
 ```
 
 `ShellPattern` is the recommended matcher for new shell rules: it matches an ordered operand path
 and normalizes flags independently of their position. `BashCommand` remains the legacy positional
 matcher used by existing policies and several native import adapters. `BashOption` matches a shell
-command invoked with a selected option. `NamedTool` matches by tool name with optional `*`
-wildcard or `mcp__memory__*` prefix.
+command invoked with a selected option. `NamedTool` matches ordinary tools by name with an optional
+trailing `*` wildcard. `McpToolRule` matches the canonical server and tool identity after each host
+adapter has decoded its own MCP name.
 
 ### Policy
 
@@ -305,7 +309,8 @@ Tree-sitter Bash is a maintained Bash grammar. It eliminates the regex parser's 
 src/agentperm/
 ├── __init__.py           Re-export shim — all public names importable from `agentperm`
 ├── domain/
-│   ├── model.py          Decision, Verdict, Rule and Request value objects
+│   ├── model.py          Core Decision, Verdict, Rule and Request value objects
+│   ├── mcp.py            Canonical MCP request and rule value objects
 │   └── evaluation.py     Policy decision and precedence engine
 ├── shell.py              Tree-sitter Bash → Pipeline (parse_pipeline, segment extraction)
 ├── shell_tokens.py       Typed Tree-sitter token boundary
@@ -319,6 +324,7 @@ src/agentperm/
 ├── sql/                  SQL domain, document adapters, SQLGlot boundary, policy service
 ├── adapters/             Host adapters and shared apply_patch translation
 ├── rules.py              Rule parsing: string/dict → Rule objects
+├── mcppattern.py         MCP identity pattern parsing and matching
 ├── policy.py             Policy file I/O (load, save, merge)
 ├── cli.py                CLI entry point (install, uninstall, import, init, validate, why, check, edit)
 ├── validate.py           Policy linting (`agentperm validate`)

@@ -112,6 +112,8 @@ def test_install_includes_hard_deny_bridge_and_legacy_permission_hook(
 
     assert '"tool.execute.before": async (tool, output)' in source
     assert 'bridgeDecision("tool.execute.before"' in source
+    assert "mcpServers = Object.keys(config.mcp" in source
+    assert "mcp_server: mcpServer?.name" in source
     assert "tool_name: tool.tool" in source
     assert "tool_input: output.args" in source
     assert 'decision?.status === "deny"' in source
