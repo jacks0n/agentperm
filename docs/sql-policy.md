@@ -119,10 +119,12 @@ Inline Python call targets and SQL argument locations are also declared as rules
 
 Targets are statically resolved using the existing inline-Python analyzer and may contain `*`.
 The positional or keyword argument may use bounded local construction from literals, concatenation,
-f-strings, and local string-returning helpers; every possible result must pass the SQL policy. Other
-Python effects are still analyzed, while dynamic targets and unresolved SQL require approval. Nothing
-in the core Python effect analyzer assumes a particular database library or helper name. Library
-wrappers such as SQLAlchemy `text(...)` are isolated behind registered Python-to-SQL adapters.
+f-strings, local string-returning helpers, branch assignments, literal loop alternatives, static
+mapping iteration, and fixed-shape joins generated over integer ranges. Every possible result must
+pass the SQL policy. Other Python effects are still analyzed, while arbitrary runtime values,
+excessive alternatives, dynamic targets, and unresolved SQL require approval. Nothing in the core
+Python effect analyzer assumes a particular database library or helper name. Library wrappers such
+as SQLAlchemy `text(...)` are isolated behind registered Python-to-SQL adapters.
 
 Both `python - <<'PY'` and Python's equivalent implicit-stdin form are supported:
 

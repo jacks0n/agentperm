@@ -318,10 +318,14 @@ src/agentperm/
 ├── shell_redirection.py  Redirect classification
 ├── shellpattern.py       Shell(...) DSL parser + matcher
 ├── pythoncode.py         Shallow AST analysis for inline Python (Python(readonly))
+├── python_local_values.py  Provenance for safe mutations of fresh local containers
 ├── command_arguments.py  Typed argparse namespace
 ├── hook_passthrough.py   Transparent unresolved-hook relay
 ├── json_boundary.py      Checked JSON/JSONC decoding
 ├── sql/                  SQL domain, document adapters, SQLGlot boundary, policy service
+│   ├── python_adapters.py  Library-specific Python-to-SQL unwrapping
+│   ├── python_analysis.py  Python SQL capture orchestration and policy evaluation
+│   └── python_capture.py   Bounded static SQL-source resolution
 ├── adapters/             Host adapters and shared apply_patch translation
 ├── rules.py              Rule parsing: string/dict → Rule objects
 ├── mcppattern.py         MCP identity pattern parsing and matching

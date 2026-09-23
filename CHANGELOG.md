@@ -69,6 +69,13 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - `break`, `export`, `unset`, `set -a`, and `set +a` now receive the overridable inert-shell fallback
   allow; redirects, substitutions, and explicit user rules still take precedence.
 - `Python(readonly)` now analyzes literal heredocs with or without an explicit stdin `-`.
+- Python SQL captures now preserve read-only intent through SQLAlchemy `text(...)`, branch-assigned
+  query objects, static query mappings, bounded loop alternatives, local string helpers, and
+  fixed-shape bind lists generated from integer ranges. Every possible SQL result is still checked;
+  arbitrary runtime interpolation and write effects continue to require approval.
+- `Python(readonly)` now distinguishes updates to freshly allocated local dictionaries/lists and
+  client-only call timeout configuration from mutations of unknown objects, so diagnostic result
+  decoration and timeout bounds do not cause false prompts.
 
 ## [0.4.0] — 2026-08-28
 

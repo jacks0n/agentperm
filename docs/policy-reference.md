@@ -111,9 +111,11 @@ PY
 ```
 
 The source is parsed with Python's standard-library AST without being executed. Imports, local
-variables, ordinary calls, printing, and inspection are allowed. Recognized filesystem, process,
-network, database, environment, attribute, or subscript mutation asks. Syntax errors, dynamic call
-targets, shell-expanded heredocs, and unavailable stdin also ask.
+variables, ordinary calls, printing, and inspection are allowed. Updates to proven-fresh built-in
+dictionaries and lists are local computation and are allowed; mutations of unknown attributes or
+subscripts still ask. Client-only call timeout assignment is also treated as local configuration.
+Recognized filesystem, process, network, database, and environment mutation asks. Syntax errors,
+dynamic call targets, shell-expanded heredocs, and unavailable stdin also ask.
 
 This is deliberately shallow and assumes a non-adversarial caller. It tracks import aliases and
 direct assignment rebinding such as `f = os.remove`, and visits syntax inside function definitions.
@@ -124,10 +126,11 @@ the v1 model. `python -m`, script files, and interactive Python are unaffected.
 SQL passed to a database client or Python helper is parsed only when a configured semantic capture
 identifies the argument. See [Semantic SQL policies](sql-policy.md).
 
-Python SQL captures also unwrap registered library adapters such as SQLAlchemy `text(...)` and resolve
-bounded local string construction (constants, concatenation, f-strings, and local string-returning
-helpers). Every statically possible result must satisfy the selected SQL policy; dynamic or excessive
-alternatives ask.
+Python SQL captures also unwrap registered library adapters such as SQLAlchemy `text(...)`. Bounded
+resolution covers constants, concatenation, f-strings, local string-returning helpers, branch
+assignments, literal loop alternatives, static mapping iteration, and fixed-shape joins generated
+over integer ranges. Every statically possible result must satisfy the selected SQL policy; arbitrary
+runtime values or excessive alternatives ask.
 
 Call decisions can be customized by exact qualified name:
 
