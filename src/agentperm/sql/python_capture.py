@@ -31,6 +31,25 @@ class PythonSqlSourceResolver:
         else:
             self._constants[target.id] = strings
 
+    def track_iteration(self, target: ast.expr, iterator: ast.expr) -> None:
+        """Bind a simple loop target to every statically bounded string value."""
+
+        if not isinstance(target, ast.Name):
+            return
+        elements = iterator.elts if isinstance(iterator, ast.List | ast.Set | ast.Tuple) else (iterator,)
+        values: list[str] = []
+        for element in elements:
+            resolved = self._literal_strings(element)
+            if resolved is None:
+                self._constants.pop(target.id, None)
+                return
+            values.extend(resolved)
+        bounded = self._bounded_unique(values)
+        if bounded is None:
+            self._constants.pop(target.id, None)
+        else:
+            self._constants[target.id] = bounded
+
     def resolve(self, node: ast.expr | None) -> tuple[str, ...] | None:
         if isinstance(node, ast.Call):
             target = self._call_target(node.func)

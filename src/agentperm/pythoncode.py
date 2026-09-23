@@ -492,6 +492,8 @@ class _Analyzer(ast.NodeVisitor):
     ) -> None:
         self._check_target(target)
         self.visit(iterator)
+        if self.function_depth == 0:
+            self.sql_sources.track_iteration(target, iterator)
         for child in (*body, *orelse):
             self.visit(child)
 

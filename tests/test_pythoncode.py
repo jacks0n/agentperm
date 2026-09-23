@@ -168,6 +168,37 @@ PY
     assert policy.decide(ShellRequest(parse_pipeline(command))).decision is Decision.Ask
 
 
+@pytest.mark.parametrize(
+    ("queries", "expected"),
+    (
+        (("select * from app.records", "select count(*) from app.records"), Decision.Allow),
+        (("select * from app.records", "delete from app.records"), Decision.Ask),
+    ),
+)
+def test_sql_capture_checks_every_bounded_loop_value(queries: tuple[str, ...], expected: Decision) -> None:
+    policy = parse_policy_text(
+        """
+        {
+          permissions: {
+            allow: [
+              {"SQL(read-only)": {dialect: "postgres", effects: {only: ["read"]}}},
+              "Python(*.execute(<SQL:read-only>))"
+            ]
+          }
+        }
+        """,
+        "test policy",
+    ).policy
+    source_values = ", ".join(repr(query) for query in queries)
+    command = f"""python - <<'PY'
+from sqlalchemy import text
+for sql in ({source_values}):
+    connection.execute(text(sql))
+PY
+"""
+    assert policy.decide(ShellRequest(parse_pipeline(command))).decision is expected
+
+
 def test_readonly_file_search_with_exception_handling_allows() -> None:
     command = """python - <<'PY'
 from pathlib import Path
