@@ -593,6 +593,8 @@ class _Analyzer(ast.NodeVisitor):
             return self._call_target(node)
         if isinstance(node, ast.Call):
             return self._call_target(node.func)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return "builtins.str"
         return None
 
     def _builtin_call_problem(self, node: ast.Call, target: str) -> str | None:

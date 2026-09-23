@@ -94,9 +94,59 @@ class PythonSqlSourceResolver:
                     return None
                 alternatives = combined
             return alternatives
+        if isinstance(node, ast.Call):
+            generated = self._joined_range_strings(node, bindings, stack)
+            if generated is not None:
+                return generated
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             return self._local_function_results(node, bindings, stack)
         return None
+
+    def _joined_range_strings(
+        self,
+        node: ast.Call,
+        bindings: dict[str, tuple[str, ...]],
+        stack: frozenset[str],
+    ) -> tuple[str, ...] | None:
+        """Model a fixed-shape string joined over integer ``range`` values.
+
+        Two representative items retain both the generated item and separator
+        in the SQL presented to the parser. Arbitrary iterables remain dynamic.
+        """
+        if (
+            not isinstance(node.func, ast.Attribute)
+            or node.func.attr != "join"
+            or len(node.args) != 1
+            or node.keywords
+            or not isinstance(node.args[0], ast.GeneratorExp | ast.ListComp)
+        ):
+            return None
+        comprehension = node.args[0]
+        if len(comprehension.generators) != 1:
+            return None
+        generator = comprehension.generators[0]
+        if (
+            generator.is_async
+            or generator.ifs
+            or not isinstance(generator.target, ast.Name)
+            or not isinstance(generator.iter, ast.Call)
+            or self._call_target(generator.iter.func) != "builtins.range"
+        ):
+            return None
+        separators = self._literal_strings(node.func.value, bindings, stack)
+        if separators is None:
+            return None
+        samples: list[tuple[str, ...]] = []
+        for value in ("0", "1"):
+            sample_bindings = dict(bindings)
+            sample_bindings[generator.target.id] = (value,)
+            sample = self._literal_strings(comprehension.elt, sample_bindings, stack)
+            if sample is None:
+                return None
+            samples.append(sample)
+        return self._bounded_unique(
+            [separator.join((first, second)) for separator, first, second in product(separators, *samples)]
+        )
 
     def _local_function_results(
         self,

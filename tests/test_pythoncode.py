@@ -199,6 +199,54 @@ PY
     assert policy.decide(ShellRequest(parse_pipeline(command))).decision is expected
 
 
+def _oracle_python_sql_policy() -> Policy:
+    return parse_policy_text(
+        """
+        {
+          permissions: {
+            allow: [
+              {"SQL(read-only)": {dialect: "oracle", effects: {only: ["read"]}}},
+              "Python(*.execute(<SQL:read-only>))"
+            ]
+          }
+        }
+        """,
+        "test policy",
+    ).policy
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    (
+        ("select * from app.records where record_id in ({placeholders})", Decision.Allow),
+        ("delete from app.records where record_id in ({placeholders})", Decision.Ask),
+    ),
+)
+def test_sql_capture_checks_generated_bind_placeholder_list(statement: str, expected: Decision) -> None:
+    command = """python - <<'PY'
+from sqlalchemy import text
+for batch in batches(records, 100):
+    placeholders = ", ".join(f":item{i}" for i in range(len(batch)))
+    sql = f"__STATEMENT__"
+    connection.execute(text(sql), {f"item{i}": value for i, value in enumerate(batch)})
+PY
+""".replace("__STATEMENT__", statement)
+    assert _oracle_python_sql_policy().decide(ShellRequest(parse_pipeline(command))).decision is expected
+
+
+def test_sql_capture_rejects_join_over_arbitrary_values() -> None:
+    command = """python - <<'PY'
+from sqlalchemy import text
+values = load_values()
+fragment = ", ".join(str(value) for value in values)
+sql = f"select * from app.records where record_id in ({fragment})"
+connection.execute(text(sql))
+PY
+"""
+    verdict = _oracle_python_sql_policy().decide(ShellRequest(parse_pipeline(command)))
+    assert verdict.decision is Decision.Ask
+
+
 def test_readonly_file_search_with_exception_handling_allows() -> None:
     command = """python - <<'PY'
 from pathlib import Path
