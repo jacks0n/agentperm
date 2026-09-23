@@ -30,6 +30,20 @@ def _decide(
     return policy.decide(ShellRequest(parse_pipeline(command)))
 
 
+_SQL_POLICY = parse_policy_text(
+    """{permissions:{allow:[
+      {"SQL(read-only)":{dialect:"postgres",effects:{only:["read"]}}},
+      "Python(*.execute(<SQL:read-only>))"
+    ]}}""",
+    "test policy",
+).policy
+
+
+def _sql_decide(source: str) -> Decision:
+    command = f"python - <<'PY'\nfrom sqlalchemy import text\n{source}\nPY\n"
+    return _SQL_POLICY.decide(ShellRequest(parse_pipeline(command))).decision
+
+
 def test_python_readonly_rule_parses_and_serializes() -> None:
     rule = parse_rule("Python(readonly)")
     assert isinstance(rule, PythonReadonly)
@@ -50,6 +64,14 @@ def test_python_readonly_rule_is_allow_only() -> None:
         'python3 -c "import inspect; print(inspect.signature(len))"',
         'uv run python -c "from agentperm.adapters.kiro import _kiro_command_rule; '
         "print(_kiro_command_rule('git status'))\"",
+        """python - <<'PY'
+rows = [dict(row) for row in load_rows()]
+for row in rows:
+    row["derived"] = normalize(row["source"])
+print(rows)
+PY
+""",
+        'python -c "connection.driver_connection.call_timeout = 300000"',
     ),
 )
 def test_readonly_diagnostic_commands_allow(command: str) -> None:
@@ -68,104 +90,90 @@ PY
 
 
 def test_sql_capture_unwraps_static_sqlalchemy_text() -> None:
-    policy = parse_policy_text(
-        """
-        {
-          permissions: {
-            allow: [
-              {"SQL(read-only)": {dialect: "postgres", effects: {only: ["read"]}}},
-              "Python(*.execute(<SQL:read-only>))"
-            ]
-          }
-        }
-        """,
-        "test policy",
-    ).policy
-    command = """python - <<'PY'
-from sqlalchemy import text
-sql = "select count(*) from app.records"
-with engine.connect() as connection:
-    print(connection.execute(text(sql)).one())
-PY
-"""
-    assert policy.decide(ShellRequest(parse_pipeline(command))).decision is Decision.Allow
+    assert _sql_decide('sql="select count(*) from app.records"\nconnection.execute(text(sql))') is Decision.Allow
 
 
-def test_sql_capture_resolves_bounded_local_string_builders() -> None:
-    policy = parse_policy_text(
-        """
-        {
-          permissions: {
-            allow: [
-              {"SQL(read-only)": {dialect: "postgres", effects: {only: ["read"]}}},
-              "Python(*.execute(<SQL:read-only>))"
-            ]
-          }
-        }
-        """,
-        "test policy",
-    ).policy
-    command = """python - <<'PY'
-from sqlalchemy import text
+def test_sql_capture_resolves_static_construction_shapes() -> None:
+    local_helpers = """
 for mode in ('primary', 'archive'):
     def relation(name):
         return ('ONLY app.' + name) if mode == 'primary' else ('app.' + name + '_current')
-    def active(alias):
-        return f"{alias}.active = true"
-    sql = f"select count(*) from {relation('records')} m where {active('m')}"
-    print(connection.execute(text(sql)).one())
-PY
+    sql = f"select count(*) from {relation('records')}"
+    connection.execute(text(sql))
 """
-    assert policy.decide(ShellRequest(parse_pipeline(command))).decision is Decision.Allow
+    generated_placeholders = """
+placeholders = ", ".join(f":item{i}" for i in range(len(records)))
+sql = f"select * from app.records where record_id in ({placeholders})"
+connection.execute(text(sql))
+"""
+    prewrapped_branches = """
+for mode in (Mode.PRIMARY, Mode.ARCHIVE):
+    if mode is Mode.PRIMARY:
+        query = text("select * from app.records")
+    else:
+        query = text("select * from app.records_archive")
+    connection.execute(query)
+"""
+    mapped_queries = """
+queries = {
+    Mode.PRIMARY: "select count(*) from app.records",
+    Mode.ARCHIVE: "select * from app.records",
+}
+for label, query in queries.items():
+    connection.execute(text(query))
+"""
+    opaque_control_values = """
+def table(mode, name):
+    return f"app.{name}" if mode is Mode.PRIMARY else f"app.{name}_archive"
+def active(alias):
+    return f"{alias}.active = true"
+for mode in (Mode.PRIMARY, Mode.ARCHIVE):
+    query = f'''select * from {table(mode, 'records')} a
+      join {table(mode, 'records')} b on {active('b')}
+      join {table(mode, 'records')} c on {active('c')}
+      join {table(mode, 'records')} d on {active('d')}
+      join {table(mode, 'records')} e on {active('e')}
+      join {table(mode, 'records')} f on {active('f')}
+      join {table(mode, 'records')} g on {active('g')}
+      where {active('a')} {"and a.kind = 'P'" if mode is Mode.PRIMARY else ''}'''
+    connection.execute(text(query))
+"""
+    for source in (
+        local_helpers,
+        generated_placeholders,
+        prewrapped_branches,
+        mapped_queries,
+        opaque_control_values,
+    ):
+        assert _sql_decide(source) is Decision.Allow
 
 
-def test_sql_capture_checks_every_local_string_builder_result() -> None:
-    policy = parse_policy_text(
-        """
-        {
-          permissions: {
-            allow: [
-              {"SQL(read-only)": {dialect: "postgres", effects: {only: ["read"]}}},
-              "Python(*.execute(<SQL:read-only>))"
-            ]
-          }
-        }
-        """,
-        "test policy",
-    ).policy
-    command = """python - <<'PY'
-from sqlalchemy import text
-def query():
+def test_sql_capture_rejects_unsafe_or_unbounded_construction_shapes() -> None:
+    local_write_branch = """def query():
     return "select * from app.records" if inspect_only else "delete from app.records"
-connection.execute(text(query()))
-PY
+connection.execute(text(query()))"""
+    generated_write = """
+placeholders = ", ".join(f":item{i}" for i in range(len(records)))
+query = f"delete from app.records where record_id in ({placeholders})"
+connection.execute(text(query))
 """
-    assert policy.decide(ShellRequest(parse_pipeline(command))).decision is Decision.Ask
+    arbitrary_values = """
+fragment = ", ".join(str(value) for value in load_values())
+query = f"select * from app.records where record_id in ({fragment})"
+connection.execute(text(query))
+"""
+    mapped_write = """
+queries = {"read": "select * from app.records", "write": "delete from app.records"}
+for label, query in queries.items():
+    connection.execute(text(query))
+"""
+    for source in (local_write_branch, generated_write, arbitrary_values, mapped_write):
+        assert _sql_decide(source) is Decision.Ask
 
 
 def test_function_local_string_does_not_make_outer_dynamic_sql_static() -> None:
-    policy = parse_policy_text(
-        """
-        {
-          permissions: {
-            allow: [
-              {"SQL(read-only)": {dialect: "postgres", effects: {only: ["read"]}}},
-              "Python(*.execute(<SQL:read-only>))"
-            ]
-          }
-        }
-        """,
-        "test policy",
-    ).policy
-    command = """python - <<'PY'
-from sqlalchemy import text
-sql = get_query()
-def unrelated():
-    sql = "select * from app.records"
-connection.execute(text(sql))
-PY
-"""
-    assert policy.decide(ShellRequest(parse_pipeline(command))).decision is Decision.Ask
+    source = 'sql=get_query()\ndef unrelated(): return "select * from app.records"\nconnection.execute(text(sql))'
+    assert _sql_decide(source) is Decision.Ask
 
 
 @pytest.mark.parametrize(
@@ -176,75 +184,8 @@ PY
     ),
 )
 def test_sql_capture_checks_every_bounded_loop_value(queries: tuple[str, ...], expected: Decision) -> None:
-    policy = parse_policy_text(
-        """
-        {
-          permissions: {
-            allow: [
-              {"SQL(read-only)": {dialect: "postgres", effects: {only: ["read"]}}},
-              "Python(*.execute(<SQL:read-only>))"
-            ]
-          }
-        }
-        """,
-        "test policy",
-    ).policy
     source_values = ", ".join(repr(query) for query in queries)
-    command = f"""python - <<'PY'
-from sqlalchemy import text
-for sql in ({source_values}):
-    connection.execute(text(sql))
-PY
-"""
-    assert policy.decide(ShellRequest(parse_pipeline(command))).decision is expected
-
-
-def _oracle_python_sql_policy() -> Policy:
-    return parse_policy_text(
-        """
-        {
-          permissions: {
-            allow: [
-              {"SQL(read-only)": {dialect: "oracle", effects: {only: ["read"]}}},
-              "Python(*.execute(<SQL:read-only>))"
-            ]
-          }
-        }
-        """,
-        "test policy",
-    ).policy
-
-
-@pytest.mark.parametrize(
-    ("statement", "expected"),
-    (
-        ("select * from app.records where record_id in ({placeholders})", Decision.Allow),
-        ("delete from app.records where record_id in ({placeholders})", Decision.Ask),
-    ),
-)
-def test_sql_capture_checks_generated_bind_placeholder_list(statement: str, expected: Decision) -> None:
-    command = """python - <<'PY'
-from sqlalchemy import text
-for batch in batches(records, 100):
-    placeholders = ", ".join(f":item{i}" for i in range(len(batch)))
-    sql = f"__STATEMENT__"
-    connection.execute(text(sql), {f"item{i}": value for i, value in enumerate(batch)})
-PY
-""".replace("__STATEMENT__", statement)
-    assert _oracle_python_sql_policy().decide(ShellRequest(parse_pipeline(command))).decision is expected
-
-
-def test_sql_capture_rejects_join_over_arbitrary_values() -> None:
-    command = """python - <<'PY'
-from sqlalchemy import text
-values = load_values()
-fragment = ", ".join(str(value) for value in values)
-sql = f"select * from app.records where record_id in ({fragment})"
-connection.execute(text(sql))
-PY
-"""
-    verdict = _oracle_python_sql_policy().decide(ShellRequest(parse_pipeline(command)))
-    assert verdict.decision is Decision.Ask
+    assert _sql_decide(f"for sql in ({source_values}): connection.execute(text(sql))") is expected
 
 
 def test_readonly_file_search_with_exception_handling_allows() -> None:

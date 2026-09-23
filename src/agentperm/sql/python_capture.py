@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from itertools import product
 
 from .python_adapters import PYTHON_SQL_CALL_ADAPTERS
 
-_MAX_STATIC_STRING_ALTERNATIVES = 64
+_MAX_STATIC_STRING_ALTERNATIVES = 1024
+
+type StringValues = tuple[str, ...]
+type MappingValues = tuple[StringValues | None, StringValues | None]
+type ResolverState = tuple[dict[str, StringValues], dict[str, MappingValues]]
 
 
 class PythonSqlSourceResolver:
@@ -16,7 +20,8 @@ class PythonSqlSourceResolver:
 
     def __init__(self, call_target: Callable[[ast.expr], str | None]) -> None:
         self._call_target = call_target
-        self._constants: dict[str, tuple[str, ...]] = {}
+        self._constants: dict[str, StringValues] = {}
+        self._mappings: dict[str, MappingValues] = {}
         self._functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
 
     def track_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -25,15 +30,29 @@ class PythonSqlSourceResolver:
     def track_assignment(self, target: ast.expr, value: ast.expr) -> None:
         if not isinstance(target, ast.Name):
             return
-        strings = self._literal_strings(value)
+        strings = self.resolve(value)
         if strings is None:
             self._constants.pop(target.id, None)
         else:
             self._constants[target.id] = strings
+        mapping = self._literal_mapping(value)
+        if mapping is None:
+            self._mappings.pop(target.id, None)
+        else:
+            self._mappings[target.id] = mapping
 
     def track_iteration(self, target: ast.expr, iterator: ast.expr) -> None:
         """Bind a simple loop target to every statically bounded string value."""
 
+        mapping = self._mapping_iteration(iterator)
+        if mapping is not None and isinstance(target, ast.Tuple) and len(target.elts) == 2:
+            for item, mapped_values in zip(target.elts, mapping, strict=True):
+                if isinstance(item, ast.Name):
+                    if mapped_values is None:
+                        self._constants.pop(item.id, None)
+                    else:
+                        self._constants[item.id] = mapped_values
+            return
         if not isinstance(target, ast.Name):
             return
         elements = iterator.elts if isinstance(iterator, ast.List | ast.Set | ast.Tuple) else (iterator,)
@@ -49,6 +68,44 @@ class PythonSqlSourceResolver:
             self._constants.pop(target.id, None)
         else:
             self._constants[target.id] = bounded
+
+    def snapshot(self) -> ResolverState:
+        return dict(self._constants), dict(self._mappings)
+
+    def restore(self, state: ResolverState) -> None:
+        constants, mappings = state
+        self._constants = dict(constants)
+        self._mappings = dict(mappings)
+
+    def merge(self, states: tuple[ResolverState, ...]) -> None:
+        constant_names: set[str] = set(states[0][0])
+        mapping_names: set[str] = set(states[0][1])
+        for constants, mappings in states[1:]:
+            constant_names.intersection_update(constants)
+            mapping_names.intersection_update(mappings)
+        merged_constants: dict[str, tuple[str, ...]] = {}
+        for name in constant_names:
+            values = self._bounded_unique([value for constants, _ in states for value in constants[name]])
+            if values is not None:
+                merged_constants[name] = values
+        merged_mappings: dict[str, MappingValues] = {}
+        for name in mapping_names:
+            key_groups = tuple(mappings[name][0] for _, mappings in states)
+            value_groups = tuple(mappings[name][1] for _, mappings in states)
+            keys = (
+                self._bounded_unique([key for group in key_groups if group is not None for key in group])
+                if all(group is not None for group in key_groups)
+                else None
+            )
+            values = (
+                self._bounded_unique([value for group in value_groups if group is not None for value in group])
+                if all(group is not None for group in value_groups)
+                else None
+            )
+            if keys is not None or values is not None:
+                merged_mappings[name] = (keys, values)
+        self._constants = merged_constants
+        self._mappings = merged_mappings
 
     def resolve(self, node: ast.expr | None) -> tuple[str, ...] | None:
         if isinstance(node, ast.Call):
@@ -148,6 +205,36 @@ class PythonSqlSourceResolver:
             [separator.join((first, second)) for separator, first, second in product(separators, *samples)]
         )
 
+    def _literal_mapping(self, node: ast.expr) -> MappingValues | None:
+        if not isinstance(node, ast.Dict) or any(key is None for key in node.keys):
+            return None
+        keys: list[str] = []
+        values: list[str] = []
+        keys_static = True
+        values_static = True
+        for key, value in zip(node.keys, node.values, strict=True):
+            resolved_keys = self._literal_strings(key)
+            resolved_values = self._literal_strings(value)
+            keys_static &= resolved_keys is not None
+            values_static &= resolved_values is not None
+            keys.extend(resolved_keys or ())
+            values.extend(resolved_values or ())
+        bounded_keys = self._bounded_unique(keys) if keys_static else None
+        bounded_values = self._bounded_unique(values) if values_static else None
+        return None if bounded_keys is None and bounded_values is None else (bounded_keys, bounded_values)
+
+    def _mapping_iteration(self, node: ast.expr) -> MappingValues | None:
+        if (
+            not isinstance(node, ast.Call)
+            or node.args
+            or node.keywords
+            or not isinstance(node.func, ast.Attribute)
+            or node.func.attr != "items"
+            or not isinstance(node.func.value, ast.Name)
+        ):
+            return None
+        return self._mappings.get(node.func.value.id)
+
     def _local_function_results(
         self,
         node: ast.Call,
@@ -162,33 +249,46 @@ class PythonSqlSourceResolver:
         positional = function.args.posonlyargs + function.args.args
         if len(node.args) != len(positional) or function.args.vararg or function.args.kwarg:
             return None
-        resolved_args = tuple(self._literal_strings(argument, bindings, stack) for argument in node.args)
-        if any(value is None for value in resolved_args):
-            return None
-        local_bindings = dict(bindings)
-        for parameter, values in zip(positional, resolved_args, strict=True):
-            if values is None:
-                return None
-            local_bindings[parameter.arg] = values
-        returns = tuple(
-            child
+        return_values = tuple(
+            child.value
             for statement in function.body
             for child in ast.walk(statement)
             if isinstance(child, ast.Return) and child.value is not None
         )
-        if not returns:
+        if not return_values:
             return None
+        output_names: set[str] = set()
+        for value in return_values:
+            output_names.update(self._output_names(value))
+        resolved_args = tuple(self._literal_strings(argument, bindings, stack) for argument in node.args)
+        local_bindings = dict(bindings)
+        for parameter, values in zip(positional, resolved_args, strict=True):
+            if values is None:
+                if parameter.arg in output_names:
+                    return None
+            else:
+                local_bindings[parameter.arg] = values
         results: list[str] = []
         next_stack = stack | {node.func.id}
-        for returned in returns:
-            values = self._literal_strings(returned.value, local_bindings, next_stack)
+        for value in return_values:
+            values = self._literal_strings(value, local_bindings, next_stack)
             if values is None:
                 return None
             results.extend(values)
         return self._bounded_unique(results)
 
+    def _output_names(self, node: ast.AST) -> set[str]:
+        if isinstance(node, ast.Name):
+            return {node.id}
+        if isinstance(node, ast.IfExp):
+            return self._output_names(node.body) | self._output_names(node.orelse)
+        names: set[str] = set()
+        for child in ast.iter_child_nodes(node):
+            names.update(self._output_names(child))
+        return names
+
     @staticmethod
-    def _bounded_unique(values: tuple[str, ...] | list[str]) -> tuple[str, ...] | None:
+    def _bounded_unique(values: Sequence[str]) -> tuple[str, ...] | None:
         unique = tuple(dict.fromkeys(values))
         return unique if len(unique) <= _MAX_STATIC_STRING_ALTERNATIVES else None
 

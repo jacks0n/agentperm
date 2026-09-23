@@ -8,13 +8,12 @@ read-only unless a user rule or the built-in mutation catalogue says otherwise.
 from __future__ import annotations
 
 import ast
-import fnmatch
 import re
 from dataclasses import dataclass
 
 from .domain import Decision, PythonCallPolicy, PythonSqlPattern, Segment, Verdict
-from .sql.domain import CapturedSql, SqlCaptureKind, SqlOrigin
-from .sql.python_capture import PythonSqlSourceResolver
+from .python_local_values import LocalValueTracker
+from .sql.python_analysis import PythonSqlAnalysis
 from .sql.service import SqlPolicyService
 
 _MAX_SOURCE_BYTES = 100_000
@@ -311,7 +310,7 @@ def analyze_python_segment(
         return Verdict(Decision.Ask, f"inline Python is not parseable: {error}")
     analyzer = _Analyzer(calls, sql_patterns, sql_service)
     analyzer.visit(tree)
-    if require_sql_capture and not analyzer.matched_sql_pattern:
+    if require_sql_capture and not analyzer.sql_analysis.matched_pattern:
         return None
     return analyzer.verdict
 
@@ -365,13 +364,11 @@ class _Analyzer(ast.NodeVisitor):
         sql_service: SqlPolicyService | None,
     ) -> None:
         self.calls = calls
-        self.sql_patterns = sql_patterns
-        self.sql_service = sql_service
         self.aliases: dict[str, str] = {}
-        self.sql_sources = PythonSqlSourceResolver(self._call_target)
+        self.local_values = LocalValueTracker(self._call_target)
+        self.sql_analysis = PythonSqlAnalysis(sql_patterns, sql_service, self._call_target)
         self.function_depth = 0
         self.node_count = 0
-        self.matched_sql_pattern = False
         self.verdict = Verdict(Decision.Allow, "inline Python AST is read-only")
 
     def visit(self, node: ast.AST) -> None:
@@ -414,7 +411,7 @@ class _Analyzer(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         if self.function_depth == 0:
-            self.sql_sources.track_function(node)
+            self.sql_analysis.sources.track_function(node)
         self.function_depth += 1
         try:
             self.generic_visit(node)
@@ -423,7 +420,7 @@ class _Analyzer(ast.NodeVisitor):
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         if self.function_depth == 0:
-            self.sql_sources.track_function(node)
+            self.sql_analysis.sources.track_function(node)
         self.function_depth += 1
         try:
             self.generic_visit(node)
@@ -452,6 +449,18 @@ class _Analyzer(ast.NodeVisitor):
         self._track_name_alias(node.target, node.value)
         self.visit(node.value)
 
+    def visit_If(self, node: ast.If) -> None:
+        self.visit(node.test)
+        before = self.sql_analysis.sources.snapshot()
+        for child in node.body:
+            self.visit(child)
+        body = self.sql_analysis.sources.snapshot()
+        self.sql_analysis.sources.restore(before)
+        for child in node.orelse:
+            self.visit(child)
+        orelse = self.sql_analysis.sources.snapshot()
+        self.sql_analysis.sources.merge((body, orelse))
+
     def visit_Delete(self, node: ast.Delete) -> None:
         for target in node.targets:
             self._check_target(target)
@@ -466,6 +475,13 @@ class _Analyzer(ast.NodeVisitor):
             for item in target.elts:
                 self._check_target(item)
             return
+        if isinstance(target, ast.Subscript) and self.local_values.owns_subscript(target):
+            self.visit(target.value)
+            self.visit(target.slice)
+            return
+        if isinstance(target, ast.Attribute) and self.local_values.owns_attribute(target):
+            self.visit(target.value)
+            return
         self._record(Decision.Ask, f"Python {type(target).__name__} mutation is not read-only")
         self.visit(target)
 
@@ -474,8 +490,9 @@ class _Analyzer(ast.NodeVisitor):
             resolved = self._call_target(value)
             if resolved is not None:
                 self.aliases[target.id] = resolved
+            self.local_values.track_assignment(target, value)
             if self.function_depth == 0:
-                self.sql_sources.track_assignment(target, value)
+                self.sql_analysis.sources.track_assignment(target, value)
 
     def visit_For(self, node: ast.For) -> None:
         self._visit_for(node.target, node.iter, node.body, node.orelse)
@@ -493,7 +510,8 @@ class _Analyzer(ast.NodeVisitor):
         self._check_target(target)
         self.visit(iterator)
         if self.function_depth == 0:
-            self.sql_sources.track_iteration(target, iterator)
+            self.sql_analysis.sources.track_iteration(target, iterator)
+        self.local_values.track_iteration(target, iterator)
         for child in (*body, *orelse):
             self.visit(child)
 
@@ -508,16 +526,12 @@ class _Analyzer(ast.NodeVisitor):
         if target is None:
             self._record(Decision.Ask, "dynamic Python call target cannot be classified")
         else:
-            sql_pattern = next(
-                (
-                    (decision, pattern)
-                    for decision, pattern in self.sql_patterns
-                    if fnmatch.fnmatchcase(target, pattern.target)
-                ),
-                None,
-            )
-            if sql_pattern is not None:
-                self._visit_sql_call(node, target, *sql_pattern)
+            sql_result = self.sql_analysis.match_call(node, target)
+            if sql_result.matched:
+                for verdict in sql_result.verdicts:
+                    self._record(verdict.decision, verdict.rationale)
+                if sql_result.allow_rationale and self.verdict.decision is Decision.Allow:
+                    self.verdict = Verdict(Decision.Allow, sql_result.allow_rationale)
             else:
                 configured = self.calls.decision_for(target)
                 if configured is Decision.Deny:
@@ -533,50 +547,6 @@ class _Analyzer(ast.NodeVisitor):
             self.visit(argument)
         for keyword in node.keywords:
             self.visit(keyword.value)
-
-    def _visit_sql_call(
-        self,
-        node: ast.Call,
-        target: str,
-        decision: Decision,
-        pattern: PythonSqlPattern,
-    ) -> None:
-        self.matched_sql_pattern = True
-        if decision is Decision.Deny:
-            self._record(Decision.Deny, pattern.rationale or f"Python SQL call denied by policy: {target}")
-            return
-        argument: ast.expr | None = None
-        if pattern.position is not None and len(node.args) > pattern.position:
-            argument = node.args[pattern.position]
-        elif pattern.keyword is not None:
-            argument = next((keyword.value for keyword in node.keywords if keyword.arg == pattern.keyword), None)
-        texts = self.sql_sources.resolve(argument)
-        if texts is None:
-            self._record(Decision.Ask, f"SQL argument for Python call {target} is not a static string")
-            return
-        if decision is Decision.Ask:
-            self._record(Decision.Ask, pattern.rationale or f"Python SQL call requires approval by policy: {target}")
-        if self.sql_service is None:
-            self._record(Decision.Ask, f"no SQL policy is configured for Python call {target}")
-            return
-        sql_verdicts = tuple(
-            self.sql_service.decide(
-                CapturedSql(
-                    text,
-                    pattern.profile,
-                    SqlOrigin(SqlCaptureKind.PythonArgument, target),
-                )
-            )
-            for text in texts
-        )
-        for sql_verdict in sql_verdicts:
-            self._record(sql_verdict.decision, sql_verdict.rationale)
-        if (
-            decision is Decision.Allow
-            and all(verdict.decision is Decision.Allow for verdict in sql_verdicts)
-            and pattern.rationale
-        ):
-            self.verdict = Verdict(Decision.Allow, pattern.rationale)
 
     def _call_target(self, node: ast.expr) -> str | None:
         if isinstance(node, ast.Name):
