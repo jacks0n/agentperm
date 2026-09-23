@@ -15,6 +15,7 @@ from agentperm import (
     ShellRequest,
     Verdict,
     parse_pipeline,
+    parse_policy_text,
     parse_rule,
 )
 
@@ -64,6 +65,107 @@ print([x for x in dir(c) if 'zone' in x.lower() or 'time' in x.lower()])
 PY
 """
     assert _decide(command).decision is Decision.Allow
+
+
+def test_sql_capture_unwraps_static_sqlalchemy_text() -> None:
+    policy = parse_policy_text(
+        """
+        {
+          permissions: {
+            allow: [
+              {"SQL(read-only)": {dialect: "postgres", effects: {only: ["read"]}}},
+              "Python(*.execute(<SQL:read-only>))"
+            ]
+          }
+        }
+        """,
+        "test policy",
+    ).policy
+    command = """python - <<'PY'
+from sqlalchemy import text
+sql = "select count(*) from app.records"
+with engine.connect() as connection:
+    print(connection.execute(text(sql)).one())
+PY
+"""
+    assert policy.decide(ShellRequest(parse_pipeline(command))).decision is Decision.Allow
+
+
+def test_sql_capture_resolves_bounded_local_string_builders() -> None:
+    policy = parse_policy_text(
+        """
+        {
+          permissions: {
+            allow: [
+              {"SQL(read-only)": {dialect: "postgres", effects: {only: ["read"]}}},
+              "Python(*.execute(<SQL:read-only>))"
+            ]
+          }
+        }
+        """,
+        "test policy",
+    ).policy
+    command = """python - <<'PY'
+from sqlalchemy import text
+for mode in ('primary', 'archive'):
+    def relation(name):
+        return ('ONLY app.' + name) if mode == 'primary' else ('app.' + name + '_current')
+    def active(alias):
+        return f"{alias}.active = true"
+    sql = f"select count(*) from {relation('records')} m where {active('m')}"
+    print(connection.execute(text(sql)).one())
+PY
+"""
+    assert policy.decide(ShellRequest(parse_pipeline(command))).decision is Decision.Allow
+
+
+def test_sql_capture_checks_every_local_string_builder_result() -> None:
+    policy = parse_policy_text(
+        """
+        {
+          permissions: {
+            allow: [
+              {"SQL(read-only)": {dialect: "postgres", effects: {only: ["read"]}}},
+              "Python(*.execute(<SQL:read-only>))"
+            ]
+          }
+        }
+        """,
+        "test policy",
+    ).policy
+    command = """python - <<'PY'
+from sqlalchemy import text
+def query():
+    return "select * from app.records" if inspect_only else "delete from app.records"
+connection.execute(text(query()))
+PY
+"""
+    assert policy.decide(ShellRequest(parse_pipeline(command))).decision is Decision.Ask
+
+
+def test_function_local_string_does_not_make_outer_dynamic_sql_static() -> None:
+    policy = parse_policy_text(
+        """
+        {
+          permissions: {
+            allow: [
+              {"SQL(read-only)": {dialect: "postgres", effects: {only: ["read"]}}},
+              "Python(*.execute(<SQL:read-only>))"
+            ]
+          }
+        }
+        """,
+        "test policy",
+    ).policy
+    command = """python - <<'PY'
+from sqlalchemy import text
+sql = get_query()
+def unrelated():
+    sql = "select * from app.records"
+connection.execute(text(sql))
+PY
+"""
+    assert policy.decide(ShellRequest(parse_pipeline(command))).decision is Decision.Ask
 
 
 def test_readonly_file_search_with_exception_handling_allows() -> None:

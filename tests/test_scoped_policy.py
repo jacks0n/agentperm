@@ -40,12 +40,12 @@ def test_parent_policy_double_star_covers_child_worktree(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
-    worktrees = home / "Code" / "network-api-worktrees"
-    target = worktrees / "mir-281" / "db" / "schema" / "nap.sql"
-    cwd = home / "Code" / "network-api"
+    worktrees = home / "Code" / "sample-app-worktrees"
+    target = worktrees / "feature-281" / "db" / "schema" / "generated.sql"
+    cwd = home / "Code" / "sample-app"
     cwd.mkdir(parents=True)
     target.parent.mkdir(parents=True)
-    _write_policy(worktrees, deny=["Write(**/db/schema/nap.sql)"])
+    _write_policy(worktrees, deny=["Write(**/db/schema/generated.sql)"])
 
     verdict = decide_with_discovered_policy(_write_request(target, cwd), cwd)
 
@@ -57,10 +57,10 @@ def test_relative_rule_does_not_gain_implicit_child_worktree_scope(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
-    worktrees = home / "Code" / "network-api-worktrees"
-    target = worktrees / "mir-281" / "db" / "schema" / "nap.sql"
+    worktrees = home / "Code" / "sample-app-worktrees"
+    target = worktrees / "feature-281" / "db" / "schema" / "generated.sql"
     target.parent.mkdir(parents=True)
-    _write_policy(worktrees, deny=["Write(db/schema/nap.sql)"])
+    _write_policy(worktrees, deny=["Write(db/schema/generated.sql)"])
 
     verdict = decide_with_discovered_policy(_write_request(target, home), home)
 

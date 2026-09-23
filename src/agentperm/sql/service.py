@@ -12,8 +12,8 @@ from .parser import SqlParseError, parse_sql
 @dataclass
 class SqlPolicyService:
     rules: tuple[tuple[Decision, SqlRule], ...]
-    _facts_cache: dict[tuple[str, str, str], SqlFacts] = field(default_factory=dict, init=False)
-    _failure_cache: dict[tuple[str, str, str], str] = field(default_factory=dict, init=False)
+    _facts_cache: dict[tuple[str, str, str, bool], SqlFacts] = field(default_factory=dict, init=False)
+    _failure_cache: dict[tuple[str, str, str, bool], str] = field(default_factory=dict, init=False)
 
     def decide(self, captured: CapturedSql) -> Verdict:
         deny_rules = tuple((decision, rule) for decision, rule in self.rules if decision is Decision.Deny)
@@ -42,12 +42,17 @@ class SqlPolicyService:
         failures: list[str],
     ) -> Verdict | None:
         for decision, rule in rules:
-            key = (captured.text, rule.dialect.value, rule.document_format.value)
+            key = (captured.text, rule.dialect.value, rule.document_format.value, captured.shell_expanded)
             facts = self._facts_cache.get(key)
             failure = self._failure_cache.get(key)
             if facts is None and failure is None:
                 try:
-                    facts = parse_sql(captured.text, rule.dialect, rule.document_format)
+                    facts = parse_sql(
+                        captured.text,
+                        rule.dialect,
+                        rule.document_format,
+                        shell_expanded=captured.shell_expanded,
+                    )
                 except SqlParseError as error:
                     failure = str(error)
                     self._failure_cache[key] = failure

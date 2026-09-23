@@ -68,15 +68,15 @@ REPORTED_READ_COMMANDS = (
     (
         "seed-discovery",
         "git status --short; test -e scripts/shared_seed.sh && echo shared-script-exists || true; "
-        'rg -n "shared_seed|_db-share-seed|NAPI_SEED_DIR" . || true; ls db | head -n 30',
+        'rg -n "shared_seed|_db-share-seed|APP_SEED_DIR" . || true; ls db | head -n 30',
     ),
     (
         "source-inspection",
-        "sed -n '1,80p' db/restore/load_nap_data.py; "
-        "sed -n '1,60p' db/restore/load_snap_data.py; "
+        "sed -n '1,80p' db/restore/load_primary_data.py; "
+        "sed -n '1,60p' db/restore/load_archive_data.py; "
         "sed -n '1,100p' db/restore/verify_search_data.py; "
-        "sed -n '1,230p' db/seed_topology/__main__.py | tail -n 80; "
-        "sed -n '1,45p' db/dump/lv_derms_data.py; sed -n '1,120p' .env.example",
+        "sed -n '1,230p' db/seed_data/__main__.py | tail -n 80; "
+        "sed -n '1,45p' db/dump/auxiliary_data.py; sed -n '1,120p' .env.example",
     ),
     (
         "justfile-search",
@@ -85,11 +85,11 @@ REPORTED_READ_COMMANDS = (
     (
         "path-and-docs-inspection",
         'rg -n "\\bPath\\b|\\bpathlib\\b|_HERE" '
-        "db/restore/lv_derms_data.py db/restore/verify_search_data.py db/seed_topology/__main__.py; "
+        "db/restore/auxiliary_data.py db/restore/verify_search_data.py db/seed_data/__main__.py; "
         'rg -n "OUTPUT_DIR / \\"seed\\"|parent\\.parent / \\"seed\\"|'
-        'seed_topology/report\\.json|db/seed_topology/report" '
+        'seed_data/report\\.json|db/seed_data/report" '
         "db tests scripts justfile .gitignore || true; "
-        "sed -n '1,85p' db/README.md; sed -n '1,75p' db/seed_topology/README.md",
+        "sed -n '1,85p' db/README.md; sed -n '1,75p' db/seed_data/README.md",
     ),
 )
 
@@ -100,14 +100,14 @@ SQL_SCENARIOS = (
         'source /project/runtime.env && PGPASSWORD="$DATABASE_PASSWORD" /opt/tools/bin/psql -X '
         '-h "$DATABASE_HOST" -p "$DATABASE_PORT" -U "$DATABASE_USER" -d "$DATABASE_NAME" '
         "-v ON_ERROR_STOP=1 -P pager=off "
-        '-c "with totals as (select meter_id,count(*) channels from process.channel group by meter_id) '
-        'select meter_id,channels from totals order by meter_id" '
-        '-c "select meter_id from process.meter order by meter_id fetch first 20 rows only"',
+        '-c "with totals as (select record_id,count(*) items from app.item group by record_id) '
+        'select record_id,items from totals order by record_id" '
+        '-c "select record_id from app.records order by record_id fetch first 20 rows only"',
     ),
     (
         "postgres-write",
         "ask",
-        'psql -c "with changed as (delete from process.meter returning *) select * from changed"',
+        'psql -c "with changed as (delete from app.records returning *) select * from changed"',
     ),
     (
         "postgres-denied-function",
@@ -118,24 +118,24 @@ SQL_SCENARIOS = (
         "oracle-sqlplus-read",
         "allow",
         "docker exec arbitrary-container bash -lc \"printf '%s\\n' 'set pagesize 100 feedback off' "
-        "'column meter_id format a12' 'select meter_id from process.meter order by meter_id;' 'exit' "
-        '| sqlplus -s process/example@DATABASE"',
+        "'column record_id format a12' 'select record_id from app.records order by record_id;' 'exit' "
+        '| sqlplus -s app/example@DATABASE"',
     ),
     (
         "oracle-sqlplus-write",
         "ask",
         "docker exec arbitrary-container bash -lc \"printf '%s\\n' "
-        "'delete from process.meter where meter_id = 1;' 'exit' | sqlplus -s process/example@DATABASE\"",
+        "'delete from app.records where record_id = 1;' 'exit' | sqlplus -s app/example@DATABASE\"",
     ),
     (
         "python-heredoc-read",
         "allow",
-        "python <<'EOL'\nquery_db('select meter_id from process.meter order by meter_id')\nEOL",
+        "python <<'EOL'\nquery_db('select record_id from app.records order by record_id')\nEOL",
     ),
     (
         "python-heredoc-write",
         "ask",
-        "python <<'EOL'\nquery_db('update process.meter set active = false')\nEOL",
+        "python <<'EOL'\nquery_db('update app.records set active = false')\nEOL",
     ),
 )
 

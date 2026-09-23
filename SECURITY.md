@@ -111,7 +111,7 @@ or completeness as guaranteed. If you enable tracing, choose a private path, pro
 permissions, rotate or delete it yourself, and disable it after diagnosis. See
 [CLI: diagnostic traces](docs/cli.md#diagnostic-traces).
 
-## Reporting a vulnerability
+## Disclosing a vulnerability
 
 Please report suspected vulnerabilities privately via
 [GitHub security advisories](https://github.com/jacks0n/agentperm/security/advisories/new)

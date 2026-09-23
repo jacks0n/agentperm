@@ -43,6 +43,8 @@ from .sql.domain import CapturedSql, SqlCaptureKind, SqlOrigin
 # ---------------------------------------------------------------------------
 
 
+# Argument and option-value SQL captures cannot safely neutralize shell expansion
+# because client-specific document preprocessing is unavailable at this layer.
 _DYNAMIC_SHELL_SQL = re.compile(r"`|(?<!\$)\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^}]+\}|\(|\(\()")
 
 
@@ -614,9 +616,16 @@ def match_shell_pattern_details(
         elif isinstance(term, SqlCapture):
             if oi >= len(operands):
                 return None
-            if _DYNAMIC_SHELL_SQL.search(operands[oi]):
+            value = operands[oi]
+            if _DYNAMIC_SHELL_SQL.search(value):
                 return None
-            sql.append(CapturedSql(operands[oi], term.profile, SqlOrigin(SqlCaptureKind.Argument, f"argv[{oi}]")))
+            sql.append(
+                CapturedSql(
+                    value,
+                    term.profile,
+                    SqlOrigin(SqlCaptureKind.Argument, f"argv[{oi}]"),
+                )
+            )
             oi += 1
         elif isinstance(term, NestedShellCapture):
             if oi >= len(operands):
@@ -634,20 +643,25 @@ def match_shell_pattern_details(
                     return None
                 if _DYNAMIC_SHELL_SQL.search(value):
                     return None
-                sql.append(CapturedSql(value, profile, SqlOrigin(SqlCaptureKind.OptionValue, flag)))
+                sql.append(
+                    CapturedSql(
+                        value,
+                        profile,
+                        SqlOrigin(SqlCaptureKind.OptionValue, flag),
+                    )
+                )
                 captured_count += 1
         if captured_count == 0:
             return None
     if pattern.captures_stdin_sql:
-        if segment.stdin_source is None or segment.stdin_dynamic:
-            return None
-        if _DYNAMIC_SHELL_SQL.search(segment.stdin_source):
+        if segment.stdin_source is None:
             return None
         sql.append(
             CapturedSql(
                 segment.stdin_source,
                 pattern.stdin_sql_profile,
                 SqlOrigin(SqlCaptureKind.Stdin, "stdin"),
+                shell_expanded=segment.stdin_dynamic or bool(_DYNAMIC_SHELL_SQL.search(segment.stdin_source)),
             )
         )
     return ShellPatternMatch(tuple(sql), tuple(nested_shell), tuple(nested_exec))

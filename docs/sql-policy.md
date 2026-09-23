@@ -13,18 +13,18 @@ SQL policies are ordinary permission rules, so `deny` wins over `ask`, which win
 {
   "permissions": {
     "allow": [{
-      "SQL(reporting)": {
+      "SQL(read-only)": {
         "dialect": "postgres",
         "format": "plain",
         "effects": {"only": ["read"]},
-        "relations": {"all": ["reporting.*", "process.*"]},
-        "functions": {"all": ["builtin:*", "process.safe_reporting_function"]}
+        "relations": {"all": ["app.*", "archive.*"]},
+        "functions": {"all": ["builtin:*", "app.safe_read_function"]}
       }
     }],
     "deny": [{
       "SQL(blocked-function)": {
         "dialect": "postgres",
-        "functions": {"any": ["process.dangerous_extension_function"]}
+        "functions": {"any": ["app.dangerous_extension_function"]}
       }
     }]
   }
@@ -64,9 +64,9 @@ statements require approval.
 SQL stays inside normal `Shell(...)` rules:
 
 ```jsonc
-"Shell(dbcli <SQL:reporting>)"
-"Shell(dbcli stdin(<SQL:reporting>))"
-"Shell(dbcli values(--host,--port) sqlvalues(<SQL:reporting>,-q,--query))"
+"Shell(dbcli <SQL:read-only>)"
+"Shell(dbcli stdin(<SQL:read-only>))"
+"Shell(dbcli values(--host,--port) sqlvalues(<SQL:read-only>,-q,--query))"
 ```
 
 - `<SQL>` captures one positional operand and considers every SQL rule.
@@ -88,7 +88,7 @@ segment and needs its own rule if it should be allowed:
 
 ```jsonc
 "Shell(source *)"
-"Shell(dbcli values(-h,-p,-U,-d) sqlvalues(<SQL:reporting>,-c))"
+"Shell(dbcli values(-h,-p,-U,-d) sqlvalues(<SQL:read-only>,-c))"
 ```
 
 The same rule works with arbitrary executable paths, variable names, hosts, users, databases, and
@@ -112,26 +112,32 @@ nested SQL client can use the same SQL capture rules. Wrapper names and argv lay
 Inline Python call targets and SQL argument locations are also declared as rules:
 
 ```jsonc
-"Python(query_db(<SQL:reporting>))"
-"Python(project.database.inspect(sql=<SQL:reporting>))"
+"Python(query_db(<SQL:read-only>))"
+"Python(project.database.inspect(sql=<SQL:read-only>))"
 "Python(*.execute(<SQL>))"
 ```
 
 Targets are statically resolved using the existing inline-Python analyzer and may contain `*`.
-The positional or keyword argument must be a literal string or a local name directly bound to one.
-Other Python effects are still analyzed; dynamic targets and dynamic SQL require approval. Nothing in
-agentperm assumes a particular database library or helper name.
+The positional or keyword argument may use bounded local construction from literals, concatenation,
+f-strings, and local string-returning helpers; every possible result must pass the SQL policy. Other
+Python effects are still analyzed, while dynamic targets and unresolved SQL require approval. Nothing
+in the core Python effect analyzer assumes a particular database library or helper name. Library
+wrappers such as SQLAlchemy `text(...)` are isolated behind registered Python-to-SQL adapters.
 
 Both `python - <<'PY'` and Python's equivalent implicit-stdin form are supported:
 
 ```sh
 python <<'PY'
-query_db("select meter_id from process.meter order by meter_id")
+query_db("select record_id from app.records order by record_id")
 PY
 ```
 
-Quoting the heredoc delimiter is recommended. An unquoted heredoc is accepted only when its body has
-no shell expansion markers; dynamic input requires approval.
+Quoting the heredoc delimiter is recommended. Positional `<SQL>` and `sqlvalues(...)` captures reject
+shell-dynamic text before semantic parsing because they have no client-document context. For dynamic
+heredoc/stdin captures, client directives are removed first, command substitutions remain rejected,
+and ordinary `$NAME`/`${NAME}` values are replaced with inert placeholders before SQL effects are
+classified. This separation lets connection directives use environment variables without treating
+unknown command output as trusted SQL.
 
 ## Trust boundary
 

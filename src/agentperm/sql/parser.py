@@ -74,15 +74,31 @@ _POSTGRES_EXPLAIN_VALUES = frozenset(
     }
 )
 _POSTGRES_EXPLAIN_LEGACY_OPTION = re.compile(r"(?i)^(analyze|verbose)\b")
+# Heredoc SQL is preprocessed as a client document before these checks. Command
+# substitutions remain unknowable and are rejected; ordinary value substitutions
+# are replaced with inert text so the surrounding statement effects can be parsed.
+_SHELL_COMMAND_SUB = re.compile(r"`|\$\(")
+_SHELL_VALUE_SUB = re.compile(r"(?<!\$)\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})")
+_SHELL_VALUE_PLACEHOLDER = "_agentperm_shell_value_"
 
 
-def parse_sql(document: str, dialect: SqlDialect, document_format: SqlDocumentFormat) -> SqlFacts:
+def parse_sql(
+    document: str,
+    dialect: SqlDialect,
+    document_format: SqlDocumentFormat,
+    *,
+    shell_expanded: bool = False,
+) -> SqlFacts:
     if len(document.encode()) > _MAX_SOURCE_BYTES:
         raise SqlParseError(f"SQL document exceeds {_MAX_SOURCE_BYTES} byte analysis limit")
     try:
         source = sql_text(document, document_format)
     except SqlDocumentError as error:
         raise SqlParseError(str(error)) from error
+    if shell_expanded:
+        if _SHELL_COMMAND_SUB.search(source):
+            raise SqlParseError("SQL text contains shell command substitution")
+        source = _SHELL_VALUE_SUB.sub(_SHELL_VALUE_PLACEHOLDER, source)
     if not source:
         raise SqlParseError("SQL document contains no SQL statements")
     try:

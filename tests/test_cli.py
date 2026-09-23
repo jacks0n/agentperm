@@ -215,9 +215,9 @@ def test_check_applies_target_policy_when_codex_writes_outside_payload_cwd(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    source = home / "Code" / "network-api"
-    target_root = home / "Code" / "network-api-worktrees" / "mir-281"
-    target = target_root / "db" / "schema" / "nap.sql"
+    source = home / "Code" / "sample-app"
+    target_root = home / "Code" / "sample-app-worktrees" / "feature-281"
+    target = target_root / "db" / "schema" / "generated.sql"
     source.mkdir(parents=True)
     target.parent.mkdir(parents=True)
     (target_root / POLICY_FILENAME).write_text(
@@ -227,7 +227,7 @@ def test_check_applies_target_policy_when_codex_writes_outside_payload_cwd(
                 "permissions": {
                     "deny": [
                         {
-                            "Write(db/schema/nap.sql)": {
+                            "Write(db/schema/generated.sql)": {
                                 "reason": "Regenerate the database schema snapshot."
                             }
                         }

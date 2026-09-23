@@ -96,4 +96,4 @@ with Trusted Publishing, and then creates the GitHub Release with those files at
 
 ## Issue reports
 
-Please include the trace log for any "still prompting" / "incorrectly allowed" reports — see [docs/troubleshooting.md](docs/troubleshooting.md#reporting-a-bug).
+Please include the trace log for any "still prompting" / "incorrectly allowed" reports — see [docs/troubleshooting.md](docs/troubleshooting.md#filing-a-bug).

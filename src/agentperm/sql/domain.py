@@ -117,6 +117,7 @@ class CapturedSql:
     text: str
     profile: str | None
     origin: SqlOrigin
+    shell_expanded: bool = False
 
 
 @dataclass(frozen=True)

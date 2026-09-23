@@ -124,6 +124,11 @@ the v1 model. `python -m`, script files, and interactive Python are unaffected.
 SQL passed to a database client or Python helper is parsed only when a configured semantic capture
 identifies the argument. See [Semantic SQL policies](sql-policy.md).
 
+Python SQL captures also unwrap registered library adapters such as SQLAlchemy `text(...)` and resolve
+bounded local string construction (constants, concatenation, f-strings, and local string-returning
+helpers). Every statically possible result must satisfy the selected SQL policy; dynamic or excessive
+alternatives ask.
+
 Call decisions can be customized by exact qualified name:
 
 ```jsonc
@@ -272,8 +277,8 @@ An optional specifier in parentheses scopes the rule by the tool's input values 
 Matching is **keyed by field name**, so a specifier only ever checks the authoritative field — `WebFetch(domain:github.com)` will not be satisfied by a `github.com` URL that happens to appear in a `prompt`, and `Write(src/**)` will not be satisfied by path-like text in `old_string`. Adapters that don't surface those fields only match the name-only forms.
 
 Relative path specifiers are evaluated from the directory containing the root policy that declares
-the logical layer. For example, `Write(db/schema/nap.sql)` in `/repo/.agent-permissions.jsonc`
-matches `/repo/db/schema/nap.sql`; `Write(**/db/schema/nap.sql)` in a worktree parent also matches
+the logical layer. For example, `Write(db/schema/generated.sql)` in `/repo/.agent-permissions.jsonc`
+matches `/repo/db/schema/generated.sql`; `Write(**/db/schema/generated.sql)` in a worktree parent also matches
 that path beneath every child worktree. In `~/.agent-permissions.jsonc`, `Write(**/generated/**)`
 covers generated directories beneath the home directory, while `Write(/**/generated/**)` is
 filesystem-wide. Relative request targets still resolve from the hook cwd. `.`/`..` segments and

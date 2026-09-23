@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from .domain import Decision, PythonCallPolicy, PythonSqlPattern, Segment, Verdict
 from .sql.domain import CapturedSql, SqlCaptureKind, SqlOrigin
+from .sql.python_capture import PythonSqlSourceResolver
 from .sql.service import SqlPolicyService
 
 _MAX_SOURCE_BYTES = 100_000
@@ -367,7 +368,8 @@ class _Analyzer(ast.NodeVisitor):
         self.sql_patterns = sql_patterns
         self.sql_service = sql_service
         self.aliases: dict[str, str] = {}
-        self.string_constants: dict[str, str] = {}
+        self.sql_sources = PythonSqlSourceResolver(self._call_target)
+        self.function_depth = 0
         self.node_count = 0
         self.matched_sql_pattern = False
         self.verdict = Verdict(Decision.Allow, "inline Python AST is read-only")
@@ -409,6 +411,24 @@ class _Analyzer(ast.NodeVisitor):
 
     def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
         self._record(Decision.Ask, "nonlocal assignment scope is not read-only")
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        if self.function_depth == 0:
+            self.sql_sources.track_function(node)
+        self.function_depth += 1
+        try:
+            self.generic_visit(node)
+        finally:
+            self.function_depth -= 1
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        if self.function_depth == 0:
+            self.sql_sources.track_function(node)
+        self.function_depth += 1
+        try:
+            self.generic_visit(node)
+        finally:
+            self.function_depth -= 1
 
     def visit_Assign(self, node: ast.Assign) -> None:
         for target in node.targets:
@@ -454,10 +474,8 @@ class _Analyzer(ast.NodeVisitor):
             resolved = self._call_target(value)
             if resolved is not None:
                 self.aliases[target.id] = resolved
-            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                self.string_constants[target.id] = value.value
-            else:
-                self.string_constants.pop(target.id, None)
+            if self.function_depth == 0:
+                self.sql_sources.track_assignment(target, value)
 
     def visit_For(self, node: ast.For) -> None:
         self._visit_for(node.target, node.iter, node.body, node.orelse)
@@ -530,8 +548,8 @@ class _Analyzer(ast.NodeVisitor):
             argument = node.args[pattern.position]
         elif pattern.keyword is not None:
             argument = next((keyword.value for keyword in node.keywords if keyword.arg == pattern.keyword), None)
-        text = self._literal_string(argument)
-        if text is None:
+        texts = self.sql_sources.resolve(argument)
+        if texts is None:
             self._record(Decision.Ask, f"SQL argument for Python call {target} is not a static string")
             return
         if decision is Decision.Ask:
@@ -539,22 +557,24 @@ class _Analyzer(ast.NodeVisitor):
         if self.sql_service is None:
             self._record(Decision.Ask, f"no SQL policy is configured for Python call {target}")
             return
-        captured = CapturedSql(
-            text,
-            pattern.profile,
-            SqlOrigin(SqlCaptureKind.PythonArgument, target),
+        sql_verdicts = tuple(
+            self.sql_service.decide(
+                CapturedSql(
+                    text,
+                    pattern.profile,
+                    SqlOrigin(SqlCaptureKind.PythonArgument, target),
+                )
+            )
+            for text in texts
         )
-        sql_verdict = self.sql_service.decide(captured)
-        self._record(sql_verdict.decision, sql_verdict.rationale)
-        if decision is Decision.Allow and sql_verdict.decision is Decision.Allow and pattern.rationale:
+        for sql_verdict in sql_verdicts:
+            self._record(sql_verdict.decision, sql_verdict.rationale)
+        if (
+            decision is Decision.Allow
+            and all(verdict.decision is Decision.Allow for verdict in sql_verdicts)
+            and pattern.rationale
+        ):
             self.verdict = Verdict(Decision.Allow, pattern.rationale)
-
-    def _literal_string(self, node: ast.expr | None) -> str | None:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        if isinstance(node, ast.Name):
-            return self.string_constants.get(node.id)
-        return None
 
     def _call_target(self, node: ast.expr) -> str | None:
         if isinstance(node, ast.Name):

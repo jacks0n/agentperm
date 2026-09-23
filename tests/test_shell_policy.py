@@ -101,7 +101,7 @@ def test_export_mode_toggles_are_intrinsic_but_other_set_forms_are_not() -> None
 
 def test_positional_parameter_assignment_does_not_escalate_read_only_loop() -> None:
     policy = Policy(allow=(BashCommand(("aws", "cloudwatch", "get-metric-statistics")),))
-    command = "for spec in 'SNAP query operation'; do set -- $spec; aws cloudwatch get-metric-statistics; done"
+    command = "for spec in 'database query operation'; do set -- $spec; aws cloudwatch get-metric-statistics; done"
 
     assert _decide(policy, command).decision is Decision.Allow
 

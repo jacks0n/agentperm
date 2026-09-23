@@ -32,9 +32,10 @@ _SQLPLUS_SAFE_SET = frozenset(
     }
 )
 _SQLPLUS_UNSAFE = re.compile(
-    r"^\s*(?:host|spool|start|@{1,2}|define|undefine|variable|print|accept|password|connect|disconnect|store|save|get|edit)\b",
+    r"^\s*(?:host|spool|start|@{1,2}|define|undefine|variable|print|accept|password|store|save|get|edit)\b",
     re.IGNORECASE,
 )
+_SQLPLUS_SAFE_DIRECTIVE = re.compile(r"^\s*(?:connect|disconnect|whenever)\b", re.IGNORECASE)
 _SQLITE_SAFE = frozenset({".headers", ".mode", ".nullvalue", ".quit", ".width"})
 
 
@@ -47,6 +48,8 @@ def sql_text(document: str, document_format: SqlDocumentFormat) -> str:
         if document_format is SqlDocumentFormat.SqlPlus:
             words = stripped.lower().split()
             if stripped == "/" or (words and words[0] in {"exit", "quit", "column", "col", "remark"}):
+                continue
+            if _SQLPLUS_SAFE_DIRECTIVE.match(line):
                 continue
             if words and words[0] == "set":
                 if len(words) >= 2 and words[1] in _SQLPLUS_SAFE_SET:

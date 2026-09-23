@@ -3,23 +3,23 @@
   "permissions": {
     "allow": [
       {
-        "SQL(postgres-reporting)": {
+        "SQL(postgres-read-only)": {
           "dialect": "postgres",
           "effects": {"only": ["read"]}
         }
       },
       {
-        "SQL(oracle-reporting)": {
+        "SQL(oracle-read-only)": {
           "dialect": "oracle",
           "format": "sqlplus",
           "effects": {"only": ["read"]}
         }
       },
       "Shell(source *)",
-      "Shell(psql values(-h,-p,-U,-d,-v,-P) sqlvalues(<SQL:postgres-reporting>,-c))",
+      "Shell(psql values(-h,-p,-U,-d,-v,-P) sqlvalues(<SQL:postgres-read-only>,-c))",
       "Shell(docker exec ... bash <SHELL> -l -c)",
-      "Shell(sqlplus stdin(<SQL:oracle-reporting>))",
-      "Python(query_db(<SQL:postgres-reporting>))"
+      "Shell(sqlplus stdin(<SQL:oracle-read-only>))",
+      "Python(query_db(<SQL:postgres-read-only>))"
     ],
     "ask": [],
     "deny": [

@@ -151,7 +151,7 @@ Tree-sitter Bash parses shell syntax into the `Pipeline` domain model. If you're
 
 If you're seeing a Python `ImportError` or version conflict for Tree-sitter, check `pyproject.toml` for the pinned `tree-sitter` and `tree-sitter-bash` ranges and reinstall.
 
-## Reporting a bug
+## Filing a bug
 
 Include:
 
