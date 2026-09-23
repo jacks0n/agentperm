@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-import agentperm
 from agentperm import (
     AgentName,
     BashCommand,
@@ -465,16 +464,13 @@ def test_kiro_import_skips_complex_regex_that_is_valid_shell_syntax(
 
 
 def test_kiro_check_deny_outputs_json(
+    isolated_policy_home: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """agentperm check --agent kiro outputs deny verdict as JSON on stdout."""
-    policy_path = tmp_path / ".agent-permissions.jsonc"
+    policy_path = isolated_policy_home / ".agent-permissions.jsonc"
     policy_path.write_text(json.dumps({"version": 1, "permissions": {"deny": ["Bash(rm -rf:*)"]}}))
-    monkeypatch.setattr(agentperm, "POLICY_FILENAME", ".agent-permissions.jsonc")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
 
     payload = json.dumps({"tool_name": "shell", "tool_input": {"command": "rm -rf /"}})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
@@ -484,15 +480,18 @@ def test_kiro_check_deny_outputs_json(
     assert text_at(out, "hookSpecificOutput", "permissionDecision") == "deny"
 
 
-def test_kiro_check_allow_returns_exit_code_0(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_kiro_check_allow_returns_exit_code_0(
+    isolated_policy_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """agentperm check --agent kiro returns exit code 0 for allowed commands."""
-    policy_path = tmp_path / ".agent-permissions.jsonc"
+    policy_path = isolated_policy_home / ".agent-permissions.jsonc"
     policy_path.write_text(json.dumps({"version": 1, "permissions": {"allow": ["Bash(cat:*)"]}}))
-    monkeypatch.setattr(agentperm, "POLICY_FILENAME", ".agent-permissions.jsonc")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
 
     payload = json.dumps({"tool_name": "shell", "tool_input": {"command": "cat foo.txt"}})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     rc = cmd_check(AgentName.Kiro, "preToolUse")
     assert rc == 0
+    out = decode_object(capsys.readouterr().out)
+    assert text_at(out, "hookSpecificOutput", "permissionDecision") == "allow"

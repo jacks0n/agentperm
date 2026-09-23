@@ -19,6 +19,17 @@ from agentperm import (
 
 
 @pytest.fixture
+def isolated_policy_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep global and ancestor policy discovery inside one temporary home."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    monkeypatch.chdir(home)
+    return home
+
+
+@pytest.fixture
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect every adapter's hook-config path under ``tmp_path``.
 

@@ -308,11 +308,11 @@ def test_check_applies_python_readonly_ast_policy(
 
 
 def test_check_passes_original_payload_to_passthrough_hook_when_policy_is_unresolved(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    isolated_policy_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
     original = ' {"tool_name":"Bash","tool_input":{"command":"unknown"}}\n'
     monkeypatch.setattr(sys, "stdin", io.StringIO(original))
 
@@ -338,12 +338,14 @@ def test_check_passes_original_payload_to_passthrough_hook_when_policy_is_unreso
 
 
 def test_check_does_not_run_passthrough_hook_for_decisive_policy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    isolated_policy_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    (home / POLICY_FILENAME).write_text('{"version":1,"permissions":{"allow":["Bash(cat:*)"]}}')
-    monkeypatch.setenv("HOME", str(home))
+    (isolated_policy_home / POLICY_FILENAME).write_text(
+        '{"version":1,"permissions":{"allow":["Bash(cat:*)"]}}'
+    )
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "cat README.md"}})
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
 
