@@ -12,6 +12,7 @@ from typing import ClassVar
 import tomlkit
 from tomlkit.items import Bool, InlineTable, Table
 
+from ..config import CODEX_CONFIG_PATH, CODEX_HOOKS_PATH
 from ..domain import (
     AgentName,
     BashCommand,
@@ -26,6 +27,7 @@ from ..domain import (
     ToolRequest,
     Verdict,
     tool_arguments,
+    tool_request,
 )
 from ..errors import PolicyError
 from ..fileio import atomic_write
@@ -40,13 +42,13 @@ from .base import (
     strip_nested_hooks,
     strip_rulesync_hooks,
 )
-from .claude import ClaudeAdapter
+from .claude import parse_claude_shaped_event
 
 
 class CodexAdapter(AgentAdapter):
     name = AgentName.Codex
-    config_path: ClassVar[Path] = Path.home() / ".codex/config.toml"
-    hooks_path: ClassVar[Path] = Path.home() / ".codex/hooks.json"
+    config_path: ClassVar[Path] = Path.home() / CODEX_CONFIG_PATH
+    hooks_path: ClassVar[Path] = Path.home() / CODEX_HOOKS_PATH
 
     def import_native_rules(self) -> Iterator[tuple[Decision, Rule]]:
         rules_dir = self.config_path.parent / "rules"
@@ -85,9 +87,9 @@ class CodexAdapter(AgentAdapter):
                     mcp_request = _codex_mcp_request(permission_type, tool_arguments(metadata), None)
                     if mcp_request is not None:
                         return mcp_request
-                    return ToolRequest(permission_type, tool_arguments(metadata))
+                    return tool_request(AgentName.Codex, permission_type, metadata, None)
                 return None
-        request = ClaudeAdapter().parse_event(payload, event_name)
+        request = parse_claude_shaped_event(payload, AgentName.Codex)
         if isinstance(request, ToolRequest):
             mcp_request = _codex_mcp_request(request.tool, request.arguments, request.cwd)
             if mcp_request is not None:

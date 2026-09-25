@@ -62,7 +62,7 @@ REPORTED_READ_COMMANDS = (
     (
         "repo-health",
         "rg -n '^codex|cargo run|profile' Justfile | head -80; "
-        "sed -n '1,35p' Justfile; df -h /Users/jackson/Code/vendor/codex; "
+        "sed -n '1,35p' Justfile; df -h /agentperm-black-box/codex; "
         "pgrep -fl '/cargo clean' || true",
     ),
     (
@@ -141,13 +141,10 @@ SQL_SCENARIOS = (
 
 FILE_DENY_REASON = "Generated file; run the generator instead."
 
-# (policy fixture, cwd-relative path, expected decision). ``files-alias`` spells the same
-# policy with the deprecated ``Edit(...)`` alias and must decide identically.
+# (policy fixture, cwd-relative path, expected decision).
 FILE_SCENARIOS = (
     ("files", "generated/client.py", "deny"),
     ("files", "src/app.py", "allow"),
-    ("files-alias", "generated/client.py", "deny"),
-    ("files-alias", "src/app.py", "allow"),
 )
 
 
@@ -178,12 +175,16 @@ def _file_cases(relative_path: str) -> tuple[FileCase, ...]:
         FileCase(Hook("gemini", "BeforeTool", "write_file"), {"file_path": absolute, "content": "new"}),
         FileCase(Hook("gemini", "BeforeTool", "replace"), dict(edit)),
         FileCase(Hook("kiro", "preToolUse", "fs_write"), {"command": "create", "path": absolute, "file_text": "new"}),
+        FileCase(Hook("kiro", "preToolUse", "str_replace"), {"path": absolute, "oldStr": "old", "newStr": "new"}),
+        FileCase(Hook("kiro", "preToolUse", "delete_file"), {"targetFile": absolute}),
         FileCase(Hook("opencode", "tool.execute.before", "write"), {"filePath": absolute, "content": "new"}),
         FileCase(
             Hook("opencode", "tool.execute.before", "edit"),
             {"filePath": absolute, "oldString": "old", "newString": "new"},
         ),
+        FileCase(Hook("opencode", "tool.execute.before", "multiedit"), {"filePath": absolute, "edits": []}),
         FileCase(Hook("opencode", "tool.execute.before", "apply_patch"), {"patchText": patch}),
+        FileCase(Hook("opencode", "tool.execute.before", "patch"), {"patchText": patch}),
     )
 
 

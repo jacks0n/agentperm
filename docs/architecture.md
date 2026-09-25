@@ -71,13 +71,17 @@ adapter has decoded its own MCP name.
 ### Policy
 
 `Policy` is `(deny, ask, allow)` plus feature-specific policy objects. Runtime discovery preserves
-each root policy as a layer with its directory anchor and included sources. Shell and non-path
-requests use the cwd ancestry; path-bearing tools use each target ancestry. Relative path rules are
-matched from the layer anchor, while included fragments inherit their root layer's anchor. Deny
+each root policy as a layer with its directory anchor and included sources. Requests use cwd
+ancestry; path-bearing tools and shell paths checked by scoped `Read` rules also use each target
+ancestry. Relative path rules are matched from the layer anchor, while included fragments inherit
+their root layer's anchor. Deny
 rules union into a non-overridable floor. Ask and Allow retain layer order: the nearest layer is
 evaluated first, with Ask before Allow within that layer. A project Allow can therefore whitelist a
 global Ask, while no Allow can bypass any Deny. Python call decisions use the same model;
 redirection values use the nearest configured value.
+
+Application-wide filenames, defaults, hook timeouts, caches, and analysis resource budgets live in
+`src/agentperm/config.py`; parser and protocol semantics remain with their owning modules.
 
 ## Decision flow
 
@@ -127,7 +131,7 @@ add, update, and delete each contribute their path; a move contributes its sourc
 Only the patch envelope and complete target list are relevant to permissions; the host remains
 responsible for validating and applying hunks. Unknown structural markers and incomplete operations
 produce `RejectedRequest`, preventing a new patch dialect from silently bypassing scoped rules. The
-[capability matrix](capabilities.md#semantic-file-operations) records the exact host mappings.
+[capability matrix](capabilities.md#tool-capabilities) records the exact host mappings.
 
 ### Redirect policy
 

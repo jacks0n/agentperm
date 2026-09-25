@@ -85,7 +85,8 @@ deny        Write src/generated/client.py                        "Generated — 
 
 The last line is one capability for every host: Claude `Edit`/`Write`/`NotebookEdit`, Codex
 `apply_patch`, OpenCode `edit`, Gemini `replace`, and Kiro `fs_write` are all `Write`, so a create,
-an overwrite, and an in-place edit are one decision. Real parsers, not regex: tree-sitter-bash for
+an overwrite, and an in-place edit are one decision. Likewise every host's read, list, glob, and
+search tools are `Read` ([tool capabilities](docs/capabilities.md#tool-capabilities)). Real parsers, not regex: tree-sitter-bash for
 shell, Python's `ast` for inline Python, SQLGlot for SQL. Anything agentperm cannot statically
 understand is never allowed — it asks, or defers to your agent's own prompt.
 `agentperm why "<command>"` prints this breakdown for any command without running it.
@@ -125,8 +126,8 @@ Sandboxes are a different tool: they contain what runs, agentperm decides what r
 
 ## How policies compose
 
-- `~/.agent-permissions.jsonc` merges with directory policies discovered from the command cwd, or
-  from each target for path-bearing tools such as `Write` and `Read`.
+- `~/.agent-permissions.jsonc` merges with directory policies discovered from the command cwd, and
+  from each target for path-bearing tools and shell paths checked by scoped `Read` rules.
 - Relative path patterns are anchored to the directory containing their root policy. Included
   fragments inherit that root anchor; absolute patterns can cover paths anywhere.
 - **Deny anywhere is a floor.** For Ask and Allow the nearest matching policy wins, so a project can

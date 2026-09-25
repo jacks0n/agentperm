@@ -11,6 +11,7 @@ from sqlglot import ErrorLevel, Expr, exp, parse
 from sqlglot.errors import ParseError, TokenError
 from sqlglot.optimizer.scope import traverse_scope
 
+from ..config import MAX_SQL_AST_NODES, MAX_SQL_SOURCE_BYTES, MAX_SQL_STATEMENTS
 from .documents import SqlDocumentError, sql_text
 from .domain import (
     SqlDialect,
@@ -27,9 +28,6 @@ class SqlParseError(ValueError):
     pass
 
 
-_MAX_SOURCE_BYTES = 250_000
-_MAX_STATEMENTS = 100
-_MAX_AST_NODES = 50_000
 _WRITE_ROOTS: tuple[type[Expr], ...] = (exp.Insert, exp.Update, exp.Delete, exp.Merge)
 _DDL_ROOTS: tuple[type[Expr], ...] = (exp.Create, exp.Drop, exp.Alter, exp.TruncateTable)
 _SESSION_ROOTS: tuple[type[Expr], ...] = (
@@ -89,8 +87,8 @@ def parse_sql(
     *,
     shell_expanded: bool = False,
 ) -> SqlFacts:
-    if len(document.encode()) > _MAX_SOURCE_BYTES:
-        raise SqlParseError(f"SQL document exceeds {_MAX_SOURCE_BYTES} byte analysis limit")
+    if len(document.encode()) > MAX_SQL_SOURCE_BYTES:
+        raise SqlParseError(f"SQL document exceeds {MAX_SQL_SOURCE_BYTES} byte analysis limit")
     try:
         source = sql_text(document, document_format)
     except SqlDocumentError as error:
@@ -109,8 +107,8 @@ def parse_sql(
     if not parsed_roots:
         raise SqlParseError("SQL parser returned an opaque or empty statement")
     roots = tuple(_classifiable_root(root, dialect) for root in parsed_roots)
-    if len(roots) > _MAX_STATEMENTS:
-        raise SqlParseError(f"SQL document exceeds {_MAX_STATEMENTS} statement analysis limit")
+    if len(roots) > MAX_SQL_STATEMENTS:
+        raise SqlParseError(f"SQL document exceeds {MAX_SQL_STATEMENTS} statement analysis limit")
 
     effects: set[SqlEffect] = set()
     statements: list[SqlStatementKind] = []
@@ -126,8 +124,8 @@ def parse_sql(
                     relations.setdefault(relation.lower(), SqlRelationRef(relation.lower()))
         for node in root.walk():
             node_count += 1
-            if node_count > _MAX_AST_NODES:
-                raise SqlParseError(f"SQL document exceeds {_MAX_AST_NODES} node analysis limit")
+            if node_count > MAX_SQL_AST_NODES:
+                raise SqlParseError(f"SQL document exceeds {MAX_SQL_AST_NODES} node analysis limit")
             _record_effect(node, effects)
             if isinstance(node, exp.Func):
                 ref = _function_ref(node, dialect)

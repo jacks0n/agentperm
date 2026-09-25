@@ -18,9 +18,8 @@
       "Shell(... {--version,--help} !... !-*)",
       // Inline `python -c` that the AST check proves read-only.
       "Python(readonly)",
-      "Read",
-      "Grep",
-      "Glob"
+      // Every agent's file read, list, glob, and search tools.
+      "Read"
     ],
     "ask": [],
     "deny": []

@@ -124,3 +124,21 @@ from .model import (
 from .model import (
     tool_path_arguments as tool_path_arguments,
 )
+from .tools import (
+    Capability as Capability,
+)
+from .tools import (
+    agent_tool_names as agent_tool_names,
+)
+from .tools import (
+    native_capability as native_capability,
+)
+from .tools import (
+    native_tool as native_tool,
+)
+from .tools import (
+    powershell_request as powershell_request,
+)
+from .tools import (
+    tool_request as tool_request,
+)

@@ -12,6 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import ClassVar
 
+from ..config import ENV_KIRO_HOME, HOOK_TIMEOUTS, KIRO_AGENTS_PATH, KIRO_HOME_PATH, KIRO_HOOKS_PATH
 from ..domain import (
     AgentName,
     BashCommand,
@@ -27,10 +28,13 @@ from ..domain import (
     Request,
     Rule,
     ShellRequest,
-    ToolRequest,
     Verdict,
+    native_tool,
+    powershell_request,
     tool_arguments,
+    tool_request,
 )
+from ..domain.tools import NATIVE_TOOLS, POWERSHELL_TOOLS, SHELL_TOOLS
 from ..fileio import atomic_write, read_json
 from ..policy import git_toplevel
 from ..shell import parse_pipeline
@@ -51,14 +55,14 @@ class KiroAdapter(AgentAdapter):
     workspace_root: ClassVar[Path | None] = None
 
     def _kiro_home(self) -> Path:
-        configured = os.environ.get("KIRO_HOME")
-        return Path(configured).expanduser() if configured else Path.home() / ".kiro"
+        configured = os.environ.get(ENV_KIRO_HOME)
+        return Path(configured).expanduser() if configured else Path.home() / KIRO_HOME_PATH
 
     def _hooks_path(self) -> Path:
-        return self.hooks_path if self.hooks_path is not None else self._kiro_home() / "hooks/agentperm.json"
+        return self.hooks_path if self.hooks_path is not None else self._kiro_home() / KIRO_HOOKS_PATH
 
     def _agents_path(self) -> Path:
-        return self.agents_path if self.agents_path is not None else self._kiro_home() / "agents"
+        return self.agents_path if self.agents_path is not None else self._kiro_home() / KIRO_AGENTS_PATH
 
     def parse_event(self, payload: JsonObject, event_name: str) -> Request | None:
         tool_name = payload.get("tool_name")
@@ -67,7 +71,9 @@ class KiroAdapter(AgentAdapter):
         cwd_raw = payload.get("cwd")
         cwd = Path(cwd_raw) if isinstance(cwd_raw, str) else None
         tool_input = payload.get("tool_input")
-        if tool_name in ("shell", "execute_bash", "execute_cmd"):
+        if tool_name in _KIRO_POWERSHELL_TOOLS:
+            return powershell_request(cwd)
+        if tool_name in _KIRO_SHELL_TOOLS:
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             if not isinstance(command, str) or not command:
                 return ShellRequest(
@@ -75,11 +81,10 @@ class KiroAdapter(AgentAdapter):
                     cwd=cwd,
                 )
             return ShellRequest(parse_pipeline(command), cwd=cwd)
-        arguments = tool_arguments(tool_input)
-        mcp_request = _kiro_mcp_request(tool_name, arguments, cwd)
+        mcp_request = _kiro_mcp_request(tool_name, tool_arguments(tool_input), cwd)
         if mcp_request is not None:
             return mcp_request
-        return ToolRequest(kiro_tool_name(tool_name), arguments, cwd=cwd)
+        return tool_request(AgentName.Kiro, tool_name, tool_input, cwd)
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> int:
         if verdict.decision in (Decision.Allow, Decision.Deny, Decision.Ask):
@@ -115,7 +120,7 @@ class KiroAdapter(AgentAdapter):
                     "trigger": "PreToolUse",
                     "matcher": ".*",
                     "action": {"type": "command", "command": command},
-                    "timeout": 30,
+                    "timeout": HOOK_TIMEOUTS[AgentName.Kiro],
                     "enabled": True,
                 }
             ],
@@ -236,7 +241,7 @@ class KiroAdapter(AgentAdapter):
                 for entry in allowed_tools:
                     if not isinstance(entry, str):
                         continue
-                    if entry in ("shell", "execute_bash", "execute_cmd"):
+                    if entry in _KIRO_SHELL_TOOLS:
                         continue
                     for rule in _kiro_allowed_tool_rules(entry):
                         yield Decision.Allow, rule
@@ -270,29 +275,8 @@ def _kiro_standalone_is_bridge(entry: JsonValue) -> bool:
     return is_bridge_hook(action if isinstance(action, dict) else entry)
 
 
-def kiro_tool_name(name: str) -> str:
-    return {
-        "shell": "Bash",
-        "execute_bash": "Bash",
-        "execute_cmd": "Bash",
-        "read": "Read",
-        "fs_read": "Read",
-        "fsRead": "Read",
-        "write": "Write",
-        "fs_write": "Write",
-        "fsWrite": "Write",
-        "glob": "Glob",
-        "grep": "Grep",
-        "web_search": "WebSearch",
-        "web_fetch": "WebFetch",
-        "aws": "AWS",
-        "use_aws": "AWS",
-        "code": "Code",
-        "knowledge": "Knowledge",
-        "delegate": "Delegate",
-        "subagent": "Subagent",
-        "use_subagent": "Subagent",
-    }.get(name, name)
+_KIRO_SHELL_TOOLS = SHELL_TOOLS[AgentName.Kiro]
+_KIRO_POWERSHELL_TOOLS = POWERSHELL_TOOLS[AgentName.Kiro]
 
 
 def _kiro_mcp_request(
@@ -308,39 +292,12 @@ def _kiro_mcp_request(
     return McpToolRequest(server, tool, arguments, cwd)
 
 
-KIRO_TOOL_NAMES = frozenset(
-    {
-        "shell",
-        "execute_bash",
-        "execute_cmd",
-        "read",
-        "fs_read",
-        "fsRead",
-        "write",
-        "fs_write",
-        "fsWrite",
-        "glob",
-        "grep",
-        "web_search",
-        "web_fetch",
-        "aws",
-        "use_aws",
-        "code",
-        "knowledge",
-        "delegate",
-        "subagent",
-        "use_subagent",
-    }
-)
-
-
 def _kiro_allowed_tool_rules(pattern: str) -> list[Rule]:
-    """Convert Kiro tool patterns to canonical rules.
+    """Convert Kiro tool patterns to capability rules.
 
-    Wildcards are expanded against known Kiro tool names so the resulting rules
-    use agentperm's canonical namespace (``Read``, ``Write``, …), not Kiro's
-    native aliases (``fs_read``, ``fs_write``, …).  Unknown wildcards that
-    don't match any known alias are passed through for custom/MCP tools.
+    Wildcards are expanded against Kiro's native tool names, so ``fs_*`` becomes
+    ``Read`` and ``Write``. Tools without a capability (and shell tools, which
+    are imported from ``toolsSettings``) are skipped.
     """
     if pattern.startswith("@"):
         server, separator, tool = pattern[1:].partition("/")
@@ -349,23 +306,11 @@ def _kiro_allowed_tool_rules(pattern: str) -> list[Rule]:
         return []
     if "?" in pattern or pattern.count("*") > 1 or ("*" in pattern and not pattern.endswith("*")):
         return []
-    if "*" not in pattern:
-        canonical = kiro_tool_name(pattern)
-        return [] if canonical == "Bash" else [NamedTool(canonical)]
-    prefix = pattern[:-1]
-    seen: set[str] = set()
-    result: list[Rule] = []
-    for kiro_name in sorted(KIRO_TOOL_NAMES):
-        if not kiro_name.startswith(prefix):
-            continue
-        canonical = kiro_tool_name(kiro_name)
-        if canonical == "Bash" or canonical in seen:
-            continue
-        seen.add(canonical)
-        result.append(NamedTool(canonical))
-    if not result:
-        return [NamedTool(pattern)]
-    return result
+    names = [pattern]
+    if pattern.endswith("*"):
+        names = [name for name in NATIVE_TOOLS[AgentName.Kiro] if name.startswith(pattern[:-1])]
+    capabilities = dict.fromkeys(tool.capability for name in names if (tool := native_tool(AgentName.Kiro, name)))
+    return [NamedTool(capability) for capability in capabilities]
 
 
 def _kiro_command_rule(pattern: str) -> BashCommand | None:

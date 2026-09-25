@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
+from .config import MCP_PATTERN_CACHE_SIZE
 from .domain.mcp import McpToolRule
 from .errors import PolicyError
 
@@ -54,7 +55,7 @@ def _identity_boundary(target: str) -> int | None:
     return None
 
 
-@lru_cache(maxsize=1024)
+@lru_cache(maxsize=MCP_PATTERN_CACHE_SIZE)
 def _compile_identifier_pattern(pattern: str) -> re.Pattern[str]:
     regex, index = _compile_sequence(pattern, 0, stop=frozenset())
     if index != len(pattern):

@@ -11,6 +11,8 @@ from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 
+from .config import DEFAULT_TEMPLATES as DEFAULT_TEMPLATES
+from .config import POLICY_VERSION, TEMPLATE_SUFFIX
 from .domain import (
     POLICY_FILENAME,
     Decision,
@@ -394,7 +396,7 @@ def git_toplevel(cwd: Path) -> Path | None:
 
 def write_default_policy(path: Path) -> None:
     default: JsonObject = {
-        "version": 1,
+        "version": POLICY_VERSION,
         "permissions": {
             "allow": [],
             "ask": [],
@@ -407,9 +409,6 @@ def write_default_policy(path: Path) -> None:
 # -----------------------------------------------------------------------------
 # Bundled rule templates (`agentperm init`)
 # -----------------------------------------------------------------------------
-
-TEMPLATE_SUFFIX = ".jsonc"
-DEFAULT_TEMPLATES: tuple[str, ...] = ("safety-baseline", "file-inspection", "git-read-only")
 
 _DECISION_KEYS: tuple[tuple[Decision, str], ...] = (
     (Decision.Allow, "allow"),
@@ -482,7 +481,7 @@ def render_templates(templates: Sequence[Template]) -> str:
         "// Edit freely; rerun `agentperm init <template>` to merge more templates in.",
         "// Template docs: https://github.com/jacks0n/agentperm/tree/main/src/agentperm/templates",
         "{",
-        '  "version": 1,',
+        f'  "version": {POLICY_VERSION},',
         '  "permissions": {',
     ]
     for index, (decision, key) in enumerate(_DECISION_KEYS):

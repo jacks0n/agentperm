@@ -134,14 +134,14 @@ Reported as **errors** (exit 1):
 - redirect decisions that aren't `allow`/`ask`/`deny` (silently ignored at runtime)
 - malformed `allowPaths` or `python.calls` entries
 - malformed includes, unmatched include globs, unreadable fragments, and include cycles
+- tool rules that name no [capability](capabilities.md#tool-capabilities), so they never match:
+  a native tool name such as `"Grep"` or `"Edit(src/**)"` (the error names the capability to use,
+  here `"Read"` or `"Write(src/**)"`), a raw `"mcp__server__tool"` (use `MCP(server.tool)`), or a
+  mistyped `"Shel(git status)"`
 
 Reported as **warnings** (exit 0 if there are no errors):
 
 - unknown keys anywhere in the file (`"permisions"`, `"denied"`, …)
-- rules like `"Shel(git status)"` that parse as a named-tool rule which never matches a shell
-  command — almost always a mistyped `Shell(...)`
-- `Edit(...)` rules — a deprecated alias for `Write(...)`. They are evaluated as `Write`, and
-  `import`/`init` rewrite them on save; the warning shows the exact replacement
 
 Run it after every hand edit; a broken policy file otherwise only surfaces as every command
 prompting with `"policy load failed"`.
@@ -191,8 +191,8 @@ Behavior:
 
 1. Read JSON payload from stdin
 2. Parse it via the named adapter into a `Request`
-3. Load the global policy plus policies from the payload cwd for shell/non-path requests, or from
-   each resolved target's ancestry for path-bearing tools
+3. Load the global policy plus policies from the payload cwd, and each resolved target's ancestry
+   for path-bearing tools and shell paths checked by scoped `Read` rules
 4. Decide → aggregate → coerce for permission mode
 5. Emit a decisive verdict, or invoke the configured pass-through hook when unresolved
 

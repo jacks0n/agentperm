@@ -27,7 +27,6 @@ from agentperm import (
     parse_rule,
 )
 from agentperm.adapters import select_adapter
-from agentperm.adapters.kiro import kiro_tool_name
 from agentperm.cli import cmd_check, effective_event
 from tests.json_support import array_at, decode_object, json_at, text_at
 
@@ -100,16 +99,6 @@ def test_kiro_parse_read_tool() -> None:
     assert isinstance(request, ToolRequest)
     assert request.tool == "Read"
     assert ("path", "/tmp/x") in request.arguments
-
-
-def test_kiro_parse_grep_tool() -> None:
-    adapter = KiroAdapter()
-    request = adapter.parse_event(
-        {"tool_name": "grep", "tool_input": {"pattern": "TODO", "path": "/src"}},
-        "preToolUse",
-    )
-    assert isinstance(request, ToolRequest)
-    assert request.tool == "Grep"
 
 
 def test_kiro_parse_web_fetch_tool() -> None:
@@ -191,31 +180,6 @@ def test_kiro_write_verdict_ask(capsys: pytest.CaptureFixture[str]) -> None:
     out = decode_object(capsys.readouterr().out)
     assert text_at(out, "hookSpecificOutput", "permissionDecision") == "ask"
     assert "needs approval" in text_at(out, "hookSpecificOutput", "permissionDecisionReason")
-
-
-def test_kiro_tool_name_mapping() -> None:
-    assert kiro_tool_name("shell") == "Bash"
-    assert kiro_tool_name("execute_bash") == "Bash"
-    assert kiro_tool_name("execute_cmd") == "Bash"
-    assert kiro_tool_name("read") == "Read"
-    assert kiro_tool_name("fs_read") == "Read"
-    assert kiro_tool_name("fsRead") == "Read"
-    assert kiro_tool_name("write") == "Write"
-    assert kiro_tool_name("fs_write") == "Write"
-    assert kiro_tool_name("fsWrite") == "Write"
-    assert kiro_tool_name("glob") == "Glob"
-    assert kiro_tool_name("grep") == "Grep"
-    assert kiro_tool_name("web_search") == "WebSearch"
-    assert kiro_tool_name("web_fetch") == "WebFetch"
-    assert kiro_tool_name("aws") == "AWS"
-    assert kiro_tool_name("use_aws") == "AWS"
-    assert kiro_tool_name("code") == "Code"
-    assert kiro_tool_name("knowledge") == "Knowledge"
-    assert kiro_tool_name("delegate") == "Delegate"
-    assert kiro_tool_name("subagent") == "Subagent"
-    assert kiro_tool_name("use_subagent") == "Subagent"
-    assert kiro_tool_name("@git/status") == "@git/status"  # MCP passthrough
-    assert kiro_tool_name("unknown_tool") == "unknown_tool"  # unknown passthrough
 
 
 def test_auto_adapter_selects_kiro_from_kiro_tool_names() -> None:
@@ -351,8 +315,7 @@ def test_kiro_import_allowed_tools(fake_home: Path) -> None:
     (agents_dir / "default.json").write_text(json.dumps({"allowedTools": ["read", "grep", "@git/git_status"]}))
     rules = list(KiroAdapter().import_native_rules())
     decisions = {(d.value, r.name) for d, r in rules if isinstance(r, NamedTool)}
-    assert ("allow", "Read") in decisions
-    assert ("allow", "Grep") in decisions
+    assert decisions == {("allow", "Read")}
     assert any(
         decision is Decision.Allow
         and isinstance(rule, McpToolRule)
@@ -379,7 +342,7 @@ def test_kiro_import_skips_unrepresentable_allowed_tool_wildcards(fake_home: Pat
     rules = list(KiroAdapter().import_native_rules())
     tools = [rule.name for _, rule in rules if isinstance(rule, NamedTool)]
     mcp_tools = [rule for _, rule in rules if isinstance(rule, McpToolRule)]
-    assert tools == ["code_*"]
+    assert tools == []
     assert mcp_tools == [McpToolRule("git", "read_*")]
 
 

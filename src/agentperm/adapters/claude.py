@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import ClassVar
 
+from ..config import CLAUDE_SETTINGS_PATH
 from ..domain import (
     AgentName,
     Decision,
@@ -15,12 +16,15 @@ from ..domain import (
     JsonObject,
     McpToolRequest,
     McpToolRule,
+    NamedTool,
     Request,
     Rule,
     ShellRequest,
-    ToolRequest,
     Verdict,
+    native_tool,
+    powershell_request,
     tool_arguments,
+    tool_request,
 )
 from ..fileio import read_json
 from ..rules import parse_rule
@@ -35,12 +39,10 @@ from .base import (
     strip_rulesync_hooks,
 )
 
-_CLAUDE_WRITE_TOOL_NAMES = frozenset({"Edit", "MultiEdit", "NotebookEdit", "Write"})
-
 
 class ClaudeAdapter(AgentAdapter):
     name = AgentName.Claude
-    settings_path: ClassVar[Path] = Path.home() / ".claude/settings.json"
+    settings_path: ClassVar[Path] = Path.home() / CLAUDE_SETTINGS_PATH
 
     def import_native_rules(self) -> Iterator[tuple[Decision, Rule]]:
         for path in (self.settings_path, self.settings_path.with_name("settings.local.json")):
@@ -65,27 +67,16 @@ class ClaudeAdapter(AgentAdapter):
                         yield target_decision, McpToolRule(*identity)
                         continue
                     rule = parse_rule(raw)
+                    if isinstance(rule, NamedTool):
+                        tool = native_tool(AgentName.Claude, rule.name)
+                        if tool is None:
+                            continue
+                        rule = NamedTool(tool.capability, rule.specifier, rule.rationale)
                     if rule is not None:
                         yield target_decision, rule
 
     def parse_event(self, payload: JsonObject, event_name: str) -> Request | None:
-        tool_name = payload.get("tool_name")
-        if not isinstance(tool_name, str):
-            return None
-        cwd_raw = payload.get("cwd")
-        cwd = Path(cwd_raw) if isinstance(cwd_raw, str) else None
-        if tool_name == "Bash":
-            tool_input = payload.get("tool_input")
-            command = tool_input.get("command") if isinstance(tool_input, dict) else None
-            return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""), cwd=cwd)
-        arguments = tool_arguments(payload.get("tool_input"))
-        mcp_request = _claude_mcp_request(tool_name, arguments, cwd)
-        if mcp_request is not None:
-            return mcp_request
-        # Every native file-mutation tool is one capability: a Write to an existing
-        # path overwrites it, so create/overwrite/edit are not separable permissions.
-        semantic_name = "Write" if tool_name in _CLAUDE_WRITE_TOOL_NAMES else tool_name
-        return ToolRequest(semantic_name, arguments, cwd=cwd)
+        return parse_claude_shaped_event(payload, AgentName.Claude)
 
     def write_verdict(
         self,
@@ -160,13 +151,23 @@ class ClaudeAdapter(AgentAdapter):
         )
 
 
-def _claude_mcp_request(
-    tool_name: str,
-    arguments: tuple[tuple[str, str], ...],
-    cwd: Path | None,
-) -> McpToolRequest | None:
+def parse_claude_shaped_event(payload: JsonObject, agent: AgentName) -> Request | None:
+    """Parse a ``tool_name``/``tool_input`` hook payload, as Claude and Codex send it."""
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str):
+        return None
+    cwd_raw = payload.get("cwd")
+    cwd = Path(cwd_raw) if isinstance(cwd_raw, str) else None
+    tool_input = payload.get("tool_input")
+    if tool_name == "Bash":
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""), cwd=cwd)
+    if tool_name == "PowerShell":
+        return powershell_request(cwd)
     identity = _claude_mcp_identity(tool_name)
-    return McpToolRequest(*identity, arguments, cwd) if identity is not None else None
+    if identity is not None:
+        return McpToolRequest(*identity, tool_arguments(tool_input), cwd)
+    return tool_request(agent, tool_name, tool_input, cwd)
 
 
 def _claude_mcp_identity(tool_name: str) -> tuple[str, str] | None:

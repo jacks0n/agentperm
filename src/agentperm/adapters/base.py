@@ -12,6 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import ClassVar
 
+from ..config import BRIDGE_HOOK_MARKER, HOOK_TIMEOUTS, RULESYNC_HOOKS_PATH, RULESYNC_VERSION
 from ..domain import (
     AgentName,
     Decision,
@@ -102,17 +103,6 @@ def permission_request_output(decision: Decision, rationale: str) -> JsonObject:
 # -----------------------------------------------------------------------------
 
 
-BRIDGE_HOOK_MARKER = "agentperm"
-
-# Per-agent hook timeouts. Claude/Codex use seconds; Gemini uses milliseconds.
-_HOOK_TIMEOUTS: dict[str, int] = {
-    "claude": 30,
-    "codex": 30,
-    "gemini": 30000,
-    "kiro": 30,
-}
-
-
 def resolve_bridge_command() -> str:
     """Return the absolute path to ``agentperm`` if findable.
 
@@ -149,7 +139,7 @@ def _hook_group(matcher: str, *, agent: str, event: str, status_message: str | N
     hook: JsonObject = {
         "type": "command",
         "command": _bridge_command_string(agent, event),
-        "timeout": _HOOK_TIMEOUTS[agent],
+        "timeout": HOOK_TIMEOUTS[agent],
     }
     if status_message is not None:
         hook["statusMessage"] = status_message
@@ -162,7 +152,7 @@ def _rulesync_entry(agent: str, event: str, matcher: str) -> JsonObject:
         "type": "command",
         "command": _bridge_command_string(agent, event),
         "matcher": matcher,
-        "timeout": _HOOK_TIMEOUTS[agent],
+        "timeout": HOOK_TIMEOUTS[agent],
     }
 
 
@@ -286,7 +276,7 @@ def _ensure_list(parent: JsonObject, key: str) -> JsonArray:
 
 
 def _rulesync_hooks_path() -> Path:
-    return Path.home() / ".rulesync/hooks.json"
+    return Path.home() / RULESYNC_HOOKS_PATH
 
 
 def _write_json_if_changed(path: Path, before: JsonObject, after: JsonObject, *, dry_run: bool) -> list[Path]:
@@ -318,7 +308,7 @@ def merge_rulesync_hooks(
     path = _rulesync_hooks_path()
     before = read_json(path)
     after: JsonObject = deepcopy(before)
-    after.setdefault("version", 1)
+    after.setdefault("version", RULESYNC_VERSION)
     agent_section = _section(after, block)
     hooks = _section(agent_section, "hooks")
     for rulesync_key, bridge_event, matcher in add:

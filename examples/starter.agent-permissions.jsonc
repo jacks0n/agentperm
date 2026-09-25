@@ -9,7 +9,6 @@
       "Shell(sed !{-i,--in-place})",
       "Python(readonly)",
       "Read",
-      "Grep",
       "WebFetch(domain:github.com)"
     ],
     "ask": [

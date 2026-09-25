@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import config
 from .adapters import ADAPTERS, ClaudeAdapter, select_adapter
 from .adapters.base import mcp_bypass_input
 from .command_arguments import CommandArguments
@@ -218,12 +219,12 @@ def main(argv: list[str] | None = None) -> int:
 
 def resolve_install_mode(mode: str) -> InstallMode:
     if mode == "rulesync":
-        if not (Path.home() / ".rulesync").exists():
+        if not (Path.home() / config.RULESYNC_DIR).exists():
             raise PolicyError("--mode rulesync requires ~/.rulesync/ to exist")
         return InstallMode.Rulesync
     if mode == "direct":
         return InstallMode.Direct
-    return InstallMode.Rulesync if (Path.home() / ".rulesync").exists() else InstallMode.Direct
+    return InstallMode.Rulesync if (Path.home() / config.RULESYNC_DIR).exists() else InstallMode.Direct
 
 
 def _cmd_install(*, mode: str, dry_run: bool) -> int:
@@ -437,7 +438,7 @@ def _trace(
     ``main``). Used to debug whether the bridge is actually being called for a
     given command.
     """
-    target = os.environ.get("AGENTPERM_TRACE")
+    target = os.environ.get(config.ENV_AGENTPERM_TRACE)
     if not target:
         return
     record: JsonObject = {
@@ -502,8 +503,9 @@ def agentperm_bypass_dir(env: Mapping[str, str]) -> Path:
     The plugin (writer) and agentperm (reader) must agree on this path; both
     derive it through this same helper / the same XDG semantics in the plugin.
     """
-    base = env.get("XDG_CACHE_HOME") or str(Path(env.get("HOME", str(Path.home()))) / ".cache")
-    return Path(base) / "agentperm" / "bypass"
+    home = env.get(config.ENV_HOME, str(Path.home()))
+    base = env.get(config.ENV_XDG_CACHE_HOME) or str(Path(home) / config.DEFAULT_CACHE_PATH)
+    return Path(base) / config.BYPASS_CACHE_PATH
 
 
 def _bypass_dir_is_safe(path: Path) -> bool:
@@ -542,8 +544,8 @@ def coerce_for_pane_bypass(
     """
     if verdict.decision not in (Decision.Ask, Decision.NoOpinion):
         return verdict, None
-    pane_id = env.get("ZELLIJ_PANE_ID")
-    session = env.get("ZELLIJ_SESSION_NAME")
+    pane_id = env.get(config.ENV_ZELLIJ_PANE_ID)
+    session = env.get(config.ENV_ZELLIJ_SESSION_NAME)
     if not pane_id or not session:
         return verdict, None
     if any(bad in pane_id or bad in session for bad in ("/", "\\", "..", "\0")):
@@ -623,7 +625,7 @@ def _cmd_why(*, command: str) -> int:
         print(f"policy load failed: {error}", file=sys.stderr)
         return 2
     request = ShellRequest(parse_pipeline(command), cwd=cwd)
-    verdict = policy.decide(request)
+    verdict = decide_with_discovered_policy(request, cwd)
     print(f"{verdict.decision.value} — {verdict.rationale or 'no rule matched'}")
     segments = policy.decide_segments(request)
     if len(segments) > 1:

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from ..domain import AgentName, JsonObject
+from ..domain import AgentName, JsonObject, agent_tool_names
 from .base import AgentAdapter
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
-from .gemini import GEMINI_TOOL_NAMES, GeminiAdapter
-from .kiro import KIRO_TOOL_NAMES, KiroAdapter
+from .gemini import GeminiAdapter
+from .kiro import KiroAdapter
 from .opencode import OpencodeAdapter
+
+_GEMINI_TOOL_NAMES = agent_tool_names(AgentName.Gemini)
+_KIRO_TOOL_NAMES = agent_tool_names(AgentName.Kiro)
 
 ADAPTERS: dict[AgentName, AgentAdapter] = {
     AgentName.Claude: ClaudeAdapter(),
@@ -24,15 +27,15 @@ def select_adapter(agent: AgentName, event: str, payload: JsonObject) -> AgentAd
         return ADAPTERS[agent]
     # Kiro's hook event names are lower camel case. Prefer this unambiguous
     # signal before inspecting tool names shared with Gemini (for example
-    # ``glob`` and ``web_fetch``).
+    # ``glob`` and ``web_fetch``). Shared names resolve identically either way.
     if event in ("preToolUse", "postToolUse"):
         return ADAPTERS[AgentName.Kiro]
     if event in ("BeforeTool", "AfterTool"):
         return ADAPTERS[AgentName.Gemini]
     tool_name = payload.get("tool_name")
-    if isinstance(tool_name, str) and tool_name in GEMINI_TOOL_NAMES:
+    if isinstance(tool_name, str) and tool_name in _GEMINI_TOOL_NAMES:
         return ADAPTERS[AgentName.Gemini]
-    if isinstance(tool_name, str) and tool_name in KIRO_TOOL_NAMES:
+    if isinstance(tool_name, str) and tool_name in _KIRO_TOOL_NAMES:
         return ADAPTERS[AgentName.Kiro]
     if event == "PermissionRequest" and isinstance(payload.get("permission"), dict):
         return ADAPTERS[AgentName.Codex]

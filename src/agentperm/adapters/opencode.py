@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import ClassVar
 
+from ..config import OPENCODE_CONFIG_PATH, OPENCODE_PLUGIN_PATH
 from ..domain import (
     AgentName,
     BashCommand,
@@ -20,9 +21,10 @@ from ..domain import (
     Request,
     Rule,
     ShellRequest,
-    ToolRequest,
     Verdict,
+    native_tool,
     tool_arguments,
+    tool_request,
 )
 from ..fileio import atomic_write, read_json
 from ..shell import parse_pipeline
@@ -90,8 +92,8 @@ export const AgentBridgePlugin = async (input) => ({{
 
 class OpencodeAdapter(AgentAdapter):
     name = AgentName.Opencode
-    config_path: ClassVar[Path] = Path.home() / ".config/opencode/opencode.json"
-    plugin_path: ClassVar[Path] = Path.home() / ".config/opencode/plugins/agentperm.js"
+    config_path: ClassVar[Path] = Path.home() / OPENCODE_CONFIG_PATH
+    plugin_path: ClassVar[Path] = Path.home() / OPENCODE_PLUGIN_PATH
 
     def import_native_rules(self) -> Iterator[tuple[Decision, Rule]]:
         for path in (self.config_path, self.config_path.with_suffix(".jsonc")):
@@ -137,13 +139,13 @@ class OpencodeAdapter(AgentAdapter):
                     parse_pipeline(command if isinstance(command, str) else ""),
                     cwd=cwd,
                 )
-            if tool_name == "apply_patch":
+            if tool_name in _OPENCODE_PATCH_TOOLS:
                 patch = tool_input.get("patchText")
                 return parse_apply_patch_request(patch if isinstance(patch, str) else "", cwd)
             mcp_request = _opencode_mcp_request(payload, tool_name, tool_arguments(tool_input), cwd)
             if mcp_request is not None:
                 return mcp_request
-            return ToolRequest(_opencode_tool_name(tool_name), tool_arguments(tool_input), cwd=cwd)
+            return tool_request(AgentName.Opencode, tool_name, tool_input, cwd)
 
         permission = payload.get("permission")
         if not isinstance(permission, dict):
@@ -156,7 +158,7 @@ class OpencodeAdapter(AgentAdapter):
         if permission_type == "bash":
             command = metadata.get("command")
             return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""), cwd=cwd)
-        if permission_type == "apply_patch":
+        if permission_type in _OPENCODE_PATCH_TOOLS:
             patch = metadata.get("patchText")
             if isinstance(patch, str):
                 return parse_apply_patch_request(patch, cwd)
@@ -164,7 +166,7 @@ class OpencodeAdapter(AgentAdapter):
             mcp_request = _opencode_mcp_request(payload, permission_type, tool_arguments(metadata), cwd)
             if mcp_request is not None:
                 return mcp_request
-            return ToolRequest(_opencode_tool_name(permission_type), tool_arguments(metadata), cwd=cwd)
+            return tool_request(AgentName.Opencode, permission_type, metadata, cwd)
         return None
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> int:
@@ -217,26 +219,14 @@ def _opencode_rule(tool: str, pattern: str) -> Rule | None:
         if pattern == "*":
             return BashCommand(("**",), trailing_wildcard=True)
         return BashCommand(tuple(pattern.split()))
-    specifier = None if pattern == "*" else pattern
-    return NamedTool(_opencode_tool_name(tool), specifier)
+    native = native_tool(AgentName.Opencode, tool)
+    if native is None:
+        return None
+    return NamedTool(native.capability, None if pattern == "*" else pattern)
 
 
-_OPENCODE_TOOL_NAMES = {
-    "read": "Read",
-    "grep": "Grep",
-    "glob": "Glob",
-    "edit": "Write",
-    "write": "Write",
-    "webfetch": "WebFetch",
-    "websearch": "WebSearch",
-    "task": "Task",
-    "skill": "Skill",
-}
-
-
-def _opencode_tool_name(tool: str) -> str:
-    """Canonicalize an OpenCode tool key (``webfetch``) to the policy name (``WebFetch``)."""
-    return _OPENCODE_TOOL_NAMES.get(tool, tool)
+# ``patch`` is the pre-1.1 name of ``apply_patch``; both carry the patch in ``patchText``.
+_OPENCODE_PATCH_TOOLS = frozenset({"apply_patch", "patch"})
 
 
 def _opencode_mcp_request(

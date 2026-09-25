@@ -42,15 +42,36 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   add/update/delete/move; OpenCode `edit`/`write`; Gemini `replace`/`write_file`; Kiro
   `write`/`fs_write`/`fsWrite`) is evaluated as `Write(path)`, so a scoped `Write` rule now governs
   overwrites of existing files, which previously fell through to the host prompt when only
-  `Edit(...)` was denied. `Edit(...)` is retained as a compatibility alias: it parses as the same
-  `Write(...)` rule, deduplicates against it, is written back as `Write(...)` by `import`/`init`,
-  and `agentperm validate` warns about it. An existing `allow Edit(...)` rule now also allows
-  creating files in its scope.
+  `Edit(...)` was denied.
+- Tool rules name agentperm capabilities, never native tool names. One shared table
+  (`domain/tools.py`) resolves every current and legacy native tool of each agent to `Read`,
+  `Write`, `WebFetch`, `WebSearch`, `Skill`, or Kiro's `AWS`/`Code`/`Knowledge`: every host's read,
+  list, glob, and search tools are now `Read` (the `Glob`, `Grep`, and `LS` names are gone), Kiro
+  IDE tools and Gemini's pre-0.28 `search_file_content` are recognised, and names shared by Gemini
+  and Kiro resolve identically. Rules naming anything else — `Edit`, `Grep`, `Task`, `read_file`,
+  a raw `mcp__server__tool` — never match, and `agentperm validate` now reports them as errors that
+  name the replacement. `import` writes capabilities and skips native tools without one. Kiro's
+  `Delegate`/`Subagent` and OpenCode's `Task` names are removed; subagent tools are left to the host.
+- Scoped `Read` rules match what listing, search, and glob tools can reach (`src/*`, `src/**`, or a
+  glob's pattern beneath its root) instead of only their literal path fields, so Gemini's
+  `dir_path` and glob patterns are scoped too.
 - Documentation now states the built-in `bash`/`sh`/`zsh -c` contract, including supported flag
   forms, Bash-compatible inner syntax, positional parameters, and fail-closed cases.
 
 ### Fixed
 
+- `Read` denies and asks can no longer be bypassed through the shell: every path a shell command
+  names (explicitly pathed executables, operands, `--option=value` values, input redirects, and
+  string literals in inline programs) is checked against `Read` rules from the path's own policy
+  ancestry after `~`, `$VAR`, glob, and conservative `cd` resolution. Analysis budgets bound this
+  work and ask when exhaustive evaluation would be unsafe. This covers Codex's textual reads
+  through its shell. `Read` allows still never approve shell commands, and `agentperm why` now
+  reports the same verdict as the hook.
+- `Write` denies can no longer be bypassed through file tools that were previously passed through
+  under their native names: OpenCode `multiedit` and pre-1.1 `patch`, and Kiro IDE `fs_append`,
+  `str_replace`, `delete_file`, `edit_code`, `semantic_rename`, and `smart_relocate`. Kiro
+  `run_command`/`executeBash` are Shell requests, and PowerShell tools (Claude `PowerShell`, Kiro
+  `execute_pwsh`) always ask instead of reaching no rule.
 - Path-bearing tool requests now discover policies from every target's ancestry instead of only
   from the agent cwd. Cross-project and cross-worktree writes therefore retain the target project's
   protections for Claude, Codex, OpenCode, Gemini, and Kiro; multi-target operations evaluate every

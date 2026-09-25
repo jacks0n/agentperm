@@ -13,10 +13,9 @@ from enum import Enum, StrEnum
 from pathlib import Path
 from typing import TypeGuard
 
+from ..config import MAX_TOOL_ARGUMENT_NODES
+from ..config import POLICY_FILENAME as POLICY_FILENAME
 from ..errors import PolicyError
-
-POLICY_FILENAME = ".agent-permissions.jsonc"
-
 
 # -----------------------------------------------------------------------------
 # JSON value model (system-boundary type)
@@ -439,7 +438,6 @@ class PythonSqlPattern(Rule):
 
 _URL_ARG_KEYS = frozenset({"url", "uri", "href"})
 _PATH_ARG_KEYS = frozenset({"path", "file_path", "filepath", "paths", "file_paths", "notebook_path", "absolute_path"})
-_MAX_ARG_NODES = 1000
 
 
 @dataclass(frozen=True)
@@ -641,25 +639,25 @@ def _glob_to_regex(pattern: str) -> str:
 def tool_arguments(value: object) -> ToolArguments:
     """Flatten a tool-input payload to (field-name, string-value) pairs for scoping.
 
-    Breadth-first and bounded by ``_MAX_ARG_NODES`` so a deep or huge payload can't cause
+    Breadth-first and bounded by ``MAX_TOOL_ARGUMENT_NODES`` so a deep or huge payload can't cause
     ``RecursionError`` or unbounded work; shallow (authoritative) fields are kept first.
     List items inherit their containing field's name.
     """
     out: list[tuple[str, str]] = []
     queue: deque[tuple[str, object]] = deque([("", value)])
     seen = 0
-    while queue and seen < _MAX_ARG_NODES:
+    while queue and seen < MAX_TOOL_ARGUMENT_NODES:
         key, node = queue.popleft()
         seen += 1
         if isinstance(node, str):
             out.append((key, node))
         elif _object_dict(node):
             for sub_key, sub_value in node.items():
-                if isinstance(sub_key, str) and len(queue) < _MAX_ARG_NODES:
+                if isinstance(sub_key, str) and len(queue) < MAX_TOOL_ARGUMENT_NODES:
                     queue.append((sub_key, sub_value))
         elif _object_list(node):
             for item in node:
-                if len(queue) < _MAX_ARG_NODES:
+                if len(queue) < MAX_TOOL_ARGUMENT_NODES:
                     queue.append((key, item))
     return tuple(out)
 

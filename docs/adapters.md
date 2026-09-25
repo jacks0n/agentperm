@@ -157,7 +157,7 @@ at the pre-execution stage.
 
 ### Tool name canonicalization
 
-OpenCode names tools in lowercase (`bash`, `read`, `grep`). agentperm maps these to the capitalized canonical names (`Read`, `Grep`, …) both when importing native rules and when parsing hook payloads at decision time. The plugin also records configured MCP server names so an underscore-qualified OpenCode tool can be separated without guessing at underscores in the server name. The policy file uses one canonical naming convention across all adapters.
+OpenCode's tool ids and permission keys (`read`, `grep`, `edit`, …) resolve to [capabilities](capabilities.md#tool-capabilities) both when importing native rules and when parsing hook payloads. The plugin also records configured MCP server names so an underscore-qualified OpenCode tool can be separated without guessing at underscores in the server name. The policy file uses one canonical naming convention across all adapters.
 
 ## Gemini CLI
 
@@ -207,29 +207,15 @@ empty operation.
 
 ### Tool name canonicalization
 
-Kiro uses lowercase tool names with aliases. agentperm maps them to its capitalized policy names:
-
-| Kiro tool name | agentperm name |
-|---|---|
-| `shell`, `execute_bash`, `execute_cmd` | `Bash` |
-| `read`, `fs_read`, `fsRead` | `Read` |
-| `write`, `fs_write`, `fsWrite` | `Write` |
-| `glob` | `Glob` |
-| `grep` | `Grep` |
-| `web_search` | `WebSearch` |
-| `web_fetch` | `WebFetch` |
-| `aws`, `use_aws` | `AWS` |
-| `code` | `Code` |
-| `knowledge` | `Knowledge` |
-| `delegate` | `Delegate` |
-| `subagent`, `use_subagent` | `Subagent` |
-| `@server/tool` (MCP) | canonical `{server, tool}` MCP identity |
+Kiro's CLI tools, their legacy aliases (`fs_read`, `execute_bash`, …), and the IDE's tools
+(`str_replace`, `list_directory`, …) resolve to [capabilities](capabilities.md#tool-capabilities)
+or to Shell requests; `@server/tool` becomes the canonical `{server, tool}` MCP identity.
 
 ### Native rules import
 
 `import` reads the active Kiro profile's `agents/*.json` (`$KIRO_HOME/agents` when set, otherwise `~/.kiro/agents`) and extracts:
 
-- **`allowedTools`** — exact names and losslessly representable trailing-`*` prefix patterns become canonical named-tool or MCP allow rules. Shell aliases and Kiro-only suffix/`?` wildcard forms are skipped rather than imported with narrower semantics.
+- **`allowedTools`** — exact names and losslessly representable trailing-`*` prefix patterns become capability or MCP allow rules. Shell aliases, tools without a capability, and Kiro-only suffix/`?` wildcard forms are skipped rather than imported with different semantics.
 - **`toolsSettings.shell.allowedCommands`** — each simple pattern becomes a `BashCommand` allow rule.
 - **`toolsSettings.shell.deniedCommands`** — each simple pattern becomes a `BashCommand` deny rule.
 
@@ -285,17 +271,16 @@ Custom Kiro CLI agents also receive an embedded `hooks.preToolUse` entry with th
 
 ## Semantic file-operation translation
 
-Claude maps `Edit`, `MultiEdit`, `NotebookEdit`, and `Write` to `Write`. Codex and OpenCode
-translate apply-patch add/update/delete/move markers into a compound of `Write` requests, one per
-target path. Gemini maps `replace` and `write_file` to `Write`. Kiro's write aliases become `Write`.
+Every native file-mutation tool resolves to `Write` through the shared table in
+`src/agentperm/domain/tools.py`. Codex and OpenCode translate apply-patch (and OpenCode's older
+`patch`) add/update/delete/move markers into a compound of `Write` requests, one per target path.
 
 The CLI attaches the hook cwd to every child request, resolves each target, and loads the target's
 ancestor policies. Relative rule patterns use each root policy's directory rather than the agent
 cwd. Scoped matching normalizes traversal and resolves existing symlinks. An apply-patch payload
 with an invalid envelope, unknown marker, empty path, invalid move, or no operation becomes
 `RejectedRequest` and denies. See
-[Capabilities: semantic file operations](capabilities.md#semantic-file-operations) for the compact
-user-facing mapping.
+[Capabilities: tool capabilities](capabilities.md#tool-capabilities) for the full mapping.
 
 ## Adapter contract
 

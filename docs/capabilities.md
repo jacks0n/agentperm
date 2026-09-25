@@ -11,10 +11,10 @@ not available from that host or adapter.
 | Capability | Claude Code | Codex CLI | OpenCode | Gemini CLI | Kiro |
 |---|---:|---:|---:|---:|---:|
 | Structural Shell rules | ✓ `Bash` | ✓ `Bash` | ✓ `bash` | ✓ shell tools | ✓ shell aliases |
-| Named and scoped tools | ✓ all hooked tools | ◐ hooked Bash, patch, MCP | ✓ all tools | ✓ all tools | ✓ all tools |
+| [Tool capabilities](#tool-capabilities) | ✓ | ◐ Codex text reads use its shell | ✓ | ✓ | ✓ CLI and IDE |
 | Canonical `MCP(server.tool)` rules | ✓ | ✓ | ✓ config-aware shim | ✓ | ✓ |
-| Scoped `Read` | ✓ | — native Read is not in the installed matcher | ✓ | ✓ | ✓ |
-| Semantic `Write` | ✓ Edit, MultiEdit, NotebookEdit, Write | ✓ patch add/update/delete/move | ✓ edit, write, patch | ✓ replace, write_file | ✓ write aliases |
+| Scoped `Read` | ✓ | ◐ `view_image` and pre-0.129 file tools | ✓ | ✓ | ✓ |
+| Semantic `Write` | ✓ | ✓ patch add/update/delete/move | ✓ | ✓ | ✓ |
 | Multi-file/move aggregation | — native calls are individual | ✓ | ✓ for patchText | — native calls are individual | — native call has one path |
 | `Python(readonly)` for shell calls | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Semantic SQL captures in Shell/Python | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -49,23 +49,33 @@ SQL captures use SQLGlot plus explicit dialect policy and fail closed on opaque 
 Gemini cannot preserve the interactive distinction between Ask and Deny through its current
 pre-tool hook contract. Kiro receives distinct structured permission decisions and rationales.
 
-## Semantic file operations
+## Tool capabilities
 
-Policies use one stable capability, `Write`, rather than native tool spellings. Any native
-operation that creates, overwrites, edits, deletes, or moves a file is a `Write` on that path:
+Policies name capabilities, never native tool spellings. Each adapter resolves every native tool
+below, including names from older host releases, before a rule is matched. A native tool that is
+not listed (subagents, todo lists, plan mode, …) matches no rule except `"*"`, so the host decides
+it. The table is `src/agentperm/domain/tools.py`; a test keeps this page in step with it.
 
-| Native operation | agentperm request |
-|---|---|
-| Claude `Edit`, `MultiEdit`, `Write` | `Write(file_path)` |
-| Claude `NotebookEdit` | `Write(notebook_path)` |
-| Codex/OpenCode patch add, update, or delete | `Write(file_path)` |
-| Codex/OpenCode patch move | source `Write` + destination `Write` |
-| OpenCode `edit` / `write` | `Write` |
-| Gemini `replace` / `write_file` | `Write` |
-| Kiro `write`, `fs_write`, `fsWrite` | `Write` |
+| Capability | Claude Code | Codex CLI | Gemini CLI | OpenCode | Kiro |
+|---|---|---|---|---|---|
+| `Read` | `Read`, `NotebookRead`, `Glob`, `Grep`, `LS` | `view_image`, `read_file`, `list_dir`, `grep_files` | `read_file`, `read_many_files`, `list_directory`, `glob`, `grep_search`, `search_file_content` | `read`, `list`, `glob`, `grep` | `read`, `fs_read`, `fsRead`, `glob`, `grep`, `read_file`, `readFile`, `read_files`, `readMultipleFiles`, `read_code`, `readCode`, `list_directory`, `listDirectory`, `file_search`, `fileSearch`, `grep_search`, `grepSearch` |
+| `Write` | `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | `apply_patch` | `write_file`, `replace` | `edit`, `write`, `multiedit`, `apply_patch`, `patch` | `write`, `fs_write`, `fsWrite`, `fs_append`, `fsAppend`, `str_replace`, `strReplace`, `edit_code`, `editCode`, `semantic_rename`, `smart_relocate`, `delete_file`, `deleteFile` |
+| `WebFetch` | `WebFetch` | — | `web_fetch` | `webfetch` | `web_fetch`, `webFetch` |
+| `WebSearch` | `WebSearch` | — hosted, not hooked | `google_web_search` | `websearch` | `web_search`, `webSearch`, `remote_web_search` |
+| `Skill` | `Skill` | — | `activate_skill` | `skill` | — |
+| `AWS` / `Code` / `Knowledge` | — | — | — | — | `aws`, `use_aws`, `useAws` / `code` / `knowledge` |
+| Shell rules | `Bash` | `Bash` | `run_shell_command` | `bash` | `shell`, `execute_bash`, `execute_cmd`, `executeBash`, `executeCmd`, `run_command`, `runCommand` |
 
-`Edit(...)` in a policy is a deprecated alias for `Write(...)`; see the
-[policy reference](policy-reference.md) for its exact behaviour.
+PowerShell (Claude `PowerShell`, Kiro `execute_pwsh`/`executePwsh`) is never analysed as a POSIX
+shell command: it always asks. Since 0.129 Codex performs textual file reads, listing, and search
+through `exec_command`; `view_image` remains a native `Read` tool. On every agent, a shell command that names a path inside a `Read`
+deny or ask scope gets that verdict too, so `deny Read(secrets/**)` also stops `cat secrets/key`
+(see the [policy reference](policy-reference.md) for what counts as a named path).
+
+Scoped rules match each tool's own target: its path fields, the listed directory (`src/*`), the
+searched tree (`src/**`, or the working directory), or a glob's pattern beneath its root. Any
+native operation that creates, overwrites, edits, deletes, or moves a file is a `Write` on that
+path, and a patch move is a `Write` on both the source and the destination.
 
 Multi-file patches become one compound request. Every child is evaluated and the strictest verdict
 wins. A malformed patch that claims to mutate files but cannot be translated becomes a rejected

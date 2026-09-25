@@ -19,10 +19,6 @@ from .domain import (
 )
 from .errors import PolicyError
 
-# Deprecated capability spellings, normalised at parse time so loaders, importers,
-# serializers, and dedupe only ever see the canonical name.
-TOOL_NAME_ALIASES = {"Edit": "Write"}
-
 
 def parse_rule(raw: JsonValue) -> Rule | None:
     if isinstance(raw, str):
@@ -68,14 +64,14 @@ def _parse_string_rule(text: str) -> Rule | None:
                 f"{text!r} is silently dead — shell commands are matched by "
                 f"Bash(cmd:*) or Shell(...) rules, not a bare tool name"
             )
-        return NamedTool(TOOL_NAME_ALIASES.get(name, name), None if spec in ("", "*") else spec)
+        return NamedTool(name, None if spec in ("", "*") else spec)
     if text == "Bash":
         raise PolicyError(
             "bare 'Bash' is silently dead — shell commands are matched by "
             "Bash(cmd:*) or Shell(...) rules, not a bare tool name"
         )
     if text:
-        return NamedTool(TOOL_NAME_ALIASES.get(text, text))
+        return NamedTool(text)
     return None
 
 

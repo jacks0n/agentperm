@@ -145,8 +145,8 @@ appropriate.
 ## Policy locations and trust
 
 - `~/.agent-permissions.jsonc` applies globally.
-- Shell and non-path tools load `.agent-permissions.jsonc` files from the request cwd's ancestry.
-- Path-bearing tools load them from each target's ancestry, even when the agent runs elsewhere.
+- Requests load `.agent-permissions.jsonc` files from the request cwd's ancestry.
+- Path-bearing tools, and paths named by shell commands, also load policies from each target's ancestry.
 - Relative path patterns use the root policy directory; included fragments inherit that anchor.
 - `agentperm edit --local` targets the current Git repository root.
 

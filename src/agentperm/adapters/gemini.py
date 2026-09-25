@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import ClassVar
 
+from ..config import GEMINI_SETTINGS_PATH
 from ..domain import (
     AgentName,
     Decision,
@@ -15,9 +16,9 @@ from ..domain import (
     McpToolRequest,
     Request,
     ShellRequest,
-    ToolRequest,
     Verdict,
     tool_arguments,
+    tool_request,
 )
 from ..shell import parse_pipeline
 from .base import (
@@ -31,7 +32,7 @@ from .base import (
 
 class GeminiAdapter(AgentAdapter):
     name = AgentName.Gemini
-    settings_path: ClassVar[Path] = Path.home() / ".gemini/settings.json"
+    settings_path: ClassVar[Path] = Path.home() / GEMINI_SETTINGS_PATH
 
     def parse_event(self, payload: JsonObject, event_name: str) -> Request | None:
         tool_name = payload.get("tool_name")
@@ -43,11 +44,10 @@ class GeminiAdapter(AgentAdapter):
         if tool_name == "run_shell_command":
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             return ShellRequest(parse_pipeline(command if isinstance(command, str) else ""), cwd=cwd)
-        arguments = tool_arguments(tool_input)
-        mcp_request = _gemini_mcp_request(tool_name, arguments, cwd)
+        mcp_request = _gemini_mcp_request(tool_name, tool_arguments(tool_input), cwd)
         if mcp_request is not None:
             return mcp_request
-        return ToolRequest(_gemini_tool_name(tool_name), arguments, cwd=cwd)
+        return tool_request(AgentName.Gemini, tool_name, tool_input, cwd)
 
     def write_verdict(self, verdict: Verdict, event_name: str) -> int:
         if verdict.decision is Decision.NoOpinion:
@@ -87,20 +87,6 @@ class GeminiAdapter(AgentAdapter):
         return strip_nested_hooks(self.settings_path, events=["BeforeTool"], dry_run=dry_run)
 
 
-def _gemini_tool_name(name: str) -> str:
-    return {
-        "glob": "Glob",
-        "grep_search": "Grep",
-        "read_file": "Read",
-        "read_many_files": "Read",
-        "list_directory": "LS",
-        "web_fetch": "WebFetch",
-        "google_web_search": "WebSearch",
-        "replace": "Write",
-        "write_file": "Write",
-    }.get(name, name)
-
-
 def _gemini_mcp_request(
     tool_name: str,
     arguments: tuple[tuple[str, str], ...],
@@ -114,19 +100,3 @@ def _gemini_mcp_request(
     if not server or not separator or not tool:
         return None
     return McpToolRequest(server, tool, arguments, cwd)
-
-
-GEMINI_TOOL_NAMES = frozenset(
-    {
-        "run_shell_command",
-        "glob",
-        "grep_search",
-        "read_file",
-        "read_many_files",
-        "list_directory",
-        "web_fetch",
-        "google_web_search",
-        "replace",
-        "write_file",
-    }
-)

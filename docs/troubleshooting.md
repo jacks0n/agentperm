@@ -109,9 +109,10 @@ The rationale names the exact rule that allowed it. Remember that **`deny` beats
 
 ### Did a directory policy widen things?
 
-For shell commands, agentperm loads the global policy and every `.agent-permissions.jsonc` from the
-filesystem root to the command cwd—`agentperm why` lists every file it consulted. Path-bearing tools
-instead use each target's ancestry. Every matching Deny applies. For Ask and Allow, the nearest
+Agentperm loads the global policy and every `.agent-permissions.jsonc` from the filesystem root to the
+command cwd. Path-bearing tools and paths named by shell commands also use each target's ancestry;
+`agentperm why` lists the cwd policy chain, while its verdict includes applicable target policies.
+Every matching Deny applies. For Ask and Allow, the nearest
 matching file wins, so a directory Allow can explain an unexpectedly silent operation and a
 directory Ask can narrow a global Allow. Relative path rules are anchored to their root policy, not
 the agent cwd. A policy file checked into a cloned repository deserves review like any other tooling config; see

@@ -6,9 +6,8 @@ import ast
 from collections.abc import Callable, Sequence
 from itertools import product
 
+from ..config import MAX_STATIC_STRING_ALTERNATIVES
 from .python_adapters import PYTHON_SQL_CALL_ADAPTERS
-
-_MAX_STATIC_STRING_ALTERNATIVES = 1024
 
 type StringValues = tuple[str, ...]
 type MappingValues = tuple[StringValues | None, StringValues | None]
@@ -290,13 +289,13 @@ class PythonSqlSourceResolver:
     @staticmethod
     def _bounded_unique(values: Sequence[str]) -> tuple[str, ...] | None:
         unique = tuple(dict.fromkeys(values))
-        return unique if len(unique) <= _MAX_STATIC_STRING_ALTERNATIVES else None
+        return unique if len(unique) <= MAX_STATIC_STRING_ALTERNATIVES else None
 
     def _combine_strings(
         self,
         left: tuple[str, ...] | None,
         right: tuple[str, ...] | None,
     ) -> tuple[str, ...] | None:
-        if left is None or right is None or len(left) * len(right) > _MAX_STATIC_STRING_ALTERNATIVES:
+        if left is None or right is None or len(left) * len(right) > MAX_STATIC_STRING_ALTERNATIVES:
             return None
         return self._bounded_unique([first + second for first, second in product(left, right)])

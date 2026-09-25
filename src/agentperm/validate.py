@@ -12,10 +12,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .domain import JsonObject, JsonValue, NamedTool
+from .config import POLICY_VERSION
+from .domain import Capability, JsonObject, JsonValue, NamedTool, native_capability
 from .errors import PolicyError
 from .json_boundary import decode_jsonc
-from .rules import TOOL_NAME_ALIASES, parse_rule
+from .rules import parse_rule
 
 _TOP_LEVEL_KEYS = frozenset({"version", "include", "permissions", "shell", "python"})
 _PERMISSION_KEYS = ("allow", "ask", "deny")
@@ -51,8 +52,8 @@ def validate_policy_text(text: str) -> list[Finding]:
         if key not in _TOP_LEVEL_KEYS:
             findings.append(Finding("warning", f"unknown top-level key {key!r}"))
     version = data.get("version")
-    if version is not None and version != 1:
-        findings.append(Finding("warning", f"unsupported version {version!r} (expected 1)"))
+    if version is not None and version != POLICY_VERSION:
+        findings.append(Finding("warning", f"unsupported version {version!r} (expected {POLICY_VERSION})"))
 
     include = data.get("include")
     if include is not None and (
@@ -107,45 +108,26 @@ def _validate_rule(entry: JsonValue, where: str) -> list[Finding]:
 
 
 def _named_tool_findings(entry: JsonValue, rule: NamedTool, where: str) -> list[Finding]:
-    findings: list[Finding] = []
-    written = _rule_text(entry)
-    spelled = written.strip().split("(", 1)[0] if written is not None else None
-    if spelled is not None and spelled in TOOL_NAME_ALIASES:
-        # ``Edit(...)`` still parses, but only as an alias of the canonical capability.
-        # ``import``/``init`` rewrite it on save; nudge hand-edited files the same way.
-        findings.append(
-            Finding(
-                "warning",
-                f"{where}: {_show(entry)} uses the deprecated {spelled!r} rule name "
-                f"(an alias for {rule.name!r}) — rewrite it as {_show(rule.serialize())}",
-            )
-        )
+    # Adapters resolve every native tool to a capability before matching, so a rule
+    # naming anything else (a host's own tool name, a typo) never fires.
+    names = [capability for capability in Capability if capability == rule.name]
+    if rule.name.endswith("*"):
+        names = [capability for capability in Capability if capability.startswith(rule.name[:-1])]
+    if names:
+        return []
+    return [Finding("error", f"{where}: {_show(entry)} matches no tool — {_tool_hint(rule)}")]
+
+
+def _tool_hint(rule: NamedTool) -> str:
+    server, separator, tool = rule.name.removeprefix("mcp__").partition("__")
+    if rule.name.startswith("mcp__") and server and separator and tool:
+        return f"use {_show(f'MCP({server}.{tool})')}"
+    capability = native_capability(rule.name)
+    if capability is not None:
+        return f"use {_show(NamedTool(capability, rule.specifier).serialize())}"
     if rule.specifier is not None and " " in rule.specifier:
-        # ``Shel(git status)`` parses as NamedTool("Shel", "git status") — a real
-        # tool specifier never contains a space, so this is almost surely a typo.
-        findings.append(
-            Finding(
-                "warning",
-                f"{where}: {_show(entry)} matches a tool literally named {rule.name!r} — "
-                f"did you mean Shell(...) or Bash(...)?",
-            )
-        )
-    return findings
-
-
-def _rule_text(entry: JsonValue) -> str | None:
-    """The rule as written: a bare string, the legacy ``{"rule": ...}`` value, or the
-    rule-as-key key. ``None`` for shapes that carry no rule string."""
-    if isinstance(entry, str):
-        return entry
-    if not isinstance(entry, dict):
-        return None
-    rule = entry.get("rule")
-    if isinstance(rule, str):
-        return rule
-    if "tool" not in entry and len(entry) == 1:
-        return next(iter(entry))
-    return None
+        return "did you mean Shell(...) or Bash(...)?"
+    return f"known tools: {', '.join(sorted(Capability))}"
 
 
 def _validate_rule_metadata(entry: JsonValue, where: str) -> list[Finding]:

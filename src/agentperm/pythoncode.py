@@ -11,13 +11,12 @@ import ast
 import re
 from dataclasses import dataclass
 
+from .config import MAX_PYTHON_AST_NODES, MAX_PYTHON_SOURCE_BYTES
 from .domain import Decision, PythonCallPolicy, PythonSqlPattern, Segment, Verdict
 from .python_local_values import LocalValueTracker
 from .sql.python_analysis import PythonSqlAnalysis
 from .sql.service import SqlPolicyService
 
-_MAX_SOURCE_BYTES = 100_000
-_MAX_AST_NODES = 10_000
 _PYTHON_NAME = re.compile(r"python(?:3(?:\.\d+)?)?")
 _SAFE_INTERPRETER_FLAGS = frozenset({"-B", "-E", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u", "-v", "-x"})
 
@@ -302,8 +301,8 @@ def analyze_python_segment(
     if extracted.source is None:
         return Verdict(Decision.Ask, extracted.problem or "inline Python source is not statically available")
     source = extracted.source
-    if len(source.encode()) > _MAX_SOURCE_BYTES:
-        return Verdict(Decision.Ask, f"inline Python exceeds {_MAX_SOURCE_BYTES} byte analysis limit")
+    if len(source.encode()) > MAX_PYTHON_SOURCE_BYTES:
+        return Verdict(Decision.Ask, f"inline Python exceeds {MAX_PYTHON_SOURCE_BYTES} byte analysis limit")
     try:
         tree = ast.parse(source, mode="exec")
     except (SyntaxError, ValueError) as error:
@@ -373,8 +372,8 @@ class _Analyzer(ast.NodeVisitor):
 
     def visit(self, node: ast.AST) -> None:
         self.node_count += 1
-        if self.node_count > _MAX_AST_NODES:
-            self._record(Decision.Ask, f"inline Python exceeds {_MAX_AST_NODES} node analysis limit")
+        if self.node_count > MAX_PYTHON_AST_NODES:
+            self._record(Decision.Ask, f"inline Python exceeds {MAX_PYTHON_AST_NODES} node analysis limit")
             return
         if not self._allowed(node):
             self._record(Decision.Ask, f"unsupported Python AST node {type(node).__name__}")

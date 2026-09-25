@@ -97,15 +97,11 @@
       "Python(readonly)",
 
       // --- Non-shell tools ---
-      "Glob",
-      "Grep",
-      "LS",
       "Read",
-      "Search",
       "WebFetch",
       "WebSearch",
-      "mcp__Context7__query-docs",
-      "mcp__sequential-thinking__sequentialthinking"
+      "MCP(Context7.query-docs)",
+      "MCP(sequential-thinking.sequentialthinking)"
     ],
     "ask": [
       {

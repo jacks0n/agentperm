@@ -7,8 +7,8 @@ The policy file is JSON-with-comments (JSON5-compatible). Policies can live at:
 - `~/.agent-permissions.jsonc` — global policy
 - `<any-directory>/.agent-permissions.jsonc` — directory-scoped policy
 
-The global policy is always loaded. Shell and non-path tool requests then load every policy from the
-filesystem root through the command's working directory. Path-bearing tools instead load policies
+The global policy is always loaded. Requests load every policy from the filesystem root through the
+command's working directory. Path-bearing tools, and paths named by shell commands, also load policies
 from each target's ancestry, so a target project's protections apply even when the agent runs in a
 different checkout. Duplicate paths are loaded once. Deny rules union and always win. Ask and Allow
 use nearest-policy precedence within each target chain, with Ask before Allow inside one logical
@@ -233,17 +233,31 @@ Position counts. `*` is one token, not "any string" — `pnpm --dir foo build` i
 
 The basename rule applies only when the first token is a **literal** — a `*` or `**` covering position 0 doesn't carry the literal needed for basename comparison. There is no escape syntax for a literal `*` argv token (rare, since shells expand `*` before exec); if you need to match one, use the dict form or contact the maintainer.
 
-#### `"<ToolName>"` — named tool
+#### `"<Capability>"` — tool capability
 
-Matches a non-Bash tool by name.
+Matches a non-shell tool by capability. Every adapter resolves the host's native tool to one of
+these before matching, so a rule means the same thing on every agent and every host version:
+
+| Capability | Covers |
+|---|---|
+| `Read` | reading, listing, globbing, and searching files |
+| `Write` | creating, overwriting, editing, deleting, and moving files |
+| `WebFetch` | fetching a URL |
+| `WebSearch` | web search |
+| `Skill` | loading a skill |
+| `AWS`, `Code`, `Knowledge` | Kiro's AWS, code-intelligence, and knowledge-base tools |
 
 ```jsonc
 "Read"           // exact match
-"Grep"           // exact match
-"Write"          // exact match
-"WebFetch"       // exact match
-"*"              // matches every tool name
+"Web*"           // prefix glob: WebFetch and WebSearch
+"*"              // every tool, including tools with no capability
 ```
+
+Native tool names (`Grep`, `Edit`, `read_file`, `webfetch`, …) never match, and
+`agentperm validate` reports them as errors naming the capability to use. Native tools without a
+capability (subagents, todo lists, plan mode, …) reach no rule except `"*"`, so the host's own
+permission flow decides them. [Tool capabilities](capabilities.md#tool-capabilities) lists every
+native tool each agent maps.
 
 MCP tools use their own host-independent syntax; native host spellings do not belong in policy:
 
@@ -262,9 +276,11 @@ the tool pattern. `*` matches any number of characters within its server or tool
 `{a,b}` selects alternatives, and `\` escapes `.`, `*`, `{`, `}`, `,`, or `\`. Matching remains
 component-aware: a tool wildcard never crosses into a different server.
 
-#### `"<ToolName>(<specifier>)"` — named tool scoped by its input
+#### `"<Capability>(<specifier>)"` — capability scoped by its input
 
-An optional specifier in parentheses scopes the rule by the tool's input values (URLs, file paths, etc.). The name part still matches as above (exact / `*` / prefix glob); the specifier is then checked against the arguments. This works for any tool, not a fixed list.
+An optional specifier in parentheses scopes a capability rule by the tool's input values (URLs, file
+paths, etc.). The name still matches exactly, as `*`, or as a capability prefix glob; the specifier
+is then checked against the arguments.
 
 ```jsonc
 "WebFetch(domain:github.com)" // host is github.com or a subdomain (api.github.com)
@@ -274,7 +290,11 @@ An optional specifier in parentheses scopes the rule by the tool's input values 
 ```
 
 - **`domain:<host>`** — matches when a **URL field** of the tool input (`url`, `uri`, `href`) has a host equal to `<host>` or a subdomain of it (`github.com` matches `api.github.com`). Host comparison is case-, trailing-dot-, and IDNA-insensitive (Unicode and punycode forms are equivalent); malformed URLs simply don't match.
-- **any other specifier** — a glob matched against the tool's **path fields** (`path`, `file_path`, `paths`, `notebook_path`, `absolute_path`, …). `*` matches within a single path segment; `**` matches across `/` (`Read(/etc/**)` matches `/etc/ssl/cert.pem`, `Write(src/*)` does not match `src/sub/x`).
+- **any other specifier** — a glob matched against the **paths the tool targets**: its path fields (`path`, `file_path`, `filePath`, `paths`, `notebook_path`, `absolute_path`, and host-specific fields such as Gemini's `dir_path`). `*` matches within a single path segment; `**` matches across `/` (`Read(/etc/**)` matches `/etc/ssl/cert.pem`, `Write(src/*)` does not match `src/sub/x`).
+- **listing, search, and glob tools** target everything they can reach: listing `src` targets `src/*`, searching `src` targets `src/**` (the working directory when no root is given), and a glob targets its pattern beneath its root. `**` in such a target counts as two segments, so `Read(src/**)` covers a recursive search of `src` but `Read(src/*)` does not. A scoped deny matches only when the search target lies inside it: `deny Read(secrets/**)` blocks searching `secrets/`, not searching the repository that contains it.
+- **shell commands** are held to `Read` denies and asks for every path they name: explicitly pathed executables, operands, `--option=value` values, input redirects (`< file`), and string literals in inline programs (`python -c "open('x')"`). `~`, `$VAR`, globs, and directory changes are resolved conservatively across possible working directories, and a named directory counts as its whole tree. `deny Read(secrets/**)` therefore denies `cat secrets/key`, `cd secrets && cat key`, `cd missing || cat secrets/key`, and `./secrets/script`. `Read` allows never approve a shell command; `Shell(...)` rules do. Paths a program computes at runtime cannot be seen.
+- If conservative directory or target expansion exceeds the analysis budget, the command asks instead of
+  consuming unbounded hook resources or allowing incomplete analysis.
 - **`*` or empty** — matches the tool regardless of input (so `Read(*)` and `Read` are equivalent).
 
 Matching is **keyed by field name**, so a specifier only ever checks the authoritative field — `WebFetch(domain:github.com)` will not be satisfied by a `github.com` URL that happens to appear in a `prompt`, and `Write(src/**)` will not be satisfied by path-like text in `old_string`. Adapters that don't surface those fields only match the name-only forms.
@@ -288,31 +308,15 @@ filesystem-wide. Relative request targets still resolve from the hook cwd. `.`/`
 existing symlinks are resolved before matching, so lexical aliases and their destinations cannot
 bypass a deny.
 
-`Write` is a semantic capability, not a literal host tool name. Every native operation that
-creates, overwrites, edits, deletes, or moves a file is evaluated as `Write` on that path:
-
-| Native operation | Semantic request |
-|---|---|
-| Claude Edit / MultiEdit / Write | `Write` |
-| Claude NotebookEdit | `Write` (on `notebook_path`) |
-| Codex or OpenCode patch add/update/delete | `Write` |
-| Codex or OpenCode patch move | source `Write` + destination `Write` |
-| OpenCode edit/write | `Write` |
-| Gemini replace/write_file | `Write` |
-| Kiro write aliases | `Write` |
+Every native operation that creates, overwrites, edits, deletes, or moves a file is evaluated as
+`Write` on that path; a patch move is a `Write` on both the source and the destination.
 
 Patch operations are collected into one `CompoundRequest`; the strictest file verdict wins. A
 mutation patch with an invalid envelope, unknown marker, empty target, invalid move, or no file
 operation becomes a rejected request and is denied.
 
-`Edit(...)` is a deprecated alias for `Write(...)`. It still parses and is evaluated as the same
-rule, `import` and `init` write it back as `Write(...)`, and `agentperm validate` warns with the
-exact replacement. Consequences: an `allow Edit(src/**)` also allows creating files under `src/`;
-when a file lists both spellings for one path they are one rule and the first-listed `reason`
-wins; a `deny` on either spelling always beats an `allow` on the other.
-
 These rules cover native agent file tools, not writes hidden inside arbitrary shell commands. See
-the [capability matrix](capabilities.md#semantic-file-operations) for per-agent coverage.
+the [capability matrix](capabilities.md#tool-capabilities) for per-agent coverage.
 
 ### Dict rules
 
@@ -405,7 +409,7 @@ See [Architecture: Inert command names](architecture.md#inert-command-names) for
     "allow": [
       "Shell({cat,echo,grep,head,ls,rg,tail,wc,which})",
       "Shell(git {status,diff,log,show})",
-      "Read", "Glob", "Grep"
+      "Read"
     ]
   }
 }
@@ -584,6 +588,11 @@ When multiple allow rules match the same command (e.g. a broad `Shell({echo,ls})
 - **OpenCode:** reads `~/.config/opencode/opencode.json` (or `.jsonc`), parses `permission` blocks; flattened MCP keys remain unimported because import lacks the runtime server metadata needed to separate them safely.
 - **Gemini CLI:** no import yet — Gemini's policy DSL is regex-only and round-tripping safely needs more work.
 - **Kiro:** reads `~/.kiro/agents/*.json`, importing named tools, canonical `MCP(server.tool)` rules, and simple shell command patterns.
+
+Native tool rules are imported as their capability (Claude `Grep(src/**)` becomes
+`Read(src/**)`, OpenCode `edit` becomes `Write`, Kiro `fs_*` becomes `Read` and `Write`); rules for
+native tools without a capability, such as subagents or OpenCode's `external_directory`, are
+skipped.
 
 Imports are additive: existing rules in the policy file are kept, new rules are appended in the
 form produced by the native adapter. Import does not migrate existing `Bash(...)` rules to
