@@ -33,10 +33,8 @@ def shell_read_targets(pipeline: Pipeline, cwd: Path) -> tuple[str, ...] | None:
     targets: list[str] = []
     directories = (cwd,)
     for segment in pipeline.segments:
-        if not segment.argv:
-            continue
         operands = _operands(segment)
-        command = basename(segment.argv[0])
+        command = basename(segment.argv[0]) if segment.argv else None
         if command in _DIR_CHANGERS and len(operands) == 1:
             changed = (_resolve(operands[0], directory) for directory in directories)
             # Static analysis cannot know whether a directory change will run or
@@ -50,7 +48,7 @@ def shell_read_targets(pipeline: Pipeline, cwd: Path) -> tuple[str, ...] | None:
         for directory in directories:
             if command in _CWD_READERS:
                 targets.append(f"{directory}/**")
-            if "/" in segment.argv[0]:
+            if segment.argv and "/" in segment.argv[0]:
                 targets.extend(_expand(segment.argv[0], directory))
             for operand in operands:
                 targets.extend(_expand(operand, directory))

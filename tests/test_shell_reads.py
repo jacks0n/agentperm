@@ -10,7 +10,7 @@ import pytest
 from agentperm import POLICY_FILENAME, Decision, ShellRequest, main, parse_pipeline
 from agentperm.scoped_policy import decide_with_discovered_policy
 
-_SHELL = "Shell({cat,cd,find,git,grep,head,ls,rg,sed,xargs,echo,bash})"
+_SHELL = "Shell({cat,cd,find,git,grep,head,ls,rg,sed,xargs,echo,printf,bash})"
 
 
 @pytest.fixture
@@ -58,6 +58,7 @@ def _decide(command: str, cwd: Path) -> Decision:
         "ls secret",
         "python3 -c \"print(open('secret/key.txt').read())\"",
         "node -e 'require(\"fs\").readFileSync(\"secret/key.txt\")'",
+        'printf "%s" "$(<secret/key.txt)"',
     ],
 )
 def test_shell_command_naming_a_denied_path_is_denied(project: Path, command: str) -> None:

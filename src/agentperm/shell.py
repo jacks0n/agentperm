@@ -158,6 +158,17 @@ def _extract_segments(node: Node, source: bytes) -> Iterator[Segment]:
     if node.type == "redirected_statement":
         yield from _build_redirected_segment(node, source)
         return
+    if node.type == "file_redirect":
+        # Bash permits a redirect without an external command. Most notably,
+        # ``$(<file)`` is its optimized file-read substitution and tree-sitter
+        # exposes the redirect directly beneath ``command_substitution``.
+        redirect, extras, substitutions = _build_redirect(node, source)
+        if extras:
+            raise UnsupportedShellError("redirection-only statement contains positional words")
+        if redirect is not None:
+            yield Segment((), (redirect,))
+        yield from substitutions
+        return
     if node.type == "pipeline":
         groups = tuple(tuple(_extract_segments(child, source)) for child in node.named_children)
         if groups and all(len(group) == 1 for group in groups):
@@ -397,7 +408,11 @@ def _build_redirected_segment(node: Node, source: bytes) -> Iterator[Segment]:
             continue
         raise UnsupportedShellError(f"unsupported redirected statement part {child.type!r}")
     if not inner_segments:
-        raise UnsupportedShellError("redirected statement missing command")
+        if spillover:
+            raise UnsupportedShellError("redirection-only statement contains positional words")
+        yield Segment((), tuple(redirects), stdin_source, stdin_dynamic)
+        yield from substitution_segments
+        return
     # Words after a ``shell -c "…"`` wrapper are the wrapper's positional params
     # ($0, $1, …), not argv of the unwrapped inner command — they vanish with the
     # discarded wrapper. Spillover only rejoins argv when the last segment is a

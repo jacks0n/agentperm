@@ -106,6 +106,15 @@ def test_command_substitution_extracts_inner_segments() -> None:
     assert [s.argv for s in pipeline.segments] == [("rm",), ("cat", "allowed")]
 
 
+def test_redirection_only_command_substitution_captures_file_read() -> None:
+    """Bash's ``$(<file)`` shorthand reads the file without invoking ``cat``."""
+    pipeline = parse_pipeline('printf "%s" "$(</tmp/result)"')
+    assert pipeline.parseable
+    assert [segment.argv for segment in pipeline.segments] == [("printf", "%s"), ()]
+    [redirect] = pipeline.segments[1].redirects
+    assert (redirect.op, redirect.target) == ("<", "/tmp/result")
+
+
 def test_env_assignment_prefix_stripped() -> None:
     """``FOO=bar BAZ=qux ls -la`` — leading environment assignments are skipped."""
     pipeline = parse_pipeline("FOO=bar BAZ=qux ls -la")

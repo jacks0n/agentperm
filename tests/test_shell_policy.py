@@ -186,6 +186,13 @@ def test_command_substitution_write_target_asks() -> None:
     assert "writes to" in verdict.rationale
 
 
+def test_redirection_only_write_asks() -> None:
+    """A statement need not invoke a command to create or truncate a file."""
+    verdict = _decide(Policy(), "> output.txt")
+    assert verdict.decision is Decision.Ask
+    assert "writes to" in verdict.rationale
+
+
 def test_deny_bites_through_substitution_nested_in_redirect_target() -> None:
     """``echo hi > out$(rm -rf /)`` — a denied command nested in a redirect target word."""
     assert _decide(_deny_rm(), "echo hi > out$(rm -rf /)").decision is Decision.Deny

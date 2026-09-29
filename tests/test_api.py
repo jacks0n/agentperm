@@ -102,6 +102,42 @@ def test_api_explain_returns_typed_verdict_segments_and_sources(
     assert all(isinstance(source.get("id"), str) for source in sources if isinstance(source, dict))
 
 
+def test_api_explain_identifies_redirection_only_file_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "repo"
+    home.mkdir()
+    cwd.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    status, response = _call_api(
+        {
+            "protocol_version": 1,
+            "operation": "explain",
+            "cwd": str(cwd),
+            "command": 'printf "%s" "$(</tmp/result)"',
+        },
+        monkeypatch,
+        capsys,
+    )
+
+    assert status == 0
+    result = response["result"]
+    assert isinstance(result, dict)
+    assert result["decision"] == "allow"
+    assert result["segments"] == [
+        {"command": "printf %s", "decision": "allow", "rationale": "inert shell builtin"},
+        {
+            "command": "</tmp/result",
+            "decision": "allow",
+            "rationale": "redirection-only shell statement",
+        },
+    ]
+
+
 def test_api_explain_includes_target_scoped_read_decisions_and_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
