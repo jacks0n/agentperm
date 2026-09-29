@@ -7,58 +7,13 @@ import re
 import urllib.parse
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from pathlib import Path
-from typing import TypeGuard
 
 from ..config import MAX_TOOL_ARGUMENT_NODES
 from ..config import POLICY_FILENAME as POLICY_FILENAME
-from ..errors import PolicyError
-
-# -----------------------------------------------------------------------------
-# JSON value model (system-boundary type)
-# -----------------------------------------------------------------------------
-
-type JsonScalar = str | int | float | bool | None
-# Sequence/Mapping (covariant) — so list[str] ⊆ JsonValue without dict-invariance grief.
-type JsonValue = JsonScalar | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
-type JsonObject = dict[str, JsonValue]
-type JsonArray = list[JsonValue]
-
-
-def _object_list(value: object) -> TypeGuard[list[object]]:
-    return isinstance(value, list)
-
-
-def _object_dict(value: object) -> TypeGuard[dict[object, object]]:
-    return isinstance(value, dict)
-
-
-def narrow_json(value: object) -> JsonValue:
-    """Convert untyped JSON output (json.load / pyjson5.decode) into a typed JsonValue.
-
-    Anything outside the JSON value set raises ``PolicyError`` — fail-loud at the boundary
-    so downstream code never sees ``object`` or ``Any``.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):  # check before int — bool is a subclass of int
-        return value
-    if isinstance(value, (str, int, float)):
-        return value
-    if _object_list(value):
-        return [narrow_json(v) for v in value]
-    if _object_dict(value):
-        result: JsonObject = {}
-        for k, v in value.items():
-            if not isinstance(k, str):
-                raise PolicyError(f"non-string JSON key: {k!r}")
-            result[k] = narrow_json(v)
-        return result
-    raise PolicyError(f"unsupported JSON value: {type(value).__name__}")
-
+from .json_value import JsonObject, object_dict, object_list
 
 # -----------------------------------------------------------------------------
 # Domain
@@ -705,11 +660,11 @@ def tool_arguments(value: object) -> ToolArguments:
         seen += 1
         if isinstance(node, str):
             out.append((key, node))
-        elif _object_dict(node):
+        elif object_dict(node):
             for sub_key, sub_value in node.items():
                 if isinstance(sub_key, str) and len(queue) < MAX_TOOL_ARGUMENT_NODES:
                     queue.append((sub_key, sub_value))
-        elif _object_list(node):
+        elif object_list(node):
             for item in node:
                 if len(queue) < MAX_TOOL_ARGUMENT_NODES:
                     queue.append((key, item))
