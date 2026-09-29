@@ -193,6 +193,14 @@ def test_redirection_only_write_asks() -> None:
     assert "writes to" in verdict.rationale
 
 
+def test_redirection_only_read_does_not_inherit_outer_command_allow() -> None:
+    """``$(<file)`` reads without a command and must not be laundered through ``printf``."""
+    policy = Policy(allow=(BashCommand(("printf",)),))
+    verdict = _decide(policy, 'printf "%s" "$(<secret/key)"')
+    assert verdict.decision is Decision.Ask
+    assert "unrecognized segment" in verdict.rationale
+
+
 def test_deny_bites_through_substitution_nested_in_redirect_target() -> None:
     """``echo hi > out$(rm -rf /)`` — a denied command nested in a redirect target word."""
     assert _decide(_deny_rm(), "echo hi > out$(rm -rf /)").decision is Decision.Deny

@@ -182,10 +182,6 @@ class Policy:
         from ..shellpattern import match_shell_pattern_details
 
         argv0 = basename(segment.argv[0]) if segment.argv else None
-        if not segment.argv:
-            # Redirect-only statements execute no command. Their filesystem
-            # effects are evaluated independently from ``segment.redirects``.
-            return Verdict(Decision.Allow, "redirection-only shell statement"), None
         if argv0 in _SYNTHETIC_INERT_MARKERS:
             return Verdict(Decision.Allow, "inert predicate"), None
         shell_verdict: Verdict | None = None
