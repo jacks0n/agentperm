@@ -182,6 +182,12 @@ class Policy:
         from ..shellpattern import match_shell_pattern_details
 
         argv0 = basename(segment.argv[0]) if segment.argv else None
+        if not segment.argv:
+            is_input = segment.stdin_source is not None or any(
+                redirect.op in {"<", "<>"} for redirect in segment.redirects
+            )
+            rationale = "commandless input redirection" if is_input else "commandless shell redirection"
+            return Verdict(Decision.NoOpinion, rationale), None
         if argv0 in _SYNTHETIC_INERT_MARKERS:
             return Verdict(Decision.Allow, "inert predicate"), None
         shell_verdict: Verdict | None = None

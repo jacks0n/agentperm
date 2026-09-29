@@ -198,7 +198,7 @@ def test_redirection_only_read_does_not_inherit_outer_command_allow() -> None:
     policy = Policy(allow=(BashCommand(("printf",)),))
     verdict = _decide(policy, 'printf "%s" "$(<secret/key)"')
     assert verdict.decision is Decision.Ask
-    assert "unrecognized segment" in verdict.rationale
+    assert verdict.rationale == "compound includes unrecognized segment: commandless input redirection"
 
 
 def test_deny_bites_through_substitution_nested_in_redirect_target() -> None:
