@@ -60,10 +60,10 @@ private struct ExplainView: View {
   @ObservedObject var model: AppModel
 
   var body: some View {
-    HSplitView {
-      inputPane.frame(
-        minWidth: 390, idealWidth: 440, maxHeight: .infinity, alignment: .top)
-      resultsPane.frame(minWidth: 520, maxHeight: .infinity)
+    VStack(spacing: 0) {
+      inputPane
+      Divider()
+      resultsPane.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
   }
 
