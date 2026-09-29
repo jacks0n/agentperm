@@ -14,6 +14,7 @@ from pathlib import Path
 from . import config
 from .adapters import ADAPTERS, ClaudeAdapter, select_adapter
 from .adapters.base import mcp_bypass_input
+from .api import run_api
 from .command_arguments import CommandArguments
 from .domain import (
     POLICY_FILENAME,
@@ -30,6 +31,7 @@ from .domain import (
     Verdict,
     narrow_json,
 )
+from .explanation import explain_shell_command
 from .fileio import atomic_write
 from .hook_passthrough import run_passthrough
 from .json_boundary import decode_json
@@ -44,7 +46,6 @@ from .policy import (
     load_policy_layer,
     load_template,
     merge_templates_into,
-    merged_policy,
     parse_policy_text,
     render_templates,
     resolve_policy_paths,
@@ -52,7 +53,6 @@ from .policy import (
     write_default_policy,
 )
 from .scoped_policy import decide_with_discovered_policy
-from .shell import parse_pipeline
 from .validate import validate_policy_file
 
 # -----------------------------------------------------------------------------
@@ -74,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentperm")
     parser.add_argument("--version", action="version", version=f"%(prog)s {_package_version()}")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("api", help="read one versioned JSON request from stdin and write one JSON response")
 
     install = sub.add_parser("install", help="wire the bridge into agent hook configs")
     install.add_argument(
@@ -190,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv, namespace=CommandArguments())
 
+    if args.command == "api":
+        return run_api()
     if args.command == "install":
         return _cmd_install(mode=args.mode, dry_run=args.dry_run)
     if args.command == "uninstall":
@@ -620,21 +624,16 @@ def _cmd_init(*, names: list[str], local: bool, output: str | None, list_templat
 def _cmd_why(*, command: str) -> int:
     cwd = Path.cwd()
     try:
-        policy = merged_policy(cwd=cwd)
+        explanation = explain_shell_command(command, cwd)
     except PolicyError as error:
         print(f"policy load failed: {error}", file=sys.stderr)
         return 2
-    request = ShellRequest(parse_pipeline(command), cwd=cwd)
-    verdict = decide_with_discovered_policy(request, cwd)
-    print(f"{verdict.decision.value} — {verdict.rationale or 'no rule matched'}")
-    segments = policy.decide_segments(request)
-    if len(segments) > 1:
-        for segment, segment_verdict in segments:
-            rendered = shlex.join(segment.argv)
-            print(f"  {rendered}  → {segment_verdict.decision.value} ({segment_verdict.rationale})")
-    paths = existing_policy_paths(cwd)
-    if paths:
-        print("policy files: " + ", ".join(str(path) for path in paths))
+    print(f"{explanation.decision.value} — {explanation.rationale or 'no rule matched'}")
+    if len(explanation.segments) > 1:
+        for segment in explanation.segments:
+            print(f"  {segment.command}  → {segment.decision.value} ({segment.rationale})")
+    if explanation.sources:
+        print("policy files: " + ", ".join(str(path) for path in explanation.sources))
     else:
         print("no policy files found — run `agentperm init` to create one")
     return 0

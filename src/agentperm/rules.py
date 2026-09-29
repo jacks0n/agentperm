@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import replace
 
@@ -26,6 +27,24 @@ def parse_rule(raw: JsonValue) -> Rule | None:
     if isinstance(raw, dict):
         return _parse_dict_rule(raw)
     return None
+
+
+def serialize_rule_value(raw: JsonValue) -> JsonValue:
+    """Parse a rule through the domain model and return its canonical JSON value."""
+    rule = parse_rule(raw)
+    if rule is None:
+        raise PolicyError(f"unparseable permission rule {json.dumps(raw)}")
+    return rule.serialize()
+
+
+def serialize_rule_json(raw: JsonValue) -> str:
+    """Serialize a rule as stable compact JSON for policy text and API clients."""
+    return json.dumps(
+        serialize_rule_value(raw),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _parse_string_rule(text: str) -> Rule | None:

@@ -136,6 +136,16 @@ class SqlRule(Rule):
     functions: SqlSelector | None = None
     rationale: str = field(default="", compare=False)
 
+    @property
+    def api_kind(self) -> str:
+        return "sql"
+
+    @property
+    def semantic_effect(self) -> str:
+        if self.effects is None or self.effects.mode is not SqlSelectorMode.Exclusive:
+            return "unknown"
+        return "read_only" if self.effects.patterns == (SqlEffect.Read.value,) else "mutating"
+
     def matches(self, facts: SqlFacts) -> bool:
         effect_values = tuple(effect.value for effect in sorted(facts.effects, key=lambda item: item.value))
         statement_values = tuple(statement.value for statement in facts.statements)

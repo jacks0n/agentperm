@@ -63,6 +63,23 @@ def _shell_read_restrictions(request: ShellRequest, cwd: Path) -> list[Verdict]:
     return restrictions
 
 
+def policy_layers_for_shell_request(request: ShellRequest, cwd: Path) -> tuple[PolicyLayer, ...]:
+    """Every layer consulted for a shell request, including path-scoped Read checks."""
+    layers = list(policy_layers(cwd=cwd))
+    if not request.pipeline.parseable:
+        return tuple(layers)
+    targets = shell_read_targets(request.pipeline, request.cwd or cwd)
+    if targets is None:
+        return tuple(layers)
+    layers_for = _directory_layers()
+    for target in targets:
+        for stack in _path_layer_stacks(target, cwd, layers_for):
+            for layer in stack:
+                if layer not in layers:
+                    layers.append(layer)
+    return tuple(layers)
+
+
 def _arguments_for_target(arguments: ToolArguments, target: tuple[str, str]) -> ToolArguments:
     """Keep non-path metadata while isolating one authoritative path target."""
     remaining = list(tool_path_arguments(arguments))
@@ -85,13 +102,21 @@ def _decide_path_target(
     cwd: Path,
     layers_for: Callable[..., tuple[PolicyLayer, ...]] = policy_layers,
 ) -> Verdict:
+    return aggregate([_decide_layers(layers, request) for layers in _path_layer_stacks(value, cwd, layers_for)])
+
+
+def _path_layer_stacks(
+    value: str,
+    cwd: Path,
+    layers_for: Callable[..., tuple[PolicyLayer, ...]],
+) -> tuple[tuple[PolicyLayer, ...], ...]:
     supplied = Path(value).expanduser()
     lexical = Path(os.path.abspath(supplied if supplied.is_absolute() else cwd / supplied))
     resolved = lexical.resolve(strict=False)
     stacks = [layers_for(lexical, preserve_symlinks=True)]
     if resolved != lexical:
         stacks.append(layers_for(resolved))
-    return aggregate([_decide_layers(layers, request) for layers in stacks])
+    return tuple(stacks)
 
 
 def _directory_layers() -> Callable[..., tuple[PolicyLayer, ...]]:

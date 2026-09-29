@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>bundleid</key>
+  <string>dev.agentperm.alfred.config</string>
+  <key>category</key>
+  <string>Developer Tools</string>
+  <key>connections</key>
+  <dict>
+    <key>1A1A1A1A-1111-4111-8111-111111111111</key>
+    <array>
+      <dict>
+        <key>destinationuid</key>
+        <string>3C3C3C3C-3333-4333-8333-333333333333</string>
+        <key>modifiers</key>
+        <integer>0</integer>
+        <key>modifiersubtext</key>
+        <string></string>
+        <key>vitoclose</key>
+        <false/>
+      </dict>
+    </array>
+    <key>2B2B2B2B-2222-4222-8222-222222222222</key>
+    <array>
+      <dict>
+        <key>destinationuid</key>
+        <string>3C3C3C3C-3333-4333-8333-333333333333</string>
+        <key>modifiers</key>
+        <integer>0</integer>
+        <key>modifiersubtext</key>
+        <string></string>
+        <key>vitoclose</key>
+        <false/>
+      </dict>
+    </array>
+  </dict>
+  <key>createdby</key>
+  <string>agentperm contributors</string>
+  <key>description</key>
+  <string>Configure and safely apply generalized read-only agentperm rules.</string>
+  <key>disabled</key>
+  <false/>
+  <key>name</key>
+  <string>Agentperm Config</string>
+  <key>objects</key>
+  <array>
+    <dict>
+      <key>config</key>
+      <dict>
+        <key>argumenttype</key>
+        <integer>1</integer>
+        <key>keyword</key>
+        <string>ap</string>
+        <key>script</key>
+        <string>./script-filter.sh "$1"</string>
+        <key>scriptargtype</key>
+        <integer>1</integer>
+        <key>scriptfile</key>
+        <string></string>
+        <key>subtext</key>
+        <string>Leave blank to configure the clipboard</string>
+        <key>text</key>
+        <string>Explain or configure command permissions</string>
+        <key>type</key>
+        <integer>0</integer>
+        <key>withspace</key>
+        <true/>
+      </dict>
+      <key>type</key>
+      <string>alfred.workflow.input.scriptfilter</string>
+      <key>uid</key>
+      <string>1A1A1A1A-1111-4111-8111-111111111111</string>
+      <key>version</key>
+      <integer>1</integer>
+    </dict>
+    <dict>
+      <key>config</key>
+      <dict>
+        <key>action</key>
+        <integer>0</integer>
+        <key>argument</key>
+        <integer>0</integer>
+        <key>hotkey</key>
+        <integer>0</integer>
+        <key>hotmod</key>
+        <integer>0</integer>
+        <key>leftcursor</key>
+        <false/>
+        <key>modsmode</key>
+        <integer>0</integer>
+      </dict>
+      <key>type</key>
+      <string>alfred.workflow.trigger.hotkey</string>
+      <key>uid</key>
+      <string>2B2B2B2B-2222-4222-8222-222222222222</string>
+      <key>version</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>config</key>
+      <dict>
+        <key>concurrently</key>
+        <true/>
+        <key>escaping</key>
+        <integer>102</integer>
+        <key>script</key>
+        <string>./launch.sh "$1"</string>
+        <key>scriptargtype</key>
+        <integer>1</integer>
+        <key>scriptfile</key>
+        <string></string>
+        <key>type</key>
+        <integer>0</integer>
+      </dict>
+      <key>type</key>
+      <string>alfred.workflow.action.script</string>
+      <key>uid</key>
+      <string>3C3C3C3C-3333-4333-8333-333333333333</string>
+      <key>version</key>
+      <integer>2</integer>
+    </dict>
+  </array>
+  <key>readme</key>
+  <string>Type `ap` and a command (or use the clipboard). Alfred immediately shows the global agentperm verdict. Choose Explain to compare global and repository policy contexts, or Propose Changes to ask Codex for a reviewed diff. Hold Command on Explain to jump directly to Propose Changes.</string>
+  <key>uidata</key>
+  <dict>
+    <key>1A1A1A1A-1111-4111-8111-111111111111</key>
+    <dict><key>xpos</key><integer>100</integer><key>ypos</key><integer>100</integer></dict>
+    <key>2B2B2B2B-2222-4222-8222-222222222222</key>
+    <dict><key>xpos</key><integer>100</integer><key>ypos</key><integer>230</integer></dict>
+    <key>3C3C3C3C-3333-4333-8333-333333333333</key>
+    <dict><key>xpos</key><integer>350</integer><key>ypos</key><integer>160</integer></dict>
+  </dict>
+  <key>version</key>
+  <string>0.1.0</string>
+</dict>
+</plist>

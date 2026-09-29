@@ -26,6 +26,10 @@ class McpToolRule(Rule):
     tool_pattern: str
     rationale: str = field(default="", compare=False)
 
+    @property
+    def api_kind(self) -> str:
+        return "mcp"
+
     def matches(self, server: str, tool: str) -> bool:
         from ..mcppattern import matches_identifier_pattern
 

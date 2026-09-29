@@ -1,0 +1,33 @@
+name: macOS app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: macos-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-26
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/macos/AgentpermConfig
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26.6
+        run: sudo xcode-select --switch /Applications/Xcode_26.6.app
+      - name: Lint
+        run: xcrun swift-format lint -r Sources Tests
+      - name: Test
+        run: swift test
+      - name: Build universal app
+        run: scripts/build-app.sh 0.0.0-ci
+      - name: Verify both architectures
+        run: |
+          file "dist/Agentperm Config.app/Contents/MacOS/AgentpermConfig" | grep -q arm64
+          file "dist/Agentperm Config.app/Contents/MacOS/AgentpermConfig" | grep -q x86_64

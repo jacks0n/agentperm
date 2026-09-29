@@ -6,7 +6,7 @@ Every agentperm command, its flags, and its exit codes. New here? Start with [ge
 agentperm <command> [args]
 ```
 
-Eight subcommands: `install`, `uninstall`, `import`, `init`, `validate`, `why`, `check`, `edit`.
+Nine subcommands: `api`, `install`, `uninstall`, `import`, `init`, `validate`, `why`, `check`, `edit`.
 Most are run at setup time; `check` is what the agent itself runs at decision time, and
 `validate` / `why` are for inspecting a policy after you change it.
 
@@ -169,6 +169,54 @@ policy files: /Users/you/.agent-permissions.jsonc
 Policy discovery runs from the current directory, exactly as `check` would for a command executed
 here. Exits 2 if a discovered policy file fails to load.
 
+## `api`
+
+Machine-readable local API for clients such as policy editors. It reads exactly one JSON object
+from stdin and writes exactly one JSON object to stdout:
+
+```sh
+printf '%s' '{"protocol_version":1,"operation":"explain","cwd":"/workspace/app","command":"git status"}' \
+  | agentperm api
+```
+
+Every response repeats the protocol version. Successes have this envelope:
+
+```json
+{"protocol_version":1,"ok":true,"result":{}}
+```
+
+Failures use `ok: false` and a stable error code, and exit 1:
+
+```json
+{"protocol_version":1,"ok":false,"error":{"code":"invalid_request","message":"cwd must be a non-empty string"}}
+```
+
+Protocol 1 supports:
+
+- `info` — no additional fields; returns the installed agentperm version and supported operations.
+- `explain` — requires `cwd` and `command`; returns the aggregate `decision` and `rationale`, typed
+  per-segment explanations, and every contributing policy source.
+- `sources` — requires `cwd`; returns discovered policy layers in merge order. Each layer contains
+  its root and recursively included sources in application order, plus backend-issued editable
+  targets (including a not-yet-created Git-root policy).
+- `rule.describe` — requires `value`, supplied as its native JSON string or object; returns the
+  canonical value, display form, rule kind, semantic effect, and valid policy decisions.
+- `policy.plan` — requires `contexts` and per-target permission edits. It returns an expiring plan
+  ID and exact unified diffs without changing policy files.
+- `policy.apply` — requires the reviewed `plan_id`. It compare-and-swaps every target, validates the
+  written policies, and returns a one-use `undo_id`.
+- `policy.undo` — requires that `undo_id` and restores the exact prior bytes if no target has changed
+  since application.
+
+Policy source objects contain a display `path` and an opaque deterministic `id`. Clients must retain
+the ID as an opaque value rather than deriving meaning from its current representation. Requests
+reject missing, mistyped, or unexpected fields. An unsupported protocol version fails explicitly;
+clients should negotiate with `info` rather than assuming a newer contract is compatible.
+
+Permission edit `rule` and `old_rule` fields are native JSON values. Their parsing,
+canonical serialization, decision constraints, and future schema evolution belong to agentperm;
+API clients must not parse rule DSLs or reconstruct policy documents.
+
 ## `check`
 
 Runtime decision endpoint. Reads the agent's hook payload from stdin, writes a verdict envelope to stdout. **You don't run this manually** — `install` wires it up. To ask "what would the policy decide?", use [`why`](#why).
@@ -276,7 +324,7 @@ After editing, run [`validate`](#validate) to catch typos before they cost you p
 | Code | Meaning |
 |---|---|
 | `0` | Normal completion. Adapters report policy verdicts through their native stdout envelopes. |
-| `1` | `validate` found errors, or `install`/`uninstall` failed for at least one adapter. |
+| `1` | `validate` found errors, `api` returned a structured error, or `install`/`uninstall` failed for at least one adapter. |
 | `2` | Usage/configuration error or `why` with an unloadable policy. |
 
 Hook adapters communicate decisions through stdout envelopes rather than process exit codes. See

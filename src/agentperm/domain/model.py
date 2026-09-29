@@ -209,6 +209,20 @@ class Rule(ABC):
 
     rationale: str
 
+    @property
+    def api_kind(self) -> str:
+        """Stable family label for schema-agnostic clients."""
+        return type(self).__name__.lower()
+
+    @property
+    def semantic_effect(self) -> str:
+        """Conservative effect classification; new rules default to unknown."""
+        return "unknown"
+
+    @property
+    def valid_decisions(self) -> tuple[str, ...]:
+        return ("allow", "ask", "deny")
+
     @abstractmethod
     def serialize(self) -> str | JsonObject: ...
 
@@ -234,6 +248,18 @@ class PythonReadonly(Rule):
 
     rationale: str = field(default="", compare=False)
 
+    @property
+    def api_kind(self) -> str:
+        return "python_readonly"
+
+    @property
+    def semantic_effect(self) -> str:
+        return "read_only"
+
+    @property
+    def valid_decisions(self) -> tuple[str, ...]:
+        return ("allow",)
+
     def serialize(self) -> str | JsonObject:
         return serialize_rule_metadata("Python(readonly)", self.rationale)
 
@@ -250,6 +276,10 @@ class BashCommand(Rule):
     prefix: tuple[str, ...]
     trailing_wildcard: bool = True
     rationale: str = field(default="", compare=False)
+
+    @property
+    def api_kind(self) -> str:
+        return "legacy_bash"
 
     def matches(self, segment: Segment) -> bool:
         if not self.prefix:
@@ -298,6 +328,10 @@ class BashOption(Rule):
     commands: frozenset[str]
     options: frozenset[str]
     rationale: str = field(default="", compare=False)
+
+    @property
+    def api_kind(self) -> str:
+        return "bash_option"
 
     def matches(self, segment: Segment) -> bool:
         if not segment.argv:
@@ -388,6 +422,10 @@ class ShellPattern(Rule):
     allow_paths: tuple[str, ...] = ()
     rationale: str = field(default="", compare=False)
 
+    @property
+    def api_kind(self) -> str:
+        return "shell"
+
     def __post_init__(self) -> None:
         if not self.raw or not self.path:
             raise ValueError("ShellPattern requires non-empty source and command path")
@@ -426,6 +464,10 @@ class PythonSqlPattern(Rule):
     keyword: str | None = None
     rationale: str = field(default="", compare=False)
 
+    @property
+    def api_kind(self) -> str:
+        return "python_sql_capture"
+
     def __post_init__(self) -> None:
         if (self.position is None) == (self.keyword is None):
             raise ValueError("PythonSqlPattern requires exactly one argument locator")
@@ -458,6 +500,18 @@ class NamedTool(Rule):
     name: str
     specifier: str | None = None
     rationale: str = field(default="", compare=False)
+
+    @property
+    def api_kind(self) -> str:
+        return "capability"
+
+    @property
+    def semantic_effect(self) -> str:
+        if self.name == "Write":
+            return "mutating"
+        if self.name in {"Read", "WebFetch", "WebSearch", "Knowledge"}:
+            return "read_only"
+        return "unknown"
 
     def matches(
         self,

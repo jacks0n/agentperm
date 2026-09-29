@@ -83,6 +83,20 @@ redirection values use the nearest configured value.
 Application-wide filenames, defaults, hook timeouts, caches, and analysis resource budgets live in
 `src/agentperm/config.py`; parser and protocol semantics remain with their owning modules.
 
+The local machine API is a versioned JSON boundary over the same rule types, canonical serializer,
+policy discovery, validation, and explanation services used by the human CLI. It exposes typed
+verdicts and opaque policy-source identities; clients transport rule values as arbitrary JSON and
+do not implement the policy schema. Rule families publish conservative effect metadata from the
+domain type itself, so a new type does not require a parallel API registry. Protocol-major changes
+are explicit, while additive result fields can evolve without requiring clients to understand the
+policy schema.
+
+Reviewable edits use a backend-issued, expiring plan. `policy.plan` resolves opaque target IDs,
+splices canonical rule values into JSON5 without rewriting untouched comments or formatting,
+validates the prospective documents, and stores their exact before/after bytes privately.
+`policy.apply` compare-and-swaps those reviewed bytes and returns a one-use undo plan;
+`policy.undo` restores the originals only if the applied files are still unchanged.
+
 ## Decision flow
 
 ```

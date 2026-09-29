@@ -8,7 +8,7 @@ Package layout:
     agentperm.policy    — file ↔ Policy, bundled templates
     agentperm.validate  — policy linting
     agentperm.adapters  — AgentAdapter ABC + Claude/Codex/Opencode/Gemini/Kiro
-    agentperm.cli       — install, uninstall, import, init, validate, why, check, edit
+    agentperm.cli       — api, install, uninstall, import, init, validate, why, check, edit
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ from .policy import (
     save_policy_file,
     write_default_policy,
 )
-from .rules import parse_rule
+from .rules import parse_rule, serialize_rule_json, serialize_rule_value
 from .shell import parse_pipeline
 from .sql import CapturedSql, SqlDialect, SqlDocumentFormat, SqlEffect, SqlPolicyService, SqlRequest, SqlRule
 from .validate import Finding, validate_policy_file, validate_policy_text
@@ -140,6 +140,8 @@ __all__ = [
     "render_templates",
     "resolve_policy_paths",
     "save_policy_file",
+    "serialize_rule_json",
+    "serialize_rule_value",
     "validate_policy_file",
     "validate_policy_text",
     "write_default_policy",

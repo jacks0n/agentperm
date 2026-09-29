@@ -111,6 +111,15 @@ Python 3.12+, macOS or Linux. Native agent settings stay in place; agentperm add
 front of them. `agentperm uninstall` removes only what `install` wrote. Full walkthrough:
 [Getting started](docs/getting-started.md).
 
+### Agentperm Config for macOS
+
+The optional native [Agentperm Config app](apps/macos/AgentpermConfig) explains effective policy
+across repositories and turns pasted commands into reviewable multi-file proposals with Codex.
+Agentperm itself owns target discovery, rule serialization, JSON5-preserving diffs, validation,
+compare-and-swap apply, and undo through its versioned local JSON API. Tagged app releases publish
+a signed and notarized universal DMG; Alfred support adds a real script-filter workflow rather than
+embedding a personal hotkey.
+
 ## Why not native allowlists?
 
 | | Native allowlists · string/regex hooks | agentperm |
