@@ -127,18 +127,18 @@ def test_api_explain_identifies_redirection_only_file_read(
     assert status == 0
     result = response["result"]
     assert isinstance(result, dict)
-    assert result["decision"] == "allow"
+    assert result["decision"] == "ask"
     assert result["segments"] == [
         {"command": "printf %s", "decision": "allow", "rationale": "inert shell builtin"},
         {
             "command": "</tmp/result",
-            "decision": "allow",
-            "rationale": "redirection-only shell statement",
+            "decision": "no-opinion",
+            "rationale": "commandless input redirection",
         },
     ]
 
 
-def test_api_explain_includes_target_scoped_read_decisions_and_sources(
+def test_api_explain_uses_shell_cwd_policy_and_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -171,9 +171,9 @@ def test_api_explain_includes_target_scoped_read_decisions_and_sources(
     assert status == 0
     result = response["result"]
     assert isinstance(result, dict)
-    assert result["decision"] == "deny"
-    assert [text_at(segment, "decision") for segment in array_at(result, "segments")] == ["deny"]
-    assert str(protected_policy) in [
+    assert result["decision"] == "allow"
+    assert [text_at(segment, "decision") for segment in array_at(result, "segments")] == ["allow"]
+    assert str(protected_policy) not in [
         text_at(source, "path") for source in array_at(result, "sources")
     ]
 

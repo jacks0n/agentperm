@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
 from pathlib import Path
 
 from .domain import (
-    Capability,
     CompoundRequest,
     Decision,
     Policy,
@@ -20,16 +18,12 @@ from .domain import (
     tool_path_arguments,
 )
 from .policy import PolicyLayer, merged_policy, policy_layers
-from .shell_reads import shell_read_targets
 
 
 def decide_with_discovered_policy(request: Request, cwd: Path) -> Verdict:
     """Decide a request using cwd policy or each file target's own ancestry."""
     if isinstance(request, CompoundRequest):
         return aggregate([decide_with_discovered_policy(part, cwd) for part in request.requests])
-    if isinstance(request, ShellRequest) and request.pipeline.parseable:
-        verdict = merged_policy(cwd=cwd).decide(request)
-        return aggregate([verdict, *_shell_read_restrictions(request, cwd)])
     if not isinstance(request, ToolRequest):
         return merged_policy(cwd=cwd).decide(request)
 
@@ -48,36 +42,9 @@ def decide_with_discovered_policy(request: Request, cwd: Path) -> Verdict:
     return aggregate(verdicts)
 
 
-def _shell_read_restrictions(request: ShellRequest, cwd: Path) -> list[Verdict]:
-    """Deny/Ask verdicts of ``Read`` rules for each path the shell command names."""
-    restrictions: list[Verdict] = []
-    layers_for = _directory_layers()
-    targets = shell_read_targets(request.pipeline, request.cwd or cwd)
-    if targets is None:
-        return [Verdict(Decision.Ask, "shell read analysis exceeded its safe path limit")]
-    for target in targets:
-        read = ToolRequest(Capability.Read, (("path", target),), request.cwd)
-        verdict = _decide_path_target(read, target, cwd, layers_for)
-        if verdict.decision in (Decision.Deny, Decision.Ask):
-            restrictions.append(verdict)
-    return restrictions
-
-
-def policy_layers_for_shell_request(request: ShellRequest, cwd: Path) -> tuple[PolicyLayer, ...]:
-    """Every layer consulted for a shell request, including path-scoped Read checks."""
-    layers = list(policy_layers(cwd=cwd))
-    if not request.pipeline.parseable:
-        return tuple(layers)
-    targets = shell_read_targets(request.pipeline, request.cwd or cwd)
-    if targets is None:
-        return tuple(layers)
-    layers_for = _directory_layers()
-    for target in targets:
-        for stack in _path_layer_stacks(target, cwd, layers_for):
-            for layer in stack:
-                if layer not in layers:
-                    layers.append(layer)
-    return tuple(layers)
+def policy_layers_for_shell_request(_request: ShellRequest, cwd: Path) -> tuple[PolicyLayer, ...]:
+    """Every policy layer consulted for a shell request."""
+    return policy_layers(cwd=cwd)
 
 
 def _arguments_for_target(arguments: ToolArguments, target: tuple[str, str]) -> ToolArguments:
@@ -100,37 +67,14 @@ def _decide_path_target(
     request: ToolRequest,
     value: str,
     cwd: Path,
-    layers_for: Callable[..., tuple[PolicyLayer, ...]] = policy_layers,
 ) -> Verdict:
-    return aggregate([_decide_layers(layers, request) for layers in _path_layer_stacks(value, cwd, layers_for)])
-
-
-def _path_layer_stacks(
-    value: str,
-    cwd: Path,
-    layers_for: Callable[..., tuple[PolicyLayer, ...]],
-) -> tuple[tuple[PolicyLayer, ...], ...]:
     supplied = Path(value).expanduser()
     lexical = Path(os.path.abspath(supplied if supplied.is_absolute() else cwd / supplied))
     resolved = lexical.resolve(strict=False)
-    stacks = [layers_for(lexical, preserve_symlinks=True)]
+    stacks = [policy_layers(lexical, preserve_symlinks=True)]
     if resolved != lexical:
-        stacks.append(layers_for(resolved))
-    return tuple(stacks)
-
-
-def _directory_layers() -> Callable[..., tuple[PolicyLayer, ...]]:
-    """``policy_layers`` memoised by directory: files in one directory share its policy ancestry."""
-    cache: dict[tuple[Path, bool], tuple[PolicyLayer, ...]] = {}
-
-    def layers_for(path: Path, *, preserve_symlinks: bool = False) -> tuple[PolicyLayer, ...]:
-        directory = path if path.is_dir() else path.parent
-        key = (directory, preserve_symlinks)
-        if key not in cache:
-            cache[key] = policy_layers(directory, preserve_symlinks=preserve_symlinks)
-        return cache[key]
-
-    return layers_for
+        stacks.append(policy_layers(resolved))
+    return aggregate([_decide_layers(layers, request) for layers in stacks])
 
 
 def _decide_layers(layers: tuple[PolicyLayer, ...], request: ToolRequest) -> Verdict:

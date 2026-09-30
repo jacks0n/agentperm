@@ -35,6 +35,23 @@ def _write_request(target: Path, cwd: Path) -> ToolRequest:
     return ToolRequest("Write", (("file_path", str(target)),), cwd=cwd)
 
 
+def test_shell_request_is_not_reinterpreted_as_a_scoped_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    project = home / "project"
+    _write_policy(project, deny=["Read(secret/**)"], allow=["Shell(grep *)"])
+    request = ShellRequest(
+        parse_pipeline(f"grep -E '{'x' * 256}' secret/key.txt"),
+        cwd=project,
+    )
+
+    verdict = decide_with_discovered_policy(request, project)
+
+    assert verdict.decision is Decision.Allow
+
+
 def test_parent_policy_double_star_covers_child_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

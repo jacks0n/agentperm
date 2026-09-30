@@ -10,7 +10,7 @@ not available from that host or adapter.
 
 | Capability | Claude Code | Codex CLI | OpenCode | Gemini CLI | Kiro |
 |---|---:|---:|---:|---:|---:|
-| Structural Shell rules | ✓ `Bash` | ✓ `Bash` | ✓ `bash` | ✓ shell tools | ✓ shell aliases |
+| Structural Shell rules | ✓ `Bash` | ◐ `Bash`; per-call workdir unavailable to hooks | ✓ `bash` | ✓ shell tools | ✓ shell aliases |
 | [Tool capabilities](#tool-capabilities) | ✓ | ◐ Codex text reads use its shell | ✓ | ✓ | ✓ CLI and IDE |
 | Canonical `MCP(server.tool)` rules | ✓ | ✓ | ✓ config-aware shim | ✓ | ✓ |
 | Scoped `Read` | ✓ | ◐ `view_image` and pre-0.129 file tools | ✓ | ✓ | ✓ |
@@ -28,6 +28,10 @@ that bypass the host hook system.
 
 Layered precedence means every Deny remains effective, while the nearest matching Ask/Allow wins;
 inside one file, Ask precedes Allow.
+
+Codex can execute a shell command in a per-call `workdir` while reporting only the turn/session cwd
+to hooks. Shell rules still match the command, but directory policy discovery cannot use the
+effective execution directory. See [Codex per-command working directories](adapters.md#per-command-working-directories).
 
 `Python(readonly)` is syntax-aware: it parses literal inline Python with the standard-library AST.
 SQL captures use SQLGlot plus explicit dialect policy and fail closed on opaque syntax. See
@@ -68,9 +72,9 @@ it. The table is `src/agentperm/domain/tools.py`; a test keeps this page in step
 
 PowerShell (Claude `PowerShell`, Kiro `execute_pwsh`/`executePwsh`) is never analysed as a POSIX
 shell command: it always asks. Since 0.129 Codex performs textual file reads, listing, and search
-through `exec_command`; `view_image` remains a native `Read` tool. On every agent, a shell command that names a path inside a `Read`
-deny or ask scope gets that verdict too, so `deny Read(secrets/**)` also stops `cat secrets/key`
-(see the [policy reference](policy-reference.md) for what counts as a named path).
+through `exec_command`; `view_image` remains a native `Read` tool. Shell commands remain `Shell`
+requests regardless of the programs or paths they contain; `Read` rules govern only structured
+native file tools.
 
 Scoped rules match each tool's own target: its path fields, the listed directory (`src/*`), the
 searched tree (`src/**`, or the working directory), or a glob's pattern beneath its root. Any
@@ -83,9 +87,9 @@ request and is denied. File paths are resolved from the hook cwd, normalized thr
 and resolved through existing symlinks. Agentperm discovers policy from every target's ancestry;
 relative scoped rules match from the directory containing their root policy.
 
-These capabilities cover native file tools, not writes hidden inside arbitrary shell commands.
-Shell redirects are governed separately by `shell.redirection`; programs that write internally must
-be constrained by their Shell rules or an external sandbox.
+These capabilities cover native file tools, not filesystem access performed by arbitrary shell
+commands. Shell redirects are governed separately by `shell.redirection`; programs that read or
+write files must be constrained by their Shell rules or an external sandbox.
 
 ## Installation and import details
 

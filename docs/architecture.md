@@ -72,9 +72,8 @@ adapter has decoded its own MCP name.
 
 `Policy` is `(deny, ask, allow)` plus feature-specific policy objects. Runtime discovery preserves
 each root policy as a layer with its directory anchor and included sources. Requests use cwd
-ancestry; path-bearing tools and shell paths checked by scoped `Read` rules also use each target
-ancestry. Relative path rules are matched from the layer anchor, while included fragments inherit
-their root layer's anchor. Deny
+ancestry; path-bearing structured tools also use each target ancestry. Relative path rules are
+matched from the layer anchor, while included fragments inherit their root layer's anchor. Deny
 rules union into a non-overridable floor. Ask and Allow retain layer order: the nearest layer is
 evaluated first, with Ask before Allow within that layer. A project Allow can therefore whitelist a
 global Ask, while no Allow can bypass any Deny. Python call decisions use the same model;

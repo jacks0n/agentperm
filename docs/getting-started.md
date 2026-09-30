@@ -96,7 +96,9 @@ Add rules to `allow`, `ask`, or `deny`. Within one file, Deny wins over Ask, whi
 
 `Write` is a semantic operation shared across agents: native edits, overwrites, notebook edits, and
 patch add/update/delete/move all map to it. The [capability matrix](capabilities.md) lists exact
-host mappings and limitations.
+host mappings and limitations. `Read` similarly governs structured native file tools; it does not
+reinterpret paths inside shell commands. Current Codex textual reads therefore need `Shell(...)`
+rules for the commands they run.
 
 Validate before returning to your agent:
 

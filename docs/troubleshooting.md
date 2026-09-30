@@ -63,7 +63,26 @@ Claude Code prompts on any `cd` to a path outside the agent's current working di
 - Launch the agent in the directory you want to work in, or
 - Use absolute paths instead of `cd`-then-relative-paths
 
-### 4. Bypass mode still prompts / still denies
+### 4. Codex runs in the repository but its local rule does not match
+
+Codex may start in a parent directory and run `exec_command` with a repository-specific `workdir`.
+The command runs in that repository, but current Codex hooks expose only the turn/session cwd, so
+Agentperm cannot load the repository's `.agent-permissions.jsonc` for the shell request. Diagnose
+the mismatch by running the exact command from both locations:
+
+```sh
+cd /path/to/session-cwd && agentperm why "the exact command"
+cd /path/to/effective-workdir && agentperm why "the exact command"
+```
+
+If only the second invocation allows it, launch Codex in that repository. Adding a broader global
+rule changes policy scope and is not an equivalent workaround. Structured edits remain target-aware
+when their hook payload names absolute edited paths; relative targets still resolve from the reported
+hook cwd. See
+[Codex per-command working directories](adapters.md#per-command-working-directories) for the upstream
+issues and compatibility implications.
+
+### 5. Bypass mode still prompts / still denies
 
 When Claude Code is in `bypassPermissions` mode, agentperm **defers entirely** — it emits an empty `{}` for every command and lets Claude handle it. It won't prompt and won't deny. If you're still seeing prompts or denials in bypass mode:
 - Claude's built-in cwd guard still fires (see above) — that's Claude, not agentperm
@@ -71,13 +90,13 @@ When Claude Code is in `bypassPermissions` mode, agentperm **defers entirely** �
 - The installed hook may be stale — confirm `agentperm --version` matches your checkout
 - If you *want* deny rules to keep biting while suppressing prompts, use [pane bypass](cli.md#pane-bypass) instead of Claude's `bypassPermissions`
 
-### 5. Compound command escalation
+### 6. Compound command escalation
 
 `cat foo | weird_thing` is `Allow + NoOpinion`, which **aggregates to Ask**. This is intentional: if a compound has any unrecognized segment, agentperm surfaces a prompt rather than silently allowing the command. Either add a rule for the unknown segment, or run the segments separately.
 
 `agentperm why "cat foo | weird_thing"` shows exactly this: the known segment allows, the unknown one is `no-opinion`, and the aggregate rationale reads `"compound includes unrecognized segment: no rule matched 'weird_thing'"`.
 
-### 6. Rules on `[ … ]` test predicates aren't taking effect
+### 7. Rules on `[ … ]` test predicates aren't taking effect
 
 The synthetic predicate markers (`[`, `[[`, `((`) are parser artifacts, not real commands, so a `Bash([:*)` rule can't gate them — they are always allowed. This is intentional: `[ -f x ]` and `(( 1 + 1 ))` have no OS-level side effect.
 
@@ -85,7 +104,7 @@ Rules on the **real builtins** (`true`, `false`, `:`, `continue`, `read`, `echo`
 
 See [Policy reference: Inert command names](policy-reference.md#inert-command-names) for the full list and rationale.
 
-### 7. The policy file is broken
+### 8. The policy file is broken
 
 A parse error in any discovered `.agent-permissions.jsonc` causes agentperm to emit `Ask` for **every command**, with rationale `"policy load failed: ..."` naming the failing file. Lint your policies to find the problem:
 

@@ -52,7 +52,7 @@ HOOKS = (
     Hook("opencode", "tool.execute.before", "bash"),
 )
 
-REPORTED_READ_COMMANDS = (
+REPORTED_SHELL_COMMANDS = (
     (
         "sed-and-rg",
         "sed -n '540,595p' Cargo.toml; "
@@ -90,6 +90,10 @@ REPORTED_READ_COMMANDS = (
         'seed_data/report\\.json|db/seed_data/report" '
         "db tests scripts justfile .gitignore || true; "
         "sed -n '1,85p' db/README.md; sed -n '1,75p' db/seed_data/README.md",
+    ),
+    (
+        "long-grep-pattern",
+        f"cd /tmp && grep -rnE '{'x' * 256}' --exclude-dir=.git . | grep -v '^ignored$' | cut -c1-220",
     ),
 )
 
@@ -302,7 +306,9 @@ def _external_reason(result: HookResult) -> str:
     return str(output.get("reason", ""))
 
 
-@pytest.mark.parametrize(("_name", "command"), REPORTED_READ_COMMANDS, ids=[case[0] for case in REPORTED_READ_COMMANDS])
+@pytest.mark.parametrize(
+    ("_name", "command"), REPORTED_SHELL_COMMANDS, ids=[case[0] for case in REPORTED_SHELL_COMMANDS]
+)
 def test_reported_whitelisted_commands_are_allowed_by_every_agent(_name: str, command: str) -> None:
     """Every reported regression traverses the real executable and each agent protocol."""
     assert AGENTPERM.is_file(), f"console script is missing beside the test interpreter: {AGENTPERM}"

@@ -16,6 +16,14 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- A versioned `agentperm api` JSON protocol for policy discovery, explanation, rule description,
+  lossless multi-file planning, compare-and-swap application, rollback, and undo. Schema-agnostic
+  clients reuse agentperm's authoritative rule parser and serializer instead of duplicating policy
+  types.
+- Agentperm Config, a native macOS app for explaining effective policy and reviewing Codex-assisted
+  configuration proposals before atomic application. It includes configurable workflows and
+  repository roots, exact multi-policy diffs, revision feedback, a meaningful optional Alfred
+  workflow, and signed/notarized universal-app release automation.
 - Canonical `MCP(server.tool-pattern)` permission rules across Claude Code, Codex CLI, OpenCode,
   Gemini CLI, and Kiro. MCP identities are decoded by each host adapter and matched as separate
   server/tool components with arbitrary `*` globs, `{a,b}` alternatives, and escaping. Claude and
@@ -55,18 +63,14 @@ Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Scoped `Read` rules match what listing, search, and glob tools can reach (`src/*`, `src/**`, or a
   glob's pattern beneath its root) instead of only their literal path fields, so Gemini's
   `dir_path` and glob patterns are scoped too.
+- `Read` rules govern structured native file tools only. Shell calls remain `Shell` requests even
+  when they run file-reading programs; current Codex textual reads therefore use `Shell(...)`
+  rules rather than inferred file targets.
 - Documentation now states the built-in `bash`/`sh`/`zsh -c` contract, including supported flag
   forms, Bash-compatible inner syntax, positional parameters, and fail-closed cases.
 
 ### Fixed
 
-- `Read` denies and asks can no longer be bypassed through the shell: every path a shell command
-  names (explicitly pathed executables, operands, `--option=value` values, input redirects, and
-  string literals in inline programs) is checked against `Read` rules from the path's own policy
-  ancestry after `~`, `$VAR`, glob, and conservative `cd` resolution. Analysis budgets bound this
-  work and ask when exhaustive evaluation would be unsafe. This covers Codex's textual reads
-  through its shell. `Read` allows still never approve shell commands, and `agentperm why` now
-  reports the same verdict as the hook.
 - `Write` denies can no longer be bypassed through file tools that were previously passed through
   under their native names: OpenCode `multiedit` and pre-1.1 `patch`, and Kiro IDE `fs_append`,
   `str_replace`, `delete_file`, `edit_code`, `semantic_rename`, and `smart_relocate`. Kiro

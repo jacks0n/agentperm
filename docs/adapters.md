@@ -64,6 +64,28 @@ Under Codex full-auto/YOLO (`approval_policy=never`), `PermissionRequest` is ski
 payload reports `permission_mode: "bypassPermissions"`, but `PreToolUse` still runs and Agentperm
 continues to enforce hard denies. The similarly named Claude mode has deliberately different semantics.
 
+### Per-command working directories
+
+Codex execution tools can honor a per-call `workdir`, but current `PreToolUse` and
+`PermissionRequest` payloads report the turn/session directory as top-level `cwd` and reduce Bash
+`tool_input` to `{ "command": ... }`. Agentperm therefore cannot see the effective execution
+directory. If Codex starts in `/code` and runs `just check` with `workdir: "/code/project"`,
+Agentperm loads shell policy through `/code`, not `/code/project`; a rule that exists only in
+`/code/project/.agent-permissions.jsonc` cannot approve or deny that shell request.
+
+Structured file operations with absolute target paths remain target-aware: Agentperm discovers
+policy from each target's ancestry. Relative file targets still resolve from the reported hook cwd.
+The limitation also affects shell reads and mutations whenever their applicable policy exists only
+beneath the effective workdir.
+
+The upstream gaps are tracked for
+[`PreToolUse`](https://github.com/openai/codex/issues/32360) and
+[`PermissionRequest`](https://github.com/openai/codex/issues/48064). Until Codex supplies a stable,
+host-resolved execution directory, start Codex in the repository whose shell policy should apply.
+An upstream change that makes top-level `cwd` the effective execution directory will work without
+an Agentperm change. An additive field such as the proposed `tool_cwd` or a nested execution-context
+`cwd` will require Agentperm to adopt that field before repository policy discovery can use it.
+
 ### Pass-through to other PermissionRequest integrations
 
 Codex starts separate matching synchronous handlers for one event concurrently. Consequently, an
